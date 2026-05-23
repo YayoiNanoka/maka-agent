@@ -5640,13 +5640,18 @@ button:active {
     box-shadow 160ms ease;
 }
 
-.providerMarketGrid .providerCatalogCard:hover {
+/* PR-UI-PROV-POLISH fixup v3 (@xuan source-gate msg d2fdec44):
+ * Older PR-UI-1 rules also need the disabled guard so the
+ * grep-level gate ("any providerCatalogCard hover/active rule that
+ * applies actionable affordance must exclude disabled cards") holds
+ * file-wide, not just for the new LAYOUT-15 rules above. */
+.providerMarketGrid .providerCatalogCard:hover:not([data-disabled="true"]) {
   transform: translateY(-1px);
   border-color: oklch(from var(--accent) l c h / 0.2);
   box-shadow: 0 12px 28px oklch(0.35 0.02 90 / 0.08);
 }
 
-.providerCatalogCard:active {
+.providerCatalogCard:active:not([data-disabled="true"]) {
   transform: translateY(1px);
 }
 
