@@ -17,9 +17,11 @@
  *   - initial displayed count handles the three modes: snap=true,
  *     history hydration (streaming=false), live stream (streaming=true)
  *
- * The whole module is import-tested through the @maka/ui public API
- * so a future export break in `packages/ui/src/index.ts` shows up
- * here.
+ * Imported via the dedicated `@maka/ui/smooth-stream` subpath export so
+ * the node:test environment loads ONLY the pure-helper module — not the
+ * React-heavy `components.tsx` barrel. (@kenji review concern #1.) A
+ * future export break in either `packages/ui/package.json` exports map
+ * or `packages/ui/src/smooth-stream.ts` shows up here as a load error.
  */
 
 import { strict as assert } from 'node:assert';
@@ -30,7 +32,7 @@ import {
   segmentGraphemes,
   shouldSnapForBacklog,
   updateEma,
-} from '@maka/ui';
+} from '@maka/ui/smooth-stream';
 
 describe('segmentGraphemes', () => {
   it('returns [] for the empty string', () => {

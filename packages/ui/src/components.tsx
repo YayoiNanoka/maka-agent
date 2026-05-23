@@ -2213,8 +2213,25 @@ function ReasoningPanel(props: { text: string; live: boolean; truncated: boolean
     streaming: props.live,
     snap,
   });
+  // PR-UI-RENDER-1 @kenji review concern #4 — explicitly controlled
+  // open state. With a raw `open` JSX attribute, React's reconciler
+  // could re-assert the open state and undo the user's manual collapse
+  // on the next stream-driven re-render (the smoother re-renders at
+  // ~60Hz while the stream is live, so any reconciliation drift is
+  // immediately visible to the user). Owning the open state via
+  // useState + onToggle makes the panel uncontrolled-from-React's-view:
+  // the user's collapse sticks because we only write `open` from our
+  // own state, which we only mutate from the onToggle callback.
+  // Default-open at mount so users see the reasoning by default; first
+  // click toggles to closed and that sticks.
+  const [open, setOpen] = useState(true);
   return (
-    <details className="maka-reasoning-panel" data-live={props.live ? 'true' : undefined} open>
+    <details
+      className="maka-reasoning-panel"
+      data-live={props.live ? 'true' : undefined}
+      open={open}
+      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
+    >
       <summary className="maka-reasoning-panel-header">
         {props.live && <span className="maka-reasoning-panel-dot" aria-hidden="true" />}
         <span className="maka-reasoning-panel-label">
