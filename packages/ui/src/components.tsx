@@ -2410,7 +2410,7 @@ function ToolOutputStream(props: {
             <span
               className="maka-tool-output-stream-truncated-tag"
               data-truncated="true"
-              title="部分输出已截断；完整内容请通过工具栏「在 Finder 中打开」查看"
+              title="部分输出已截断；如需完整输出请查看对应工具结果或生成的 artifact"
             >
               已截断
             </span>
