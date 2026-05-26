@@ -320,8 +320,16 @@ describe('visual smoke fixture mode', () => {
         credentialStore: fakeCredentialStore(),
         now: 1_700_000_000_000,
       });
+      // PR-SIDEBAR-IA-0 Phase 3 P0 fixup v2 (kenji `08be08d8`): the
+      // fixture previously seeded a placeholder Chinese personal
+      // name as displayName, but that's confusing for both
+      // reviewers and any user who happened to open a demo
+      // workspace on top of their own. Default is now '' so the
+      // renderer fallback (`'你'`) is what shows. This assertion
+      // pins the empty string explicitly so a future patch that
+      // re-adds a demo name lands as a deliberate copy decision.
       const settings = JSON.parse(await readFile(join(workspaceRoot, 'settings.json'), 'utf8')) as { personalization: { displayName: string } };
-      assert.equal(settings.personalization.displayName, '建文');
+      assert.equal(settings.personalization.displayName, '');
       await assert.rejects(readFile(join(workspaceRoot, 'llm-connections.json'), 'utf8'), /ENOENT/);
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });

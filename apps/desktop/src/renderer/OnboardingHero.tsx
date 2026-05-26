@@ -46,7 +46,10 @@ const READY_HERO_COPY_BY_LOCALE: Record<UiLocale, {
 }> = {
   zh: {
     ariaLabel: '开始对话',
-    eyebrow: 'READY · 开始对话',
+    // PR-SIDEBAR-IA-0 Phase 3 P0 fixup v2 (kenji `08be08d8`):
+    // dropped the all-caps English prefix to match the Chinese-
+    // first surface; en-locale entry below stays all-English.
+    eyebrow: '准备就绪 · 开始对话',
     headline: '你已经配置好了 —— 直接说说你想做什么。',
     intro: '下面这个输入框会用默认模型开新会话；空提交也会打开一个空会话，方便你之后再输入。',
     quickChatPlaceholder: '给 Maka 发消息…',
@@ -147,7 +150,16 @@ function NeedsConnectionHero(props: { onOpenSettings: (section?: SettingsSection
       <header>
         <span className="maka-onboarding-eyebrow">
           <Sparkles size={12} strokeWidth={2} aria-hidden="true" />
-          <span>WELCOME TO MAKA</span>
+          {/*
+            PR-SIDEBAR-IA-0 Phase 3 P0 fixup v2 (kenji `08be08d8`):
+            replaced the previous all-caps English eyebrow with
+            the Chinese-first `欢迎使用 Maka` that matches every
+            other eyebrow in this surface (see
+            `onboarding-hero-copy.ts` line 61). The old version
+            was the lone outlier and looked like leftover
+            scaffolding.
+          */}
+          <span>欢迎使用 Maka</span>
         </span>
         <h1>把一个真实的 LLM 接进来，再开始第一条对话。</h1>
         <p>

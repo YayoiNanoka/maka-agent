@@ -1971,7 +1971,10 @@ const EMPTY_HERO_COPY_BY_LOCALE: Record<PromptSuggestionLocale, {
 }> = {
   zh: {
     ariaLabel: '开始对话',
-    eyebrow: 'READY · 想一起做点什么？',
+    // PR-SIDEBAR-IA-0 Phase 3 P0 fixup v2 (kenji `08be08d8` +
+    // `e2f932d7`): dropped the all-caps English prefix that read
+    // inconsistently against the rest of this Chinese-first surface.
+    eyebrow: '准备就绪 · 想一起做点什么？',
     greeting: {
       morning: '早上好',
       noon: '中午好',
@@ -2197,7 +2200,7 @@ function messageRoleLabel(role: string, userLabel?: string): string {
 /**
  * Initial-glyph derivation for the message avatar. Uses the first non-ASCII
  * codepoint or first ASCII letter so a userLabel like "JK" → "J", a Chinese
- * userLabel like "建文" → "建", an emoji name like "🦊 fox" → "🦊".
+ * Chinese userLabel like "用户" → "用", an emoji name like "🦊 fox" → "🦊".
  */
 function avatarInitial(label: string): string {
   const trimmed = label.trim();

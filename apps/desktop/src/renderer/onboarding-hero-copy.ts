@@ -92,7 +92,11 @@ export function getOnboardingHeroCopy(state: OnboardingState): OnboardingHeroCop
     case 'ready_empty':
       return {
         kind: state.kind,
-        eyebrow: 'READY · 开始对话',
+        // PR-SIDEBAR-IA-0 Phase 3 P0 fixup v2 (kenji `08be08d8`):
+        // dropped the all-caps English `READY` prefix — the rest
+        // of this enum is Chinese-only. The eyebrow now reads
+        // `准备就绪 · 开始对话` to match the surrounding rhythm.
+        eyebrow: '准备就绪 · 开始对话',
         title: '你已经配置好了 —— 直接说说你想做什么。',
         body: '下面的输入框会用默认模型开新会话；空提交也会打开一个空会话，方便你之后再输入。',
         cta: { label: '开始对话', settingsSection: 'models' },
