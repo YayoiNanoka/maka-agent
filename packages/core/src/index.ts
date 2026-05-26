@@ -194,7 +194,7 @@ export {
   isHealthSignalStatus,
 } from './health.js';
 
-// search.ts (PR-SEARCH-0)
+// search.ts (PR-SEARCH-0 + PR-SEARCH-1.5)
 export type {
   SearchError,
   SearchErrorReason,
@@ -203,6 +203,7 @@ export type {
   SearchProviderKind,
   SearchRequest,
   SearchResult,
+  SearchResultTarget,
   SearchSourceKind,
   SearchSourceSnapshot,
   WebFetchRequest,
@@ -222,6 +223,19 @@ export {
   searchDomainMatches,
   stripSearchTrackingParams,
 } from './search.js';
+
+// incognito.ts (PR-INCOGNITO-0) — cross-lane privacy contract; no IPC/storage/UI.
+export type {
+  WorkspacePrivacyContext,
+  WorkspacePrivacyContextInvalidReason,
+  WorkspacePrivacyContextResult,
+} from './incognito.js';
+export {
+  WORKSPACE_PRIVACY_CONTEXT_INVALID_REASONS,
+  defaultWorkspacePrivacyContext,
+  isWorkspacePrivacyContext,
+  validateWorkspacePrivacyContext,
+} from './incognito.js';
 
 // memory.ts (PR-MEMORY-1) — core contract; no IPC/storage/embedding/UI.
 export type {
@@ -263,6 +277,43 @@ export {
   normalizeMemorySource,
   validateMemoryWriteRequest,
 } from './memory.js';
+
+// voice.ts (PR-VOICE-0) — core contract; no IPC/storage/provider/runtime/UI.
+export type {
+  VoiceCapabilitySnapshot,
+  VoiceCaptureCaps,
+  VoiceCaptureRequest,
+  VoiceInputMode,
+  VoiceNormalizeResult,
+  VoicePermissionStatus,
+  VoicePrivacyFlags,
+  VoiceReadinessReason,
+  VoiceSttProvider,
+  VoiceTranscriptPersistence,
+  VoiceTranscriptRequest,
+  VoiceTranscriptResult,
+  VoiceTranscriptSource,
+  VoiceTtsPolicy,
+  VoiceTtsProvider,
+  VoiceTtsRequest,
+} from './voice.js';
+export {
+  VOICE_MAX_AUDIO_BYTES,
+  VOICE_MAX_CAPTURE_DURATION_MS,
+  VOICE_MAX_CHANNELS,
+  VOICE_MAX_SAMPLE_RATE,
+  VOICE_MAX_TRANSCRIPT_CHARS,
+  VOICE_TTS_MAX_TEXT_CHARS,
+  defaultVoiceCapabilitySnapshot,
+  defaultVoiceCaptureCaps,
+  defaultVoicePrivacyFlags,
+  normalizeVoiceInputMode,
+  normalizeVoiceTranscriptText,
+  normalizeVoiceTtsPolicy,
+  validateVoiceCaptureRequest,
+  validateVoiceTranscriptResult,
+  validateVoiceTtsRequest,
+} from './voice.js';
 
 // backend-types.ts
 export type { BackendSendInput, PermissionDecision } from './backend-types.js';

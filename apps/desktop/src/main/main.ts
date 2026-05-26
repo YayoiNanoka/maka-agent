@@ -35,6 +35,8 @@ import type {
   UpdateAppSettingsInput,
   UsageRange,
 } from '@maka/core';
+import { runThreadSearch } from './search/thread-search.js';
+import { defaultWorkspacePrivacyContext } from '@maka/core/incognito';
 import type {
   PricingConfig,
   UsageGroupBy,
@@ -689,6 +691,36 @@ function registerIpc(): void {
   });
   ipcMain.handle('sessions:readMessages', (_event, sessionId: string) => runtime.getMessages(sessionId));
   ipcMain.handle('sessions:listTurns', (_event, sessionId: string) => runtime.listTurns(sessionId));
+  // PR-SEARCH-2: local thread search. Renderer-facing channel; the pure
+  // helper in `./search/thread-search.ts` enforces all gates (G1 snippet
+  // redaction, G2 fake-backend exclude, G4 caps, G5 case-fold + NFC,
+  // G9 tool_result scan cap, G10 system/meta exclusion). The helper
+  // receives the runtime via DI so unit tests stay Electron-agnostic.
+  // We deliberately do NOT log the request body — query text never enters
+  // telemetry.
+  ipcMain.handle('search:thread', async (_event, request: unknown) => {
+    // PR-SEARCH-2 review fixup (@xuan `2f1aba55`): pass `unknown`
+    // through to the helper, which runs an object-shape guard and
+    // returns an `invalid_query` error envelope for null / non-object
+    // / missing-field payloads. Never throws across the IPC boundary.
+    //
+    // PR-SEARCH-2.5 (@xuan `2c55b975`): wire `getPrivacyContext` to
+    // the main-authority workspace privacy state.
+    //
+    // **STUB ONLY** — currently returns `defaultWorkspacePrivacyContext()`
+    // which is always `{ incognitoActive: false }`. This is NOT a
+    // renderer payload and NOT a settings toggle. When the real
+    // workspace privacy authority lands (a future settings IPC or
+    // session-scoped flag), swap this lambda for the real main-owned
+    // source. The helper validates whatever shape is returned via
+    // `validateWorkspacePrivacyContext`, so a future drift in
+    // authority source is automatically fail-closed.
+    return runThreadSearch(request, {
+      listSessions: () => runtime.listSessions(),
+      readMessages: (sessionId: string) => runtime.getMessages(sessionId),
+      getPrivacyContext: async () => defaultWorkspacePrivacyContext(),
+    });
+  });
   ipcMain.handle('sessions:stop', (_event, sessionId: string) => runtime.stopSession(sessionId));
   ipcMain.handle('sessions:respondToPermission', (_event, sessionId: string, response) =>
     runtime.respondToPermission(sessionId, response),
