@@ -358,8 +358,27 @@ export class ClaudeSubscriptionService {
   }
 
   /**
-   * Logout: clear in-memory + delete token file (kenji `cf41871b`
-   * hard gate).
+   * Logout: clear in-memory + delete token file.
+   *
+   * **Local clear only** — remote OAuth revocation is NOT performed.
+   * Anthropic does not publicly expose an RFC 7009 revocation
+   * endpoint as of 2026-05-28; alma's `ld.logout`
+   * (`~/Downloads/alma-re/readable/main.js:16280-16295`) also only
+   * unlinks the local token file. Access tokens remain server-valid
+   * until natural expiry (~1 hour); refresh tokens remain valid
+   * until their TTL or until the user explicitly revokes them via
+   * the claude.ai account-side UI.
+   *
+   * If Anthropic ships a revocation endpoint, follow-up
+   * `PR-OAUTH-SUBSCRIPTION-LOGOUT-REVOKE-0` wires it; until then
+   * the gate doc records this as a known limitation
+   * (`notes/pr-oauth-subscription-0-gate.md` § "Logout revoke gate").
+   *
+   * What this method DOES:
+   *   - Delete token file (ENOENT is treated as success — already gone).
+   *   - Clear `cachedTokens`, `cachedProfile`, `cachedQuota`.
+   *   - Clear in-flight pending authorizations.
+   *   - Clear runtime diagnostic flags.
    */
   async logout(): Promise<SubscriptionActionResult> {
     this.cachedTokens = null;
