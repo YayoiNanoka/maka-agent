@@ -1730,6 +1730,10 @@ function AppShell(props: {
           onToastPositionChange={props.onToastPositionChange}
           onUserLabelChange={setUserLabel}
           requestedSection={settingsRequestedSection}
+          onOpenDailyReview={() => {
+            closeSettings();
+            setNavSelection({ section: 'daily-review' });
+          }}
         />
       )}
       {helpOpen && <KeyboardHelpModal onClose={closeHelp} />}

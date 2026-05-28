@@ -101,7 +101,7 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
   // Group 2: AI — 模型、使用、语音、回顾、网关
   { id: 'models', label: '模型', Icon: Cpu, enabled: true, group: 'AI' },
   { id: 'usage', label: '使用统计', Icon: BarChart3, enabled: true, group: 'AI' },
-  { id: 'daily-review', label: '每日回顾', Icon: CalendarDays, enabled: true, comingSoon: true, group: 'AI' },
+  { id: 'daily-review', label: '每日回顾', Icon: CalendarDays, enabled: true, group: 'AI' },
   { id: 'voice-models', label: '语音模型', Icon: Volume2, enabled: true, comingSoon: true, group: 'AI' },
   { id: 'open-gateway', label: '开放网关', Icon: Sparkles, enabled: true, comingSoon: true, group: 'AI' },
   // Group 3: 集成 — bot、搜索、网络
@@ -168,31 +168,6 @@ type ComingSoonCopy = {
 };
 
 const COMING_SOON_PAGES: Partial<Record<SettingsSection, ComingSoonCopy>> = {
-  'daily-review': {
-    Icon: CalendarDays,
-    headline: '每日回顾',
-    badge: 'V0.2 · opt-in · 本地汇总',
-    description:
-      '把当天的 Maka 会话、任务、工具调用本地聚合成一份精炼简报。整条管线默认关闭，上线后只读取 Maka 自己产生的数据。',
-    status: '当前尚未实现。V0.2 会以独立开关的形式上线，默认仍是关闭状态。',
-    willInclude: [
-      '把当天会话按时段 / 主题聚类，凸显已完成的决策与进展',
-      '汇总「使用统计」当天的 token / 费用，不重复算账',
-      '允许导出 Markdown / PDF，或推送到用户自配的 Telegram / 飞书 bot',
-      '生成简报时复用当前默认 provider 与代理设置，受权限策略约束',
-    ],
-    willNotDo: [
-      '不截屏、不监听键盘、不读取其他 App 的数据',
-      '不读取系统文件系统，只读取 Maka 自己的会话 JSONL',
-      '不向云端上传原始消息，只把生成简报所需的最小上下文交给所选模型',
-      '功能停止后不会偷偷继续聚合或保留临时索引',
-    ],
-    nextConfig: [
-      '未来在「每日回顾」内由用户显式选择运行节奏（每日 / 每周 / 每月）',
-      '选择用于摘要的模型 connection（建议本地 / 自部署模型）',
-      '可选：指定导出目录或推送 bot（Telegram / 飞书 webhook）',
-    ],
-  },
   'voice-models': {
     Icon: Volume2,
     headline: '语音模型',
@@ -327,6 +302,12 @@ export function SettingsModal(props: {
    * ⌘K → "网络" jumps straight to the section without an extra click.
    */
   requestedSection?: SettingsSection;
+  /**
+   * PR-DAILY-REVIEW-MVP-0 follow-up: navigate to the sidebar's
+   * Daily Review module. Optional so the settings page degrades
+   * gracefully when the shell does not provide the jump.
+   */
+  onOpenDailyReview?(): void;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   // Escape closes the modal, Tab/Shift+Tab cycles inside the dialog,
@@ -356,6 +337,7 @@ export function SettingsModal(props: {
           onToastPositionChange={props.onToastPositionChange}
           onUserLabelChange={props.onUserLabelChange}
           requestedSection={props.requestedSection}
+          onOpenDailyReview={props.onOpenDailyReview}
         />
       </div>
     </div>
@@ -375,6 +357,7 @@ function SettingsSurface(props: {
   onToastPositionChange(position: ToastPosition): void;
   onUserLabelChange?(label: string): void;
   requestedSection?: SettingsSection;
+  onOpenDailyReview?(): void;
 }) {
   const [section, setSection] = useState<SettingsSection>(() => props.requestedSection ?? readLastSettingsSection());
 
@@ -501,6 +484,7 @@ function SettingsSurface(props: {
               onThemeChange={props.onThemeChange}
               onDensityChange={props.onDensityChange}
               onToastPositionChange={props.onToastPositionChange}
+              onOpenDailyReview={props.onOpenDailyReview}
             />
           )}
         </div>
@@ -527,6 +511,7 @@ function SettingsPage(props: {
   onThemeChange(pref: ThemePreference): void;
   onDensityChange(density: UiDensity): void;
   onToastPositionChange(position: ToastPosition): void;
+  onOpenDailyReview?(): void;
 }) {
   switch (props.section) {
     case 'models':
@@ -597,6 +582,8 @@ function SettingsPage(props: {
       return <PermissionCenterPage />;
     case 'health':
       return <HealthCenterPage />;
+    case 'daily-review':
+      return <DailyReviewSettingsPage onOpenDailyReview={props.onOpenDailyReview} />;
     default: {
       const copy = COMING_SOON_PAGES[props.section];
       if (copy) {
@@ -752,6 +739,78 @@ function SettingsSkeleton() {
         <div className="maka-skeleton maka-skeleton-line" style={{ width: '48%' }} />
       </div>
     </div>
+  );
+}
+
+/**
+ * PR-DAILY-REVIEW-MVP-0 follow-up: Settings → 每日回顾 is no longer
+ * a Coming Soon page. The sidebar panel handles browsing/usage; this
+ * page summarizes what it does, the privacy boundary, and offers a
+ * one-click jump to the sidebar.
+ */
+function DailyReviewSettingsPage(props: { onOpenDailyReview?: () => void }) {
+  return (
+    <section className="settingsComingSoonPage" aria-label="每日回顾">
+      <header className="settingsComingSoonBanner" role="status">
+        <span className="settingsComingSoonBannerDot" aria-hidden="true" />
+        <strong>本地汇总 · 已上线</strong>
+        <span>读取本机 Maka 自己产生的会话与使用统计，不联网、不读其他 App 数据。</span>
+      </header>
+
+      <div className="settingsComingSoonHero">
+        <span className="settingsComingSoonIcon" aria-hidden="true">
+          <CalendarDays size={24} strokeWidth={1.5} />
+        </span>
+        <div>
+          <div className="settingsComingSoonHeroHeading">
+            <h3>每日回顾</h3>
+            <span className="settingsComingSoonBadge">V0.1 · 本地</span>
+          </div>
+          <p>
+            每日回顾会按你选择的日期，把当天的活跃会话、模型用量、工具调用聚合到一个面板里。
+            侧栏 "每日回顾" 入口可以左右切日，也可以点击会话直接打开。
+          </p>
+          {props.onOpenDailyReview && (
+            <button
+              type="button"
+              className="maka-button"
+              onClick={props.onOpenDailyReview}
+              style={{ marginTop: 8 }}
+            >
+              在侧栏打开每日回顾
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="settingsComingSoonHeroHeading">
+        <h3>当前包含</h3>
+      </div>
+      <ul className="settingsComingSoonList">
+        <li>对话数 / 请求数 / Token / 费用 / 错误数</li>
+        <li>当天活跃对话（点击可直接打开）</li>
+        <li>当天使用最频繁的模型 Top 8</li>
+        <li>当天调用最频繁的工具 Top 8</li>
+      </ul>
+
+      <div className="settingsComingSoonHeroHeading">
+        <h3>不会做的事</h3>
+      </div>
+      <ul className="settingsComingSoonList">
+        <li>不调用任何 LLM 生成摘要（V0.1 只是聚合数字，不向云端送内容）</li>
+        <li>不写入记忆系统，也不导出任何东西</li>
+        <li>不读取 Maka 工作区以外的文件</li>
+      </ul>
+
+      <div className="settingsComingSoonHeroHeading">
+        <h3>之后会加</h3>
+      </div>
+      <ul className="settingsComingSoonList">
+        <li>可选的 LLM 摘要 narrative（默认关闭、走当前默认 connection）</li>
+        <li>导出 Markdown / 推送到自配的 bot</li>
+        <li>每周 / 每月聚合视图</li>
+      </ul>
+    </section>
   );
 }
 
