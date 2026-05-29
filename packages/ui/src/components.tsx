@@ -5185,9 +5185,50 @@ function renderPermissionSummary(request: PermissionRequestEvent): ReactNode | u
         </>
       );
     }
+    case 'OfficeDocumentEdit': {
+      const path = typeof args.path === 'string' ? args.path : undefined;
+      const operation = typeof args.operation === 'string' ? args.operation : undefined;
+      if (!path || !operation) return undefined;
+      const target = typeof args.target === 'string' ? args.target : undefined;
+      const elementType = typeof args.elementType === 'string' ? args.elementType : undefined;
+      const index = typeof args.index === 'number' ? args.index : undefined;
+      const propsArg = args.props && typeof args.props === 'object' && !Array.isArray(args.props)
+        ? args.props as Record<string, unknown>
+        : {};
+      const propEntries = Object.entries(propsArg).slice(0, 6);
+      const hiddenProps = Math.max(0, Object.keys(propsArg).length - propEntries.length);
+      return (
+        <>
+          <p className="maka-permission-line">即将编辑 Office 文档：</p>
+          <p className="maka-permission-path"><code>{redactSecrets(path)}</code></p>
+          <p className="maka-permission-meta">
+            操作 <strong>{redactSecrets(operation)}</strong>
+            {target && <> · 目标 <code>{redactSecrets(target)}</code></>}
+            {elementType && <> · 元素 <code>{redactSecrets(elementType)}</code></>}
+            {index !== undefined && <> · 位置 <strong>{index}</strong></>}
+          </p>
+          {propEntries.length > 0 && (
+            <pre className="maka-code maka-permission-preview">
+              {propEntries.map(([key, value]) => `${redactSecrets(key)}=${permissionValuePreview(value)}`).join('\n')}
+              {hiddenProps > 0 && `\n… 另有 ${hiddenProps} 个属性`}
+            </pre>
+          )}
+        </>
+      );
+    }
     default:
       return undefined;
   }
+}
+
+function permissionValuePreview(value: unknown): string {
+  if (typeof value === 'string') {
+    const safe = redactSecrets(value);
+    return safe.length > 160 ? `${safe.slice(0, 160)}…` : safe;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return '不支持的属性值';
 }
 
 /**
