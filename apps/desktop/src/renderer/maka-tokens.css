@@ -1413,6 +1413,14 @@
       0 0 0 4px oklch(from var(--accent) l c h / 0.08),
       0 1px 3px oklch(from var(--foreground) l c h / 0.04);
   }
+  .maka-composer[data-drag-active="true"] .maka-composer-inner {
+    border-color: oklch(from var(--accent) l c h / 0.46);
+    background: oklch(from var(--accent) 0.98 calc(c * 0.20) h / 0.35);
+    box-shadow:
+      0 0 0 1px oklch(from var(--accent) l c h / 0.22),
+      0 0 0 4px oklch(from var(--accent) l c h / 0.08),
+      0 1px 3px oklch(from var(--foreground) l c h / 0.04);
+  }
   .maka-composer textarea {
     appearance: none;
     border: none;

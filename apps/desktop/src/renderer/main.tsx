@@ -1220,6 +1220,26 @@ function AppShell(props: {
     composerRef.current?.appendText(prompt);
   }
 
+  async function importDroppedTextFilesIntoComposer(files: File[]) {
+    if (files.length === 0) return;
+    try {
+      const payloads = await Promise.all(files.map(async (file) => ({
+        name: file.name,
+        size: file.size,
+        text: await file.text(),
+      })));
+      const result = await window.maka.context.importDroppedTextFiles(payloads);
+      if (!result.ok) {
+        toastApi.error('导入文本失败', result.message);
+        return;
+      }
+      toastApi.success('已导入文本文件', `${result.name}${result.truncated ? ' · 已截断' : ''}`);
+      composerRef.current?.appendText(result.prompt);
+    } catch (error) {
+      toastApi.error('导入文本失败', cleanErrorMessage(error));
+    }
+  }
+
   async function importFolderOutlinePrompt(): Promise<string | undefined> {
     const result = await window.maka.context.importFolderOutline();
     if (!result.ok) {
@@ -1976,6 +1996,7 @@ function AppShell(props: {
                 onSend={send}
                 onStop={stop}
                 onImportTextFile={importTextFileIntoComposer}
+                onImportDroppedTextFiles={importDroppedTextFilesIntoComposer}
                 onImportFolderOutline={importFolderOutlineIntoComposer}
               />
             </div>

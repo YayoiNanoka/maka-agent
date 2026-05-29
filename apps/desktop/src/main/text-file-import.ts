@@ -42,6 +42,12 @@ export type TextFileImportResult =
       reason: TextFileImportFailureReason;
     };
 
+export interface DroppedTextFilePayload {
+  name: string;
+  size: number;
+  text: string;
+}
+
 export type FolderOutlineImportFailureReason =
   | 'missing'
   | 'read-failed'
@@ -115,6 +121,57 @@ export async function readTextFilesForPromptImport(filePaths: string[]): Promise
   };
 }
 
+export function readDroppedTextFilesForPromptImport(payloads: DroppedTextFilePayload[]): TextFileImportResult {
+  const selected = payloads.filter((file) => file && typeof file.name === 'string');
+  if (selected.length === 0) return { ok: false, reason: 'missing' };
+  if (selected.length > MAX_IMPORTED_TEXT_FILE_COUNT) return { ok: false, reason: 'too-many-files' };
+
+  const loadedFiles = [];
+  for (const payload of selected) {
+    const loaded = loadDroppedTextFileForPromptImport(payload);
+    if (!loaded.ok) return loaded;
+    loadedFiles.push(loaded);
+  }
+
+  if (loadedFiles.length === 1) {
+    const [file] = loadedFiles;
+    return {
+      ok: true,
+      name: file.name,
+      bytes: file.bytes,
+      files: 1,
+      truncated: file.truncated,
+      prompt: formatImportedTextFilePrompt({ name: file.name, text: file.text, truncated: file.truncated }),
+    };
+  }
+
+  let remaining = MAX_IMPORTED_TEXT_FILES_CHARS;
+  let truncated = false;
+  const fragments: string[] = [];
+  for (const file of loadedFiles) {
+    const chars = Array.from(file.text);
+    const text = chars.length > remaining ? chars.slice(0, Math.max(0, remaining)).join('') : file.text;
+    remaining -= Array.from(text).length;
+    const fileTruncated = file.truncated || chars.length > Array.from(text).length;
+    truncated = truncated || fileTruncated || remaining <= 0;
+    fragments.push(formatImportedTextFileBlock({ name: file.name, text, truncated: fileTruncated }));
+    if (remaining <= 0) break;
+  }
+
+  return {
+    ok: true,
+    name: `${loadedFiles.length} 个文本文件`,
+    bytes: loadedFiles.reduce((sum, file) => sum + file.bytes, 0),
+    files: loadedFiles.length,
+    truncated,
+    prompt: formatImportedTextFilesPrompt({
+      count: loadedFiles.length,
+      fragments: fragments.join('\n\n'),
+      truncated,
+    }),
+  };
+}
+
 async function loadTextFileForPromptImport(filePath: string): Promise<
   | {
       ok: true;
@@ -159,6 +216,46 @@ async function loadTextFileForPromptImport(filePath: string): Promise<
     text,
     truncated,
   };
+}
+
+function loadDroppedTextFileForPromptImport(input: DroppedTextFilePayload):
+  | {
+      ok: true;
+      name: string;
+      bytes: number;
+      text: string;
+      truncated: boolean;
+    }
+  | {
+      ok: false;
+      reason: TextFileImportFailureReason;
+    } {
+  const bytes = Number.isFinite(input.size) ? Math.max(0, Math.floor(input.size)) : 0;
+  if (bytes > MAX_IMPORTED_TEXT_FILE_BYTES) return { ok: false, reason: 'too-large' };
+  const rawText = typeof input.text === 'string' ? input.text : '';
+  const raw = Buffer.from(rawText, 'utf8');
+  if (looksBinary(raw)) return { ok: false, reason: 'binary' };
+
+  const cleaned = rawText.replace(/\u0000/g, '').trim();
+  if (!cleaned) return { ok: false, reason: 'binary' };
+
+  const chars = Array.from(cleaned);
+  const truncated = chars.length > MAX_IMPORTED_TEXT_FILE_CHARS;
+  const text = truncated ? chars.slice(0, MAX_IMPORTED_TEXT_FILE_CHARS).join('') : cleaned;
+  const name = sanitizeDroppedFileName(input.name);
+  return {
+    ok: true,
+    name,
+    bytes,
+    text,
+    truncated,
+  };
+}
+
+function sanitizeDroppedFileName(name: string): string {
+  const leaf = basename(name).split(/[\\/]/).filter(Boolean).pop() ?? '';
+  const cleaned = leaf.replace(/[\u0000-\u001f]/g, '').trim();
+  return cleaned || 'dropped.txt';
 }
 
 export function formatImportedTextFilePrompt(input: { name: string; text: string; truncated: boolean }): string {

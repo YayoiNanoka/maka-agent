@@ -147,7 +147,9 @@ import { OpenGatewayService } from './open-gateway.js';
 import { LocalMemoryService } from './local-memory-service.js';
 import {
   readFolderOutlinesForPromptImport,
+  readDroppedTextFilesForPromptImport,
   readTextFilesForPromptImport,
+  type DroppedTextFilePayload,
   type FolderOutlineImportFailureReason,
   type TextFileImportFailureReason,
 } from './text-file-import.js';
@@ -820,6 +822,29 @@ function registerIpc(): void {
         return { ok: false, reason: 'cancelled', message: '已取消导入。' };
       }
       const imported = await readTextFilesForPromptImport(result.filePaths);
+      if (!imported.ok) {
+        return { ...imported, message: textFileImportFailureCopy(imported.reason) };
+      }
+      return imported;
+    },
+  );
+  ipcMain.handle(
+    'context:importDroppedTextFiles',
+    async (_event, payloads: unknown): Promise<
+      | { ok: true; name: string; bytes: number; files: number; truncated: boolean; prompt: string }
+      | { ok: false; reason: TextFileImportFailureReason; message: string }
+    > => {
+      const safePayloads: DroppedTextFilePayload[] = Array.isArray(payloads)
+        ? payloads.map((payload) => {
+            const value = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
+            return {
+              name: typeof value.name === 'string' ? value.name : '',
+              size: typeof value.size === 'number' ? value.size : 0,
+              text: typeof value.text === 'string' ? value.text : '',
+            };
+          })
+        : [];
+      const imported = readDroppedTextFilesForPromptImport(safePayloads);
       if (!imported.ok) {
         return { ...imported, message: textFileImportFailureCopy(imported.reason) };
       }

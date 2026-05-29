@@ -290,6 +290,9 @@ contextBridge.exposeInMainWorld('maka', {
     importTextFile(): Promise<TextFileImportResult> {
       return ipcRenderer.invoke('context:importTextFile');
     },
+    importDroppedTextFiles(files: Array<{ name: string; size: number; text: string }>): Promise<TextFileImportResult> {
+      return ipcRenderer.invoke('context:importDroppedTextFiles', files);
+    },
     importFolderOutline(): Promise<FolderOutlineImportResult> {
       return ipcRenderer.invoke('context:importFolderOutline');
     },

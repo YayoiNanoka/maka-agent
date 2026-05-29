@@ -1,4 +1,4 @@
-import React, { createContext, forwardRef, memo, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from 'react';
+import React, { createContext, forwardRef, memo, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from 'react';
 import {
   AlertOctagon,
   AlertTriangle,
@@ -4308,10 +4308,12 @@ export const Composer = forwardRef<
     onStop(): void;
     onImportTextFile?(): void;
     onImportFolderOutline?(): void;
+    onImportDroppedTextFiles?(files: File[]): void | Promise<void>;
   }
 >(function Composer(props, ref) {
   const formRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [dragActive, setDragActive] = useState(false);
   const draftStoreRef = useRef<Map<string, string>>(new Map());
   const activeDraftKeyRef = useRef<string | undefined>(props.draftKey);
   const promptHistoryRef = useRef<ComposerHistoryState>({ entries: [], index: -1, savedDraft: '' });
@@ -4471,10 +4473,48 @@ export const Composer = forwardRef<
     saveCurrentDraft();
   }
 
+  function canAcceptDroppedTextFiles(): boolean {
+    return Boolean(props.onImportDroppedTextFiles && !props.disabled && !props.streaming);
+  }
+
+  function hasDraggedFiles(event: DragEvent<HTMLFormElement>): boolean {
+    return Array.from(event.dataTransfer.types).includes('Files');
+  }
+
+  function onComposerDragOver(event: DragEvent<HTMLFormElement>) {
+    if (!canAcceptDroppedTextFiles() || !hasDraggedFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setDragActive(true);
+  }
+
+  function onComposerDragLeave(event: DragEvent<HTMLFormElement>) {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDragActive(false);
+  }
+
+  function onComposerDrop(event: DragEvent<HTMLFormElement>) {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    setDragActive(false);
+    if (!canAcceptDroppedTextFiles()) return;
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length === 0) return;
+    void props.onImportDroppedTextFiles?.(files);
+  }
+
   if (props.hidden) return null;
 
   return (
-    <form ref={formRef} className="maka-composer composer" onSubmit={submit}>
+    <form
+      ref={formRef}
+      className="maka-composer composer"
+      data-drag-active={dragActive ? 'true' : undefined}
+      onDragOver={onComposerDragOver}
+      onDragLeave={onComposerDragLeave}
+      onDrop={onComposerDrop}
+      onSubmit={submit}
+    >
       <div className="maka-composer-inner composerInner">
         <textarea
           ref={textareaRef}

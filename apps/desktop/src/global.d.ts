@@ -194,6 +194,7 @@ declare global {
       };
       context: {
         importTextFile(): Promise<TextFileImportResult>;
+        importDroppedTextFiles(files: Array<{ name: string; size: number; text: string }>): Promise<TextFileImportResult>;
         importFolderOutline(): Promise<FolderOutlineImportResult>;
       };
       search: {

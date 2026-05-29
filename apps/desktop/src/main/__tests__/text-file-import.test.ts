@@ -18,6 +18,7 @@ import {
   MAX_IMPORTED_FOLDER_COUNT,
   MAX_IMPORTED_FOLDERS_ENTRIES,
   formatImportedTextFilePrompt,
+  readDroppedTextFilesForPromptImport,
   readFolderOutlineForPromptImport,
   readFolderOutlinesForPromptImport,
   readTextFileForPromptImport,
@@ -133,6 +134,42 @@ describe('text file context import', () => {
     });
   });
 
+  it('formats dropped renderer text files through the same prompt boundary without paths', () => {
+    const result = readDroppedTextFilesForPromptImport([
+      { name: '/private/tmp/alpha.md', size: 12, text: '# Alpha\nfirst' },
+      { name: 'beta.json', size: 13, text: '{"beta":true}' },
+    ]);
+
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.files, 2);
+    assert.equal(result.name, '2 个文本文件');
+    assert.match(result.prompt, /<local-text-file name="alpha\.md">/);
+    assert.match(result.prompt, /<local-text-file name="beta\.json">/);
+    assert.doesNotMatch(result.prompt, /private\/tmp/);
+  });
+
+  it('rejects dropped oversize, empty, and too many text files', () => {
+    assert.deepEqual(
+      readDroppedTextFilesForPromptImport([{ name: 'huge.txt', size: MAX_IMPORTED_TEXT_FILE_BYTES + 1, text: 'x' }]),
+      { ok: false, reason: 'too-large' },
+    );
+    assert.deepEqual(
+      readDroppedTextFilesForPromptImport([{ name: 'empty.txt', size: 0, text: '' }]),
+      { ok: false, reason: 'binary' },
+    );
+    assert.deepEqual(
+      readDroppedTextFilesForPromptImport(
+        Array.from({ length: MAX_IMPORTED_TEXT_FILE_COUNT + 1 }, (_, index) => ({
+          name: `file-${index}.txt`,
+          size: 1,
+          text: 'x',
+        })),
+      ),
+      { ok: false, reason: 'too-many-files' },
+    );
+  });
+
   it('rejects oversize and binary-looking files', async () => {
     await withTempDir(async (root) => {
       const huge = join(root, 'huge.txt');
@@ -159,14 +196,22 @@ describe('text file context import', () => {
   it('wires the import action into both Composer and first-run Quick Chat', async () => {
     const mainSource = await readFile(join(process.cwd(), 'src/renderer/main.tsx'), 'utf8');
     const mainProcessSource = await readFile(join(process.cwd(), 'src/main/main.ts'), 'utf8');
+    const preloadSource = await readFile(join(process.cwd(), 'src/preload/preload.ts'), 'utf8');
+    const globalSource = await readFile(join(process.cwd(), 'src/global.d.ts'), 'utf8');
     const onboardingSource = await readFile(join(process.cwd(), 'src/renderer/OnboardingHero.tsx'), 'utf8');
     const uiSource = await readFile(join(process.cwd(), '../../packages/ui/src/components.tsx'), 'utf8');
+    const cssSource = await readFile(join(process.cwd(), 'src/renderer/maka-tokens.css'), 'utf8');
 
     assert.match(mainSource, /onImportTextFile=\{importTextFilePrompt\}/);
     assert.match(mainSource, /onImportTextFile=\{importTextFileIntoComposer\}/);
+    assert.match(mainSource, /onImportDroppedTextFiles=\{importDroppedTextFilesIntoComposer\}/);
+    assert.match(mainSource, /window\.maka\.context\.importDroppedTextFiles\(payloads\)/);
     assert.match(mainSource, /composerRef\.current\?\.appendText\(prompt\)/);
     assert.match(mainSource, /draftKey=\{activeId \?\? 'new-session'\}/);
     assert.match(mainProcessSource, /properties: \['openFile', 'multiSelections'\]/);
+    assert.match(mainProcessSource, /context:importDroppedTextFiles/);
+    assert.match(preloadSource, /importDroppedTextFiles/);
+    assert.match(globalSource, /importDroppedTextFiles/);
     assert.match(mainSource, /onImportFolderOutline=\{importFolderOutlinePrompt\}/);
     assert.match(mainSource, /onImportFolderOutline=\{importFolderOutlineIntoComposer\}/);
     assert.match(mainProcessSource, /properties: \['openDirectory', 'multiSelections'\]/);
@@ -175,6 +220,8 @@ describe('text file context import', () => {
     assert.match(onboardingSource, /appendPromptContextDraft\(current, prompt\)/);
     assert.match(uiSource, /aria-label="导入文本文件"/);
     assert.match(uiSource, /aria-label="导入文件夹目录"/);
+    assert.match(uiSource, /onDrop=\{onComposerDrop\}/);
+    assert.match(cssSource, /\.maka-composer\[data-drag-active="true"\]/);
     assert.match(uiSource, /rememberComposerDraft\(draftStoreRef\.current, previousKey/);
     assert.match(uiSource, /readComposerDraft\(draftStoreRef\.current, nextKey\)/);
     assert.match(uiSource, /rememberComposerHistoryEntry\(promptHistoryRef\.current\.entries, text\)/);
