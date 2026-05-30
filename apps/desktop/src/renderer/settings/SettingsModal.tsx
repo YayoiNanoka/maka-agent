@@ -2515,7 +2515,13 @@ function MemorySettingsPage(props: {
   }
 
   async function restoreLatestBackup() {
-    if (!confirm('恢复上一版会先备份当前 MEMORY.md，再用最近一次 .bak 覆盖当前文件。确认恢复吗？')) return;
+    const backup = state?.latestBackup;
+    if (!backup) {
+      toast.error('没有可恢复备份', '保存或重置 MEMORY.md 后才会生成上一版备份。');
+      return;
+    }
+    const backupLabel = `${localMemoryBackupKindLabel(backup.kind)} · ${new Date(backup.updatedAt).toLocaleString()}`;
+    if (!confirm(`恢复上一版会先备份当前 MEMORY.md，再用最近一次备份覆盖当前文件。\n\n将恢复：${backupLabel}\n\n确认恢复吗？`)) return;
     setBusy(true);
     try {
       const result = await window.maka.memory.restoreLatestBackup();
@@ -2523,7 +2529,7 @@ function MemorySettingsPage(props: {
       setDraft(result.state.content);
       setLastSaveSummary(null);
       if (result.ok) {
-        toast.success('已恢复上一版 MEMORY.md', '恢复前的当前文件已保存为 restore.bak。');
+        toast.success('已恢复上一版 MEMORY.md', `${backupLabel}；恢复前的当前文件已保存为 restore.bak。`);
       } else {
         toast.error('恢复失败', result.message);
       }
@@ -2806,6 +2812,13 @@ function MemorySettingsPage(props: {
 
       <div className="settingsConnectionMeta">
         <span>{effective.path || '等待创建 MEMORY.md'}</span>
+        {effective.latestBackup ? (
+          <span className="settingsMemoryBackupState">
+            上一版 {localMemoryBackupKindLabel(effective.latestBackup.kind)} · <RelativeTime ts={effective.latestBackup.updatedAt} />
+          </span>
+        ) : (
+          <span className="settingsMemoryBackupState" data-empty="true">等待生成上一版备份</span>
+        )}
         <span className="settingsMemoryDirtyState" data-dirty={memoryDraftDirty ? 'true' : 'false'}>
           {memoryDraftDirty ? '有未保存修改' : '草稿已保存'}
         </span>
@@ -3013,7 +3026,7 @@ function MemorySettingsPage(props: {
         <button type="button" className="maka-button maka-button-ghost" disabled={busy || !effective.enabled} onClick={() => void reset()}>
           重置并备份
         </button>
-        <button type="button" className="maka-button maka-button-ghost" disabled={busy || !effective.enabled} onClick={() => void restoreLatestBackup()}>
+        <button type="button" className="maka-button maka-button-ghost" disabled={busy || !effective.enabled || !effective.latestBackup} onClick={() => void restoreLatestBackup()}>
           恢复上一版
         </button>
       </div>
@@ -3164,6 +3177,10 @@ function memoryEntryStatusLabel(status: LocalMemoryState['entries'][number]['sta
 function formatLocalMemorySaveSummary(state: LocalMemoryState): string {
   const archived = state.archivedEntryCount > 0 ? ` / ${state.archivedEntryCount} 条已归档` : '';
   return `当前 ${state.activeEntryCount} 条生效${archived}；已保留上一版备份。`;
+}
+
+function localMemoryBackupKindLabel(kind: NonNullable<LocalMemoryState['latestBackup']>['kind']): string {
+  return kind === 'reset' ? '重置前备份' : '保存前备份';
 }
 
 function memoryStatusLabel(status: LocalMemoryState['status']): string {

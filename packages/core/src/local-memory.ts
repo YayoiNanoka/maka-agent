@@ -35,6 +35,12 @@ export interface LocalMemoryParseResult {
   readonly reason?: 'empty' | 'oversize';
 }
 
+export interface LocalMemoryBackupInfo {
+  readonly path: string;
+  readonly kind: 'save' | 'reset';
+  readonly updatedAt: number;
+}
+
 interface LocalMemoryRawEntry extends LocalMemoryEntryPreview {
   readonly promptContent: string;
 }
@@ -60,6 +66,7 @@ export interface LocalMemoryState {
   readonly activeEntries: ReadonlyArray<LocalMemoryEntryPreview>;
   readonly archivedEntries: ReadonlyArray<LocalMemoryEntryPreview>;
   readonly latestEntry?: LocalMemoryEntryPreview;
+  readonly latestBackup?: LocalMemoryBackupInfo;
   readonly reason?: string;
 }
 

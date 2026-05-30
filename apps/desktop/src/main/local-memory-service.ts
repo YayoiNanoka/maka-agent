@@ -5,6 +5,7 @@ import {
   parseLocalMemoryMarkdown,
   redactSecrets,
   type AppSettings,
+  type LocalMemoryBackupInfo,
   type LocalMemoryState,
 } from '@maka/core';
 import type { WorkspacePrivacyContext } from '@maka/core/incognito';
@@ -66,6 +67,7 @@ export class LocalMemoryService {
       await this.ensure();
       const content = await readFile(this.file, 'utf8');
       const parsed = parseLocalMemoryMarkdown(content);
+      const latestBackup = await this.latestBackupInfo();
       if (parsed.safeMode) {
         return {
           path: this.file,
@@ -79,6 +81,7 @@ export class LocalMemoryService {
           entries: [],
           activeEntries: [],
           archivedEntries: [],
+          latestBackup: latestBackup ?? undefined,
           reason: parsed.reason,
         };
       }
@@ -95,6 +98,7 @@ export class LocalMemoryService {
         activeEntries: parsed.activeEntries,
         archivedEntries: parsed.archivedEntries,
         latestEntry: parsed.activeEntries.at(-1),
+        latestBackup: latestBackup ?? undefined,
       };
     } catch (error) {
       return {
@@ -172,10 +176,10 @@ export class LocalMemoryService {
     try {
       await this.enqueue(async () => {
         await this.ensure();
-        const backupPath = await this.latestBackupPath();
+        const backupInfo = await this.requireLatestBackupInfo();
         const [root, backup] = await Promise.all([
           realpath(this.deps.workspaceRoot),
-          realpath(backupPath),
+          realpath(backupInfo.path),
         ]);
         if (!isInsideOrSamePath(root, backup)) {
           throw new Error('MEMORY.md backup is outside the workspace.');
@@ -198,26 +202,32 @@ export class LocalMemoryService {
     }
   }
 
-  private async latestBackupPath(): Promise<string> {
+  private async latestBackupInfo(): Promise<LocalMemoryBackupInfo | null> {
     const candidates = await Promise.all(
       [
-        { path: `${this.file}.bak`, priority: 0 },
-        { path: `${this.file}.reset.bak`, priority: 1 },
+        { path: `${this.file}.bak`, priority: 0, kind: 'save' as const },
+        { path: `${this.file}.reset.bak`, priority: 1, kind: 'reset' as const },
       ].map(async (candidate) => {
-        const { path, priority } = candidate;
+        const { path, priority, kind } = candidate;
         const fileStat = await stat(path).catch(() => null);
-        return fileStat?.isFile() ? { path, mtimeMs: fileStat.mtimeMs, priority } : null;
+        return fileStat?.isFile() ? { path, updatedAt: Math.round(fileStat.mtimeMs), priority, kind } : null;
       }),
     );
     const latest = candidates
-      .filter((candidate): candidate is { path: string; mtimeMs: number; priority: number } => candidate !== null)
-      .sort((a, b) => b.mtimeMs - a.mtimeMs || b.priority - a.priority)[0];
+      .filter((candidate): candidate is LocalMemoryBackupInfo & { priority: number } => candidate !== null)
+      .sort((a, b) => b.updatedAt - a.updatedAt || b.priority - a.priority)[0];
+    if (!latest) return null;
+    return { path: latest.path, kind: latest.kind, updatedAt: latest.updatedAt };
+  }
+
+  private async requireLatestBackupInfo(): Promise<LocalMemoryBackupInfo> {
+    const latest = await this.latestBackupInfo();
     if (!latest) {
       const error = new Error('没有找到上一版 MEMORY.md 备份。') as Error & { code: string };
       error.code = 'ENOENT';
       throw error;
     }
-    return latest.path;
+    return latest;
   }
 
   async setEnabled(enabled: boolean): Promise<LocalMemoryState> {

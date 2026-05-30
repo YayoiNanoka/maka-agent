@@ -9910,6 +9910,14 @@ button:active {
   font-size: 11px;
 }
 
+.settingsMemoryBackupState {
+  color: var(--foreground-60);
+}
+
+.settingsMemoryBackupState[data-empty="true"] {
+  color: var(--foreground-40);
+}
+
 .settingsMemoryEntryGroups {
   display: grid;
   gap: 12px;

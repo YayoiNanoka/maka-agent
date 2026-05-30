@@ -390,6 +390,7 @@ export type {
   LocalMemoryEntryStatus,
   LocalMemoryEntryPreview,
   LocalMemoryEntryDraftRange,
+  LocalMemoryBackupInfo,
   LocalMemoryOrigin,
   LocalMemoryParseResult,
   LocalMemorySettings,

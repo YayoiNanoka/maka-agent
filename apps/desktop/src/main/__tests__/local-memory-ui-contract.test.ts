@@ -335,4 +335,29 @@ describe('local MEMORY.md Settings UI contract', () => {
     assert.match(pageBlock, /restore\.bak/);
     assert.match(pageBlock, /恢复上一版/);
   });
+
+  it('shows latest MEMORY.md backup metadata before restore', async () => {
+    const core = await readRepo('packages/core/src/local-memory.ts');
+    const service = await readRepo('apps/desktop/src/main/local-memory-service.ts');
+    const src = await readRepo('apps/desktop/src/renderer/settings/SettingsModal.tsx');
+    const css = await readRepo('apps/desktop/src/renderer/styles.css');
+    const pageBlock = src.match(/function MemorySettingsPage\([\s\S]*?function MemoryEntryList/)?.[0] ?? '';
+
+    assert.match(core, /interface LocalMemoryBackupInfo/);
+    assert.match(core, /readonly kind: 'save' \| 'reset'/);
+    assert.match(core, /readonly latestBackup\?: LocalMemoryBackupInfo/);
+    assert.match(service, /async latestBackupInfo/);
+    assert.match(service, /kind: 'save' as const/);
+    assert.match(service, /kind: 'reset' as const/);
+    assert.match(pageBlock, /settingsMemoryBackupState/);
+    assert.match(pageBlock, /上一版 \{localMemoryBackupKindLabel\(effective\.latestBackup\.kind\)\}/);
+    assert.match(pageBlock, /<RelativeTime ts=\{effective\.latestBackup\.updatedAt\}/);
+    assert.match(pageBlock, /等待生成上一版备份/);
+    assert.match(pageBlock, /没有可恢复备份/);
+    assert.match(pageBlock, /!\s*effective\.latestBackup/);
+    assert.match(src, /function localMemoryBackupKindLabel/);
+    assert.match(src, /重置前备份/);
+    assert.match(src, /保存前备份/);
+    assert.match(css, /\.settingsMemoryBackupState/);
+  });
 });

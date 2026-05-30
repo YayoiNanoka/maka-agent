@@ -56,6 +56,9 @@ describe('LocalMemoryService', () => {
     assert.equal(state.entries.length, 1);
     assert.equal(state.activeEntries.length, 1);
     assert.equal(state.archivedEntries.length, 0);
+    assert.equal(state.latestBackup?.kind, 'save');
+    assert.match(state.latestBackup?.path ?? '', /MEMORY\.md\.bak$/);
+    assert.equal(typeof state.latestBackup?.updatedAt, 'number');
     assert.match(await readFile(service.file, 'utf8'), /喜欢短回答/);
     assert.match(await readFile(`${service.file}.bak`, 'utf8'), /示例/);
   });
@@ -117,6 +120,24 @@ describe('LocalMemoryService', () => {
     assert.equal(restored.ok, true);
     assert.match(restored.state.content, /重置前/);
     assert.doesNotMatch(restored.state.content, /示例/);
+  });
+
+  it('surfaces reset backup metadata so restore is visible before click', async () => {
+    const { service } = await makeService(1_700_000_000_000)();
+    await service.save([
+      '# Maka Memory',
+      '',
+      '## Before reset',
+      '<!-- maka-memory: id=before-reset origin=manual createdAt=1700000000000 -->',
+      '重置前。',
+      '',
+    ].join('\n'));
+
+    const state = await service.reset();
+
+    assert.equal(state.latestBackup?.kind, 'reset');
+    assert.match(state.latestBackup?.path ?? '', /MEMORY\.md\.reset\.bak$/);
+    assert.equal(typeof state.latestBackup?.updatedAt, 'number');
   });
 
   it('redacts secrets before writing durable MEMORY.md content', async () => {
