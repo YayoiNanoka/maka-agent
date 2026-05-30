@@ -1231,7 +1231,7 @@ function ClaudeSubscriptionCard() {
         // Envelope variant. `ok: true` shouldn't happen for
         // getAuthUrl (success returns the payload, not an envelope),
         // so this branch is the failure case in practice.
-        toast.error('登录暂不可用', payload.ok ? '请稍后再试。' : payload.message);
+        toast.error('无法开始登录', payload.ok ? '请稍后再试。' : payload.message);
         return;
       }
       setAuthRequestId(payload.authRequestId);
@@ -1462,9 +1462,9 @@ function presentSubscriptionState(state: SubscriptionAccountState): Subscription
       };
     case 'quota_unavailable':
       return {
-        label: '配额暂不可用',
+        label: '等待获取配额',
         tone: 'warning',
-        detail: state.errorMessage ?? '已登录，但配额接口暂时无法访问。',
+        detail: state.errorMessage ?? '已登录；配额接口当前没有返回可用数据。',
       };
     case 'provider_rejected':
       return {
@@ -3114,7 +3114,7 @@ function OpenGatewaySettingsPage(props: {
 
       {gateway.enabled && !gateway.token && (
         <div className="settingsNotice" data-tone="passive">
-          网关已开启，但还没有 token。生成 token 后服务会自动启动。
+          网关已开启，等待生成访问 token。生成 token 后服务会自动启动。
         </div>
       )}
       {status?.lastError && (
@@ -3749,7 +3749,7 @@ function botStatusDetail(status: BotStatus): string {
     case 'disabled': return '开关关闭';
     case 'no-token': return '缺少 Bot Token';
     case 'missing-feishu-credentials': return '缺少飞书 App ID 或 App Secret';
-    case 'feishu-domain-required': return '飞书凭据有效，但还没有事件订阅域名';
+    case 'feishu-domain-required': return '飞书凭据有效，等待填写事件订阅域名';
     case 'feishu-events-not-connected': return '飞书凭据有效，等待事件回调接入';
     case 'scaffold-only': return '该平台当前不可作为可用机器人';
     case 'unimplemented': return '该平台当前不可作为可用机器人';
