@@ -11,6 +11,7 @@ const OFFICECLI_PROBE = join(REPO_ROOT, 'apps', 'desktop', 'src', 'main', 'offic
 const OFFICECLI_ENV = join(REPO_ROOT, 'apps', 'desktop', 'src', 'main', 'officecli-env.ts');
 const OFFICECLI_MANIFEST = join(REPO_ROOT, 'apps', 'desktop', 'bundled-tools.json');
 const PREPARE_OFFICECLI = join(REPO_ROOT, 'scripts', 'prepare-officecli.mjs');
+const CHECK_OFFICECLI_BUNDLE = join(REPO_ROOT, 'scripts', 'check-officecli-bundle.mjs');
 const PACKAGE_JSON = join(REPO_ROOT, 'package.json');
 const PERMISSION = join(REPO_ROOT, 'packages', 'core', 'src', 'permission.ts');
 const CORE_EVENTS = join(REPO_ROOT, 'packages', 'core', 'src', 'events.ts');
@@ -66,12 +67,13 @@ describe('Office document capability contract', () => {
   });
 
   it('resolves bundled OfficeCLI tools before falling back to PATH', async () => {
-    const [tool, probe, env, manifest, prepareScript, packageJson] = await Promise.all([
+    const [tool, probe, env, manifest, prepareScript, checkScript, packageJson] = await Promise.all([
       readFile(OFFICE_DOCUMENT_TOOL, 'utf8'),
       readFile(OFFICECLI_PROBE, 'utf8'),
       readFile(OFFICECLI_ENV, 'utf8'),
       readFile(OFFICECLI_MANIFEST, 'utf8'),
       readFile(PREPARE_OFFICECLI, 'utf8'),
+      readFile(CHECK_OFFICECLI_BUNDLE, 'utf8'),
       readFile(PACKAGE_JSON, 'utf8'),
     ]);
 
@@ -90,7 +92,12 @@ describe('Office document capability contract', () => {
     assert.match(prepareScript, /SHA256SUMS/);
     assert.match(prepareScript, /Checksum mismatch/);
     assert.match(prepareScript, /resources', 'tools'/);
+    assert.match(checkScript, /OfficeCLI bundle missing/);
+    assert.match(checkScript, /npm run prepare:officecli -- --platform/);
+    assert.match(checkScript, /officeCliVersionMatches/);
     assert.match(packageJson, /"prepare:officecli": "node scripts\/prepare-officecli\.mjs"/);
+    assert.match(packageJson, /"check:officecli-bundle": "node scripts\/check-officecli-bundle\.mjs"/);
+    assert.match(packageJson, /"check:release": "npm run check:stale && npm run check:officecli-bundle"/);
   });
 
   it('renders Office document tool results through a structured preview, not raw JSON', async () => {
