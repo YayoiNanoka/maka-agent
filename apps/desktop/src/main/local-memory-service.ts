@@ -204,17 +204,20 @@ export class LocalMemoryService {
 
   private async latestBackupInfo(): Promise<LocalMemoryBackupInfo | null> {
     type BackupCandidate = LocalMemoryBackupInfo & { priority: number };
+    const root = await realpath(this.deps.workspaceRoot);
     const candidates: Array<BackupCandidate | null> = await Promise.all(
       [
         { path: `${this.file}.bak`, priority: 0, kind: 'save' as const },
         { path: `${this.file}.reset.bak`, priority: 1, kind: 'reset' as const },
       ].map(async (candidate) => {
         const { path, priority, kind } = candidate;
-        const fileStat = await stat(path).catch(() => null);
+        const backupPath = await realpath(path).catch(() => null);
+        if (!backupPath || !isInsideOrSamePath(root, backupPath)) return null;
+        const fileStat = await stat(backupPath).catch(() => null);
         if (!fileStat?.isFile()) return null;
-        const parsed = parseLocalMemoryMarkdown(await readFile(path, 'utf8'));
+        const parsed = parseLocalMemoryMarkdown(await readFile(backupPath, 'utf8'));
         return {
-          path,
+          path: backupPath,
           updatedAt: Math.round(fileStat.mtimeMs),
           sizeBytes: fileStat.size,
           entryCount: parsed.safeMode ? 0 : parsed.entries.length,
@@ -295,6 +298,32 @@ export class LocalMemoryService {
     if (!targetStat.isFile()) return { ok: false, reason: 'not-a-file' };
 
     return { ok: true, path: target };
+  }
+
+  async resolveLatestBackupForOpen(): Promise<
+    | { ok: true; path: string }
+    | { ok: false; reason: 'incognito_blocked' | 'disabled' | 'missing' | 'not-allowed' | 'not-a-file' }
+  > {
+    const settings = await this.deps.getSettings();
+    if ((await this.deps.getPrivacyContext()).incognitoActive) {
+      return { ok: false, reason: 'incognito_blocked' };
+    }
+    if (!settings.localMemory.enabled) return { ok: false, reason: 'disabled' };
+
+    await this.ensure();
+
+    try {
+      const backup = await this.requireLatestBackupInfo();
+      const backupStat = await stat(backup.path).catch(() => null);
+      if (!backupStat) return { ok: false, reason: 'missing' };
+      if (!backupStat.isFile()) return { ok: false, reason: 'not-a-file' };
+      return { ok: true, path: backup.path };
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+        return { ok: false, reason: 'missing' };
+      }
+      return { ok: false, reason: 'not-allowed' };
+    }
   }
 
   private async ensure(): Promise<void> {

@@ -194,6 +194,7 @@ declare global {
         setEnabled(enabled: boolean): Promise<LocalMemoryState>;
         setAgentReadEnabled(enabled: boolean): Promise<LocalMemoryState>;
         openFile(): Promise<{ ok: true } | { ok: false; message: string }>;
+        openLatestBackup(): Promise<{ ok: true } | { ok: false; message: string }>;
       };
       workspaceInstructions: {
         getState(): Promise<WorkspaceInstructionsState>;

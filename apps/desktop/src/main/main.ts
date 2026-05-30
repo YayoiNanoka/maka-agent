@@ -809,6 +809,23 @@ function localMemoryOpenFailureCopy(reason: string): string {
   }
 }
 
+function localMemoryBackupOpenFailureCopy(reason: string): string {
+  switch (reason) {
+    case 'incognito_blocked':
+      return '隐身模式下不能打开本地 MEMORY.md 备份。';
+    case 'disabled':
+      return '本地记忆关闭时不能打开 MEMORY.md 备份。';
+    case 'missing':
+      return '还没有可打开的上一版 MEMORY.md 备份。';
+    case 'not-allowed':
+      return 'MEMORY.md 备份不在允许的工作区范围内。';
+    case 'not-a-file':
+      return 'MEMORY.md 备份不是普通文件。';
+    default:
+      return '无法打开 MEMORY.md 备份。';
+  }
+}
+
 function workspaceInstructionOpenFailureCopy(reason: WorkspaceInstructionOpenFailureReason | 'open-failed'): string {
   switch (reason) {
     case 'unknown-file':
@@ -929,6 +946,12 @@ function registerIpc(): void {
   ipcMain.handle('memory:openFile', async (): Promise<{ ok: true } | { ok: false; message: string }> => {
     const resolved = await localMemory.resolveFileForOpen();
     if (!resolved.ok) return { ok: false, message: localMemoryOpenFailureCopy(resolved.reason) };
+    const error = await shell.openPath(resolved.path);
+    return error ? { ok: false, message: error } : { ok: true };
+  });
+  ipcMain.handle('memory:openLatestBackup', async (): Promise<{ ok: true } | { ok: false; message: string }> => {
+    const resolved = await localMemory.resolveLatestBackupForOpen();
+    if (!resolved.ok) return { ok: false, message: localMemoryBackupOpenFailureCopy(resolved.reason) };
     const error = await shell.openPath(resolved.path);
     return error ? { ok: false, message: error } : { ok: true };
   });

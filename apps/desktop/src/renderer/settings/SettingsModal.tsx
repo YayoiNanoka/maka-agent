@@ -2543,6 +2543,11 @@ function MemorySettingsPage(props: {
     if (!result.ok) toast.error('打开失败', result.message);
   }
 
+  async function openLatestBackup() {
+    const result = await window.maka.memory.openLatestBackup();
+    if (!result.ok) toast.error('打开上一版失败', result.message);
+  }
+
   async function openFolder() {
     const result = await window.maka.app.openPath('memory');
     if (!result.ok) {
@@ -3019,6 +3024,9 @@ function MemorySettingsPage(props: {
         </button>
         <button type="button" className="maka-button maka-button-ghost" disabled={busy || !effective.enabled} onClick={() => void reloadDraftFromDisk()}>
           重新载入
+        </button>
+        <button type="button" className="maka-button maka-button-ghost" disabled={busy || !effective.enabled || !effective.latestBackup} onClick={() => void openLatestBackup()}>
+          打开上一版
         </button>
         <button type="button" className="maka-button maka-button-ghost" disabled={!effective.path} onClick={() => void copyPath()}>
           复制路径

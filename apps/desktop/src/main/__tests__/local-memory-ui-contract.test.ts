@@ -352,7 +352,7 @@ describe('local MEMORY.md Settings UI contract', () => {
     assert.match(service, /async latestBackupInfo/);
     assert.match(service, /kind: 'save' as const/);
     assert.match(service, /kind: 'reset' as const/);
-    assert.match(service, /parseLocalMemoryMarkdown\(await readFile\(path, 'utf8'\)\)/);
+    assert.match(service, /parseLocalMemoryMarkdown\(await readFile\(backupPath, 'utf8'\)\)/);
     assert.match(pageBlock, /settingsMemoryBackupState/);
     assert.match(pageBlock, /上一版 \{localMemoryBackupKindLabel\(effective\.latestBackup\.kind\)\}/);
     assert.match(pageBlock, /localMemoryBackupSummary\(effective\.latestBackup\)/);
@@ -367,5 +367,30 @@ describe('local MEMORY.md Settings UI contract', () => {
     assert.match(src, /重置前备份/);
     assert.match(src, /保存前备份/);
     assert.match(css, /\.settingsMemoryBackupState/);
+  });
+
+  it('opens the latest MEMORY.md backup only through a main-process validated path', async () => {
+    const main = await readRepo('apps/desktop/src/main/main.ts');
+    const preload = await readRepo('apps/desktop/src/preload/preload.ts');
+    const globalTypes = await readRepo('apps/desktop/src/global.d.ts');
+    const service = await readRepo('apps/desktop/src/main/local-memory-service.ts');
+    const src = await readRepo('apps/desktop/src/renderer/settings/SettingsModal.tsx');
+    const pageBlock = src.match(/function MemorySettingsPage\([\s\S]*?function MemoryEntryList/)?.[0] ?? '';
+
+    assert.match(service, /async resolveLatestBackupForOpen/);
+    assert.match(service, /requireLatestBackupInfo\(\)/);
+    assert.match(service, /isInsideOrSamePath\(root, backupPath\)/);
+    assert.match(main, /ipcMain\.handle\('memory:openLatestBackup'/);
+    assert.match(main, /localMemory\.resolveLatestBackupForOpen\(\)/);
+    assert.match(main, /shell\.openPath\(resolved\.path\)/);
+    assert.match(main, /localMemoryBackupOpenFailureCopy/);
+    assert.match(preload, /openLatestBackup\(\)/);
+    assert.match(preload, /memory:openLatestBackup/);
+    assert.match(globalTypes, /openLatestBackup\(\)/);
+    assert.match(pageBlock, /async function openLatestBackup/);
+    assert.match(pageBlock, /window\.maka\.memory\.openLatestBackup\(\)/);
+    assert.match(pageBlock, /打开上一版失败/);
+    assert.match(pageBlock, />\s*打开上一版\s*<\/button>/);
+    assert.match(pageBlock, /!\s*effective\.latestBackup/);
   });
 });

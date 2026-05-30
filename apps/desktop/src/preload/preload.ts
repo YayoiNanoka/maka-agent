@@ -294,6 +294,9 @@ contextBridge.exposeInMainWorld('maka', {
     openFile(): Promise<{ ok: true } | { ok: false; message: string }> {
       return ipcRenderer.invoke('memory:openFile');
     },
+    openLatestBackup(): Promise<{ ok: true } | { ok: false; message: string }> {
+      return ipcRenderer.invoke('memory:openLatestBackup');
+    },
   },
   workspaceInstructions: {
     getState(): Promise<WorkspaceInstructionsState> {

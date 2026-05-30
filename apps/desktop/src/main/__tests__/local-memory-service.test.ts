@@ -148,6 +148,41 @@ describe('LocalMemoryService', () => {
     assert.ok((state.latestBackup?.sizeBytes ?? 0) > 0);
   });
 
+  it('resolves the latest backup for explicit user inspection', async () => {
+    const { service } = await makeService()();
+    await service.getState();
+    await service.save([
+      '# Maka Memory',
+      '',
+      '## Inspectable',
+      '<!-- maka-memory: id=inspectable origin=manual createdAt=1700000000000 -->',
+      '可检查。',
+      '',
+    ].join('\n'));
+
+    const result = await service.resolveLatestBackupForOpen();
+
+    assert.equal(result.ok, true);
+    if (result.ok) assert.match(result.path, /MEMORY\.md\.bak$/);
+  });
+
+  it('does not resolve a backup symlink that escapes the workspace', async () => {
+    const { service, workspaceRoot } = await makeService()();
+    const outsideRoot = await mkdtemp(join(tmpdir(), 'maka-memory-backup-outside-'));
+    await service.getState();
+    const outsideFile = join(outsideRoot, 'MEMORY.md.bak');
+    await writeFile(outsideFile, '# outside backup\n', 'utf8');
+    await symlink(outsideFile, `${service.file}.bak`);
+
+    const result = await service.resolveLatestBackupForOpen();
+    const state = await service.getState();
+
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.reason, 'missing');
+    assert.equal(state.latestBackup, undefined);
+    assert.match(service.file, new RegExp(workspaceRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  });
+
   it('redacts secrets before writing durable MEMORY.md content', async () => {
     const { service } = await makeService()();
     await service.getState();
