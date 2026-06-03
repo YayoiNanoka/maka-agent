@@ -23,6 +23,7 @@ describe('Bot settings UI contract', () => {
     }
     assert.match(settings, /function BotBrandLogo\b/, 'Bot settings must use the shared brand-logo component');
     assert.match(settings, /className="settingsBotLogoStatusDot"/, 'Platform logo must include the bottom-right status dot');
+    assert.match(settings, /data-active=\{selected === provider\}[\s\S]*aria-current=\{selected === provider \? 'page' : undefined\}/, 'The active bot platform must be exposed to assistive technology');
     assert.match(styles, /\.settingsBotLogoStatusDot\s*\{[\s\S]*position:\s*absolute/, 'Status dot must be visually attached to the platform logo');
     assert.match(styles, /\.settingsBotLogoStatusDot\[data-tone="success"\]/, 'Status dot tone mapping must include the connected state');
   });

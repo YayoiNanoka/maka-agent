@@ -90,6 +90,14 @@ describe('localized main shell contract', () => {
     assert.match(settings, /ariaLabel=\{`启用\$\{BOT_LABELS\[selected\]\.label\}机器人`\}/);
   });
 
+  it('exposes the active Settings nav item to assistive technology', async () => {
+    const settings = await readFile(join(process.cwd(), 'src', 'renderer', 'settings', 'SettingsModal.tsx'), 'utf8');
+    const settingsNavButton = settings.match(/className="settingsNavItem"[\s\S]*?onClick=\{\(\) => setSection\(item\.id\)\}/)?.[0] ?? '';
+
+    assert.match(settingsNavButton, /data-active=\{section === item\.id\}/, 'Settings nav must keep its visual active state');
+    assert.match(settingsNavButton, /aria-current=\{section === item\.id \? 'page' : undefined\}/, 'Settings nav must expose the current page to accessibility APIs');
+  });
+
   it('keeps English skill metadata out of the visible skills list copy', async () => {
     const components = await readFile(resolve(process.cwd(), '..', '..', 'packages', 'ui', 'src', 'components.tsx'), 'utf8');
     const skillPanel = components.match(/function SkillLibraryPanel[\s\S]*?function formatSkillLibraryDescription/)?.[0] ?? '';

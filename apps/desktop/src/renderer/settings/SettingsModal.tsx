@@ -804,6 +804,7 @@ function SettingsSurface(props: {
                     key={item.id}
                     className="settingsNavItem"
                     data-active={section === item.id}
+                    aria-current={section === item.id ? 'page' : undefined}
                     type="button"
                     disabled={!item.enabled}
                     onClick={() => setSection(item.id)}
@@ -3931,6 +3932,7 @@ function BotChatSettingsPage(props: {
               type="button"
               data-active={selected === provider}
               data-support={providerSupport}
+              aria-current={selected === provider ? 'page' : undefined}
               onClick={() => {
                 setSelected(provider);
               }}
