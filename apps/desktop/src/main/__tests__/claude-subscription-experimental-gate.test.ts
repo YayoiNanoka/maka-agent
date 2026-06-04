@@ -140,6 +140,16 @@ describe('experimental kill-switch (kenji 1da909d5 + 45b31e16)', () => {
       /if\s*\(\s*experimentalEnabled\s*!==\s*true\s*\)\s*\{\s*return null;/,
       'ClaudeSubscriptionCard must return null when experimental flag is not true',
     );
+    assert.doesNotMatch(
+      src,
+      /\.catch\(\(\) => \{[\s\S]*setExperimentalEnabled\(false\)/,
+      'a thrown experimental-gate probe is unknown/error, not the same as the flag being disabled',
+    );
+    assert.match(
+      src,
+      /experimentalGateError[\s\S]*role="alert"[\s\S]*Claude 登录开关读取失败[\s\S]*refreshExperimentalGate\(\)/,
+      'experimental-gate probe failures must render a visible retryable error instead of an empty modal',
+    );
   });
 
   it('preload exposes isExperimentalEnabled via the claudeSubscription bridge', async () => {
@@ -415,7 +425,7 @@ describe('Claude OAuth model connection bridge', () => {
     assert.match(
       src,
       /providerType === 'codex-subscription'[\s\S]*codexSubscription\.getAccessTokenInternal\(\)/,
-      'resolveConnectionSecret must map codex-subscription to its stored OAuth access token',
+      'resolveConnectionSecret must let the Codex OAuth service apply its normal refresh policy before handing the access token to the send path',
     );
   });
 
