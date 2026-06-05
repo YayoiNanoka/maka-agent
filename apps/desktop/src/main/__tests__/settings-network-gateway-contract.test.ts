@@ -7,6 +7,10 @@ const settingsSource = readFileSync(
   join(process.cwd(), 'src/renderer/settings/SettingsModal.tsx'),
   'utf8',
 );
+const mainSource = readFileSync(
+  join(process.cwd(), 'src/main/main.ts'),
+  'utf8',
+);
 
 function blockBetween(start: string, end: string): string {
   return settingsSource.match(new RegExp(`${start}[\\s\\S]*?${end}`))?.[0] ?? '';
@@ -30,6 +34,25 @@ describe('Settings network and gateway persistence contract', () => {
       networkBlock,
       /onChange=\{\(enabled\) => void updateProxy\(\{ enabled \}\)\}/,
       'Network proxy enable switch should explicitly fire-and-report via updateProxy',
+    );
+  });
+
+  it('localizes proxy test failure messages before returning them to Settings', () => {
+    const helper = mainSource.match(/function proxyTestFailureMessage\(result: TestProxyResult\): string \{[\s\S]*?\n\}/);
+    const handler = mainSource.match(/settings:testNetworkProxy[\s\S]*?satisfies SettingsTestResult;/)?.[0] ?? '';
+
+    assert.ok(helper, 'main must normalize proxy test failures at the IPC boundary');
+    assert.match(helper![0], /proxy disabled[\s\S]*代理未启用，请先打开代理开关/);
+    assert.match(helper![0], /proxy host\/port required[\s\S]*请填写代理服务器地址和端口后再测试/);
+    assert.match(helper![0], /proxy test timeout[\s\S]*代理测试超时，请检查代理服务是否可达/);
+    assert.match(helper![0], /result\.status[\s\S]*代理测试返回 HTTP \$\{result\.status\}/);
+    assert.match(helper![0], /redactSecrets\(result\.error \?\? ''\)/);
+    assert.match(helper![0], /generalizedErrorMessageChinese\(raw, ''\)/);
+    assert.match(handler, /message: proxyTestFailureMessage\(result\)/);
+    assert.doesNotMatch(
+      handler,
+      /message: result\.error \?\? \(result\.status \? `HTTP \$\{result\.status\}` : '代理不可达'\)/,
+      'proxy test IPC must not pass through runtime English/raw failure messages',
     );
   });
 

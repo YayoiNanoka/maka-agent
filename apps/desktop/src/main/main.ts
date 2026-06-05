@@ -112,6 +112,7 @@ import type {
   NetworkSettings as ContractNetworkSettings,
   ProxySettings,
   TestProxyInput,
+  TestProxyResult,
 } from '@maka/core/settings/network-settings';
 import {
   NETWORK_DEFAULTS,
@@ -1297,6 +1298,19 @@ function attachmentValidationFailureCopy(reason: AttachmentValidationFailureReas
   }
 }
 
+function proxyTestFailureMessage(result: TestProxyResult): string {
+  const raw = redactSecrets(result.error ?? '').trim();
+  const lower = raw.toLowerCase();
+  if (lower.includes('proxy disabled')) return '代理未启用，请先打开代理开关。';
+  if (lower.includes('proxy host/port required')) return '请填写代理服务器地址和端口后再测试。';
+  if (lower.includes('proxy test timeout') || lower.includes('timeout')) return '代理测试超时，请检查代理服务是否可达。';
+  if (result.status) return `代理测试返回 HTTP ${result.status}，请检查代理服务或测试地址。`;
+  const classified = generalizedErrorMessageChinese(raw, '');
+  if (classified) return classified;
+  if (raw && /[\u4E00-\u9FFF]/.test(raw)) return raw;
+  return '代理不可达，请检查代理服务器地址、端口或认证信息。';
+}
+
 function registerIpc(): void {
   async function currentProjectRoot(): Promise<string> {
     return resolveProjectRoot([process.cwd(), app.getAppPath()]);
@@ -2455,7 +2469,7 @@ function registerIpc(): void {
     if (!result.ok) {
       return {
         ok: false,
-        message: result.error ?? (result.status ? `HTTP ${result.status}` : '代理不可达'),
+        message: proxyTestFailureMessage(result),
         latencyMs,
       } satisfies SettingsTestResult;
     }
