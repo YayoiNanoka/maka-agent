@@ -36,6 +36,23 @@ function openingTags(source: string, tagName: 'input' | 'select' | 'textarea'): 
 }
 
 describe('Settings form accessibility labels', () => {
+  it('keeps shared Settings password copy actions guarded and failure-visible', async () => {
+    const passwordInput = await readRepo('apps/desktop/src/renderer/settings/password-input.tsx');
+
+    assert.match(passwordInput, /const toast = useToast\(\)/);
+    assert.match(passwordInput, /const copyingRef = useRef\(false\)/);
+    assert.match(passwordInput, /if \(copyingRef\.current\) return;/);
+    assert.match(passwordInput, /setCopying\(true\)/);
+    assert.match(passwordInput, /disabled=\{copying\}/);
+    assert.match(passwordInput, /aria-label=\{copying \? '复制中' : justCopied \? '已复制' : '复制'\}/);
+    assert.match(passwordInput, /toast\.error\('复制失败', '剪贴板不可用或被系统拒绝。'\)/);
+    assert.doesNotMatch(
+      passwordInput,
+      /clipboard unavailable; silent|catch \{\s*\/\*/,
+      'credential copy failures must not be silent',
+    );
+  });
+
   it('keeps every Settings input/select/textarea named for assistive tech', async () => {
     for (const path of [
       'apps/desktop/src/renderer/settings/SettingsModal.tsx',

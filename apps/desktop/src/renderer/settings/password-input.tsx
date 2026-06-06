@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Check, Copy, Eye, EyeOff } from 'lucide-react';
+import { useToast } from '@maka/ui';
 
 /**
  * PR-BOT-SETTINGS-PASSWORD-EYE-0 / PR-BOT-SETTINGS-PASSWORD-COPY-0 /
@@ -12,8 +13,9 @@ import { Check, Copy, Eye, EyeOff } from 'lucide-react';
  *
  * Initial state is masked. Toggle and copy are both real focusable
  * buttons so keyboard users can flip or copy without leaving the
- * field. On clipboard failure the copy click is silent — the masked
- * value remains readable on-screen.
+ * field. Clipboard failure is visible because these fields often hold
+ * credentials; a silent copy miss looks like the user copied a secret
+ * when the OS actually rejected it.
  */
 export function PasswordInput(props: {
   value: string;
@@ -23,16 +25,25 @@ export function PasswordInput(props: {
   disabled?: boolean;
   onBlur?(): void;
 }) {
+  const toast = useToast();
   const [visible, setVisible] = useState(false);
   const [justCopied, setJustCopied] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const copyingRef = useRef(false);
   async function copyValue() {
     if (!props.value) return;
+    if (copyingRef.current) return;
+    copyingRef.current = true;
+    setCopying(true);
     try {
       await navigator.clipboard.writeText(props.value);
       setJustCopied(true);
       window.setTimeout(() => setJustCopied(false), 1200);
     } catch {
-      /* clipboard unavailable; silent — user can still see the masked value */
+      toast.error('复制失败', '剪贴板不可用或被系统拒绝。');
+    } finally {
+      copyingRef.current = false;
+      setCopying(false);
     }
   }
   return (
@@ -53,8 +64,9 @@ export function PasswordInput(props: {
           <button
             type="button"
             className="settingsPasswordToggle"
+            disabled={copying}
             onClick={() => void copyValue()}
-            aria-label={justCopied ? '已复制' : '复制'}
+            aria-label={copying ? '复制中' : justCopied ? '已复制' : '复制'}
           >
             {justCopied
               ? <Check size={16} strokeWidth={1.75} aria-hidden="true" />
