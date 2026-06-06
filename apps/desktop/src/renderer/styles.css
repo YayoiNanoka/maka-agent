@@ -8943,6 +8943,18 @@ button:active {
   opacity: 0.45;
   cursor: not-allowed;
 }
+.maka-turn-footer-action[data-pending] {
+  opacity: 0.78;
+  cursor: progress;
+}
+.maka-turn-footer-action[data-copy-feedback="copied"] {
+  color: var(--accent);
+  border-color: oklch(from var(--accent) l c h / 0.35);
+}
+.maka-turn-footer-action[data-copy-feedback="failed"] {
+  color: var(--destructive);
+  border-color: oklch(from var(--destructive) l c h / 0.35);
+}
 
 /* PR-UI-17 (audit §3.4): footer action density.
  *

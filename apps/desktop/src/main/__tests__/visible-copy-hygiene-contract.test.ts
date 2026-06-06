@@ -355,3 +355,55 @@ describe('terminal truncation handoff contract', () => {
     );
   });
 });
+
+describe('turn footer copy feedback contract', () => {
+  it('gates the inline footer copy action instead of silently firing raw clipboard writes', async () => {
+    const componentsPath = resolve(process.cwd(), '..', '..', 'packages', 'ui', 'src', 'components.tsx');
+    const src = await readFile(componentsPath, 'utf8');
+    const footerBlock = src.match(/function TurnFooterActions[\s\S]*?const STATUS_FOOTER_ICON/)?.[0] ?? '';
+
+    assert.match(footerBlock, /const \[copyPhase, setCopyPhase\]/, 'Turn footer copy should track visible copy state.');
+    assert.match(footerBlock, /copyPendingRef/, 'Turn footer copy should gate duplicate clipboard writes.');
+    assert.match(footerBlock, /copyResetTimerRef/, 'Turn footer copy feedback should reset without leaking timers.');
+    assert.match(
+      footerBlock,
+      /await navigator\.clipboard\.writeText\(props\.assistantText\)/,
+      'Turn footer copy must preserve the exact assistant message text, unlike redacted tool-output copies.',
+    );
+    assert.match(footerBlock, /setCopyPhase\('pending'\)/, 'Turn footer copy should expose pending state immediately.');
+    assert.match(footerBlock, /settleCopy\('copied'\)/, 'Turn footer copy should expose success state.');
+    assert.match(footerBlock, /settleCopy\('failed'\)/, 'Turn footer copy should expose clipboard failure state.');
+    assert.match(footerBlock, /复制中…/, 'Turn footer copy should show a pending label.');
+    assert.match(footerBlock, /已复制/, 'Turn footer copy should show success feedback.');
+    assert.match(footerBlock, /复制失败/, 'Turn footer copy should show failure feedback.');
+    assert.match(footerBlock, /data-copy-feedback/, 'Turn footer copy should expose stable state data for CSS and review.');
+    assert.match(footerBlock, /aria-busy=\{isActionPending/, 'Turn footer copy should expose busy state to assistive tech.');
+    assert.match(footerBlock, /disabled=\{!action\.enabled \|\| copyIsPending\}/, 'Turn footer copy should disable while pending.');
+    assert.doesNotMatch(
+      footerBlock,
+      /silent — clipboard may be unavailable/,
+      'Turn footer copy failures should not be silent anymore.',
+    );
+  });
+
+  it('styles footer copy pending and failure states', async () => {
+    const stylesPath = join(process.cwd(), 'src', 'renderer', 'styles.css');
+    const src = await readFile(stylesPath, 'utf8');
+
+    assert.match(
+      src,
+      /\.maka-turn-footer-action\[data-pending\]\s*\{[\s\S]*cursor:\s*progress;/,
+      'Turn footer pending copy should visibly indicate in-progress work.',
+    );
+    assert.match(
+      src,
+      /\.maka-turn-footer-action\[data-copy-feedback="copied"\]/,
+      'Turn footer copied state should have a stable CSS selector.',
+    );
+    assert.match(
+      src,
+      /\.maka-turn-footer-action\[data-copy-feedback="failed"\]/,
+      'Turn footer failed copy state should have a stable CSS selector.',
+    );
+  });
+});

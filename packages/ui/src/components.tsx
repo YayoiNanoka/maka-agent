@@ -4668,15 +4668,51 @@ function TurnFooterActions(props: {
   /** Assistant text used by the inline copy action. */
   assistantText?: string;
 }) {
+  const [copyPhase, setCopyPhase] = useState<ClipboardCopyPhase | null>(null);
+  const copyPendingRef = useRef(false);
+  const copyResetTimerRef = useRef<number | null>(null);
+  const copyMountedRef = useRef(true);
+
+  function clearCopyResetTimer() {
+    if (copyResetTimerRef.current === null) return;
+    window.clearTimeout(copyResetTimerRef.current);
+    copyResetTimerRef.current = null;
+  }
+
+  useEffect(() => () => {
+    copyMountedRef.current = false;
+    clearCopyResetTimer();
+  }, []);
+
+  function settleCopy(phase: Exclude<ClipboardCopyPhase, 'pending'>) {
+    if (!copyMountedRef.current) return;
+    setCopyPhase(phase);
+    copyResetTimerRef.current = window.setTimeout(() => {
+      if (!copyMountedRef.current) return;
+      setCopyPhase(null);
+      copyResetTimerRef.current = null;
+    }, 1400);
+  }
+
+  async function copyAssistantText() {
+    if (!props.assistantText || copyPendingRef.current) return;
+    copyPendingRef.current = true;
+    clearCopyResetTimer();
+    setCopyPhase('pending');
+    try {
+      await navigator.clipboard.writeText(props.assistantText);
+      settleCopy('copied');
+    } catch {
+      settleCopy('failed');
+    } finally {
+      copyPendingRef.current = false;
+    }
+  }
+
   async function handleClick(action: TurnFooterActionMeta) {
     if (!action.enabled) return;
     if (action.id === 'copy') {
-      if (!props.assistantText) return;
-      try {
-        await navigator.clipboard.writeText(props.assistantText);
-      } catch {
-        /* silent — clipboard may be unavailable; UI Copy doesn't toast here */
-      }
+      await copyAssistantText();
       return;
     }
     props.onAction?.(action.id);
@@ -4693,7 +4729,17 @@ function TurnFooterActions(props: {
         // by `deriveTurnFooterActions`. Pending state always forces
         // priority back to "primary" so the user sees full label + icon
         // while the action processes.
-        const priority = isPending ? 'primary' : STATUS_FOOTER_PRIORITY[action.id];
+        const isCopyAction = action.id === 'copy';
+        const copyIsPending = isCopyAction && copyPhase === 'pending';
+        const copyFeedbackLabel = copyPhase === 'pending'
+          ? '复制中…'
+          : copyPhase === 'copied'
+            ? '已复制'
+            : copyPhase === 'failed'
+              ? '复制失败'
+              : action.label;
+        const isActionPending = isPending || copyIsPending;
+        const priority = isActionPending ? 'primary' : STATUS_FOOTER_PRIORITY[action.id];
         return (
           <button
             key={action.id}
@@ -4701,15 +4747,16 @@ function TurnFooterActions(props: {
             className="maka-turn-footer-action"
             data-action={action.id}
             data-priority={priority}
-            data-pending={isPending || undefined}
-            disabled={!action.enabled}
-            aria-disabled={!action.enabled}
-            aria-busy={isPending || undefined}
+            data-pending={isActionPending || undefined}
+            data-copy-feedback={isCopyAction && copyPhase ? copyPhase : undefined}
+            disabled={!action.enabled || copyIsPending}
+            aria-disabled={!action.enabled || copyIsPending}
+            aria-busy={isActionPending || undefined}
             title={action.tooltip ?? action.label}
             onClick={() => void handleClick(action)}
           >
-            {STATUS_FOOTER_ICON[action.id]}
-            <span>{action.label}</span>
+            {isCopyAction && copyPhase === 'copied' ? <Check size={12} strokeWidth={2} aria-hidden="true" /> : STATUS_FOOTER_ICON[action.id]}
+            <span>{isCopyAction ? copyFeedbackLabel : action.label}</span>
           </button>
         );
       })}
