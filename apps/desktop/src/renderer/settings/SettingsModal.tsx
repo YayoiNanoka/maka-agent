@@ -1329,7 +1329,7 @@ function DailyReviewSettingsPage(props: { onOpenDailyReview?: () => void }) {
       <div className="settingsFeatureStatusHeroHeading">
         <h3>当前包含</h3>
       </div>
-      <ul className="settingsFeatureStatusList">
+      <ul className="settingsFeatureStatusList" aria-label="每日回顾当前包含">
         <li>对话数 / 请求数 / Token / 费用 / 错误数</li>
         <li>今日 / 本周 / 本月三个范围，以及按范围翻页</li>
         <li>活跃对话（点击可直接打开）</li>
@@ -1341,7 +1341,7 @@ function DailyReviewSettingsPage(props: { onOpenDailyReview?: () => void }) {
       <div className="settingsFeatureStatusHeroHeading">
         <h3>不会做的事</h3>
       </div>
-      <ul className="settingsFeatureStatusList">
+      <ul className="settingsFeatureStatusList" aria-label="每日回顾不会执行的事">
         <li>不调用任何 LLM 生成摘要（当前只是本地聚合数字，不向云端送内容）</li>
         <li>不写入记忆系统，也不导出任何东西</li>
         <li>不读取 Maka 工作区以外的文件</li>

@@ -47,6 +47,8 @@ describe('Settings coming-soon cleanup contract', () => {
     assert.match(settings, /今日 \/ 本周 \/ 本月/, 'Daily Review settings copy must mention the shipped range switcher');
     assert.match(settings, /复制 \/ 保存 Markdown 摘要/, 'Daily Review settings copy must mention the shipped Markdown copy/save actions');
     assert.match(settings, /粘到输入框继续追问/, 'Daily Review settings copy must mention the shipped composer append action');
+    assert.match(settings, /<ul className="settingsFeatureStatusList" aria-label="每日回顾当前包含">/, 'Daily Review included-feature list must have an accessible name');
+    assert.match(settings, /<ul className="settingsFeatureStatusList" aria-label="每日回顾不会执行的事">/, 'Daily Review privacy-boundary list must have an accessible name');
     assert.match(settings, /本地自检/, 'Voice status badge should describe the shipped local smoke boundary');
   });
 
