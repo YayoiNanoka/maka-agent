@@ -209,6 +209,11 @@ describe('SearchModal lifecycle contract (PR-SIDEBAR-IA-0 Phase 3 P0 fixup)', ()
     );
     assert.match(
       components,
+      /function scrollToBottom\(\) \{[\s\S]*scrollTo\(\{\s*top:\s*el\.scrollHeight,\s*behavior:\s*props\.scrollBehavior\s*\?\?\s*'smooth'\s*\}\);/,
+      'ChatView jump-to-latest must honor the same reduced-motion/visual-smoke scroll policy as search navigation',
+    );
+    assert.match(
+      components,
       /targetEl\.setAttribute\('tabindex', '-1'\);[\s\S]*targetEl\.focus\(\{ preventScroll: true \}\);/,
       'ChatView must move keyboard focus to the matched turn after search navigation',
     );

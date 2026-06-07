@@ -3341,7 +3341,7 @@ export function ChatView(props: {
   function scrollToBottom() {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    el.scrollTo({ top: el.scrollHeight, behavior: props.scrollBehavior ?? 'smooth' });
     setPinnedToBottom(true);
   }
 
