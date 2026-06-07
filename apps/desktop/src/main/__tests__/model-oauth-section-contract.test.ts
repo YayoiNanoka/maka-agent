@@ -573,6 +573,27 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     );
   });
 
+  it('keeps the model picker radiogroup free of nested listitem semantics', async () => {
+    const src = await readFile(PROVIDERS_PANEL_SOURCE, 'utf8');
+    const modelTable = src.match(/function ModelTable[\s\S]*?function ModelCapabilityChips/)?.[0] ?? '';
+
+    assert.match(
+      modelTable,
+      /<ul[\s\S]*className="modelTableList"[\s\S]*role="radiogroup"[\s\S]*aria-label="默认模型"/,
+      'ModelTable must expose the default-model picker as a named radiogroup',
+    );
+    assert.match(
+      modelTable,
+      /<li key=\{model\.id\} role="none">[\s\S]*role="radio"/,
+      'structural list items inside the radiogroup must be presentational so assistive tech reaches the radio options directly',
+    );
+    assert.doesNotMatch(
+      modelTable,
+      /<li key=\{model\.id\}>\s*<button[\s\S]*role="radio"/,
+      'ModelTable must not wrap radio options in exposed listitem semantics',
+    );
+  });
+
   it('surfaces provider detail save/delete failures instead of leaking rejected promises from actions', async () => {
     const src = await readFile(PROVIDERS_PANEL_SOURCE, 'utf8');
     const detail = src.match(/function ConnectionDetail[\s\S]*?function ModelTable/)?.[0] ?? '';

@@ -1921,7 +1921,7 @@ function ModelTable(props: {
           {filtered.map((model) => {
             const isDefault = model.id === props.defaultModel;
             return (
-              <li key={model.id}>
+              <li key={model.id} role="none">
                 <button
                   type="button"
                   className="modelTableRow"
