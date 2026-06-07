@@ -1008,7 +1008,7 @@ function AppShell() {
       })
       .catch((error) => {
         if (!disposed && activeIdRef.current === activeId) {
-          const message = cleanErrorMessage(error);
+          const message = messageLoadActionErrorMessage(error, '对话内容暂时无法读取，请稍后重试。');
           setMessageLoadErrorBySession((current) => ({ ...current, [activeId]: message }));
           toastApi.error('读取对话失败', message);
         }
@@ -1931,7 +1931,7 @@ function AppShell() {
       }
     } catch (error) {
       if (activeIdRef.current === sessionId) {
-        const message = cleanErrorMessage(error);
+        const message = messageLoadActionErrorMessage(error, '对话内容暂时无法刷新，请稍后重试。');
         setMessageLoadErrorBySession((current) => ({ ...current, [sessionId]: message }));
         toastApi.error('刷新对话失败', message);
       }
@@ -3316,6 +3316,10 @@ function sessionModelActionErrorMessage(error: unknown): string {
 
 function sessionControlActionErrorMessage(error: unknown): string {
   return generalizedErrorMessageChinese(error, '会话操作失败，请稍后重试。');
+}
+
+function messageLoadActionErrorMessage(error: unknown, fallback: string): string {
+  return generalizedErrorMessageChinese(error, fallback);
 }
 
 function sendActionErrorMessage(error: unknown): string {
