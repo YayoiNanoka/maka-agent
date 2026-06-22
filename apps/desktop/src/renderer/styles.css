@@ -1133,19 +1133,29 @@ button:active {
   gap: 0;
 }
 
+/* Sidebar group separator — atlas §14.6 + Phase 4A. Each group beyond
+   the first is preceded by a 1px hairline divider that reads as a
+   "data section break" rather than a card-like edge. */
 .maka-list-group + .maka-list-group {
-  margin-top: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid oklch(from var(--foreground) l c h / 0.05);
 }
 
+/* Group label as "data-tier section header" — tighter typography,
+   uppercase tracking, slight monospace flavor. Mirrors the
+   reference's `.sidebar-section-title` (foreground-quaternary at 90%). */
 .maka-list-group-label {
   display: flex;
   align-items: baseline;
-  gap: 2px;
-  padding: 1px 6px 3px;
-  color: var(--foreground-42);
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0;
+  gap: 3px;
+  padding: 0 6px 3px;
+  color: var(--foreground-45);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
 }
 
 /* PR-SIDEBAR-IA-0 Phase 3 (WAWQAQ msgs `14ed98b5`, `761141c5` —
@@ -2271,9 +2281,14 @@ button:active {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--foreground-50);
-  font-size: 11px;
+  /* Phase 4A — tighten meta typography. 11/50 was reading too loud:
+     the date stamp dominated visual hierarchy when it should sit
+     under the title. 9/42 mirrors reference's secondary-meta tier. */
+  color: var(--foreground-42);
+  font-size: 9.5px;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
   flex-shrink: 0;
 }
 
