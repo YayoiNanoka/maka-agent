@@ -12,6 +12,7 @@ import {
   AiSdkBackend,
   BackendRegistry,
   PermissionEngine,
+  PiAgentBackend,
   SessionManager,
   buildProviderOptions,
   getAIModel,
@@ -29,6 +30,7 @@ import { buildHarborCellOutput, validateHarborCellOutput, type HarborCellOutput 
 import type { Config, Task } from './contracts.js';
 import type { HeadlessBackendContext, IsolatedToolExecutor, RealBackendIsolation } from './isolation.js';
 import { ISOLATED_HEADLESS_TOOL_NAMES, validateRealBackendIsolation } from './isolation.js';
+import { PiCliJsonTransport } from './pi-cli-json-transport.js';
 import { backendNeedsIsolation } from './runner.js';
 import { buildIsolatedHeadlessToolAvailability, buildIsolatedHeadlessTools } from './tools.js';
 
@@ -71,6 +73,32 @@ export interface ResolvedHarborCellAiSdkEnv {
   connection: LlmConnection;
   apiKey: string;
 }
+
+const PI_BASE_ENV_KEYS = ['PATH', 'HOME', 'USER', 'TMPDIR', 'TMP', 'TEMP', 'SHELL', 'SystemRoot', 'COMSPEC'];
+const PI_PROVIDER_ENV_RULES = [
+  { includes: ['volcengine'], prefixes: ['XIAOMI_', 'VOLCENGINE_'] },
+  { includes: ['deepseek'], keys: ['DEEPSEEK_API_KEY', 'DEEPSEEK_API_KEY_FILE', 'DEEPSEEK_BASE_URL'] },
+  { includes: ['openai'], keys: ['OPENAI_API_KEY', 'OPENAI_API_KEY_FILE', 'OPENAI_BASE_URL'] },
+  { includes: ['anthropic', 'claude'], keys: ['ANTHROPIC_API_KEY', 'ANTHROPIC_API_KEY_FILE'] },
+  {
+    includes: ['google', 'gemini'],
+    keys: [
+      'GOOGLE_API_KEY',
+      'GOOGLE_API_KEY_FILE',
+      'GEMINI_API_KEY',
+      'GOOGLE_GENERATIVE_AI_API_KEY',
+      'GOOGLE_APPLICATION_CREDENTIALS',
+      'GOOGLE_CLOUD_PROJECT',
+      'GOOGLE_CLOUD_LOCATION',
+      'GOOGLE_GENAI_USE_VERTEXAI',
+    ],
+  },
+  { includes: ['moonshot', 'kimi'], keys: ['MOONSHOT_API_KEY', 'MOONSHOT_API_KEY_FILE', 'MOONSHOT_BASE_URL'] },
+  {
+    includes: ['zai'],
+    keys: ['ZAI_API_KEY', 'ZAI_API_KEY_FILE', 'ZAI_CODING_CN_API_KEY', 'ZAI_CODING_CN_API_KEY_FILE', 'ZAI_BASE_URL'],
+  },
+] satisfies Array<{ includes: string[]; keys?: string[]; prefixes?: string[] }>;
 
 export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarborCellResult> {
   if (backendNeedsIsolation(input.config.backend)) {
@@ -158,27 +186,72 @@ export async function runHarborCellFromEnv(
   options: RunHarborCellFromEnvOptions = {},
 ): Promise<RunHarborCellResult> {
   const now = options.now ?? Date.now;
+  const newId = options.newId ?? randomId;
   const outputDir = env.MAKA_OUTPUT_DIR ?? '/logs/agent';
-  const modelSpec = parseModelSpec(env.MAKA_MODEL ?? env.HARBOR_MODEL ?? 'deepseek/deepseek-chat', env.MAKA_PROVIDER);
   const backend = backendFromEnv(env.MAKA_BACKEND);
-  const config: Config = {
+  const baseConfig = {
     id: env.MAKA_CONFIG_ID ?? 'harbor-cell',
     backend,
-    llmConnectionSlug: env.MAKA_LLM_CONNECTION_SLUG ?? modelSpec.provider,
-    model: modelSpec.model,
     ...(env.MAKA_SYSTEM_PROMPT !== undefined ? { systemPrompt: env.MAKA_SYSTEM_PROMPT } : {}),
   };
-  const registerBackends = options.registerBackends ?? (
-    backend === 'fake'
-      ? undefined
-      : buildAiSdkCellBackendRegistration({
-          provider: modelSpec.provider,
-          model: modelSpec.model,
-          env,
-          now,
-          newId: options.newId ?? randomId,
-        })
-  );
+  let config: Config;
+  let registerBackends = options.registerBackends;
+
+  switch (backend) {
+    case 'ai-sdk': {
+      const modelSpec = parseModelSpec(env.MAKA_MODEL ?? env.HARBOR_MODEL ?? 'deepseek/deepseek-chat', env.MAKA_PROVIDER);
+      config = {
+        ...baseConfig,
+        llmConnectionSlug: env.MAKA_LLM_CONNECTION_SLUG ?? modelSpec.provider,
+        model: modelSpec.model,
+      };
+      registerBackends ??= buildAiSdkCellBackendRegistration({
+        provider: modelSpec.provider,
+        model: modelSpec.model,
+        env,
+        now,
+        newId,
+      });
+      break;
+    }
+    case 'pi-agent': {
+      const model = env.MAKA_PI_MODEL ?? env.MAKA_MODEL ?? env.HARBOR_MODEL;
+      if (!model) throw new Error('MAKA_PI_MODEL, MAKA_MODEL, or HARBOR_MODEL must include a model id');
+      const piProvider = env.MAKA_PI_PROVIDER;
+      if (!registerBackends && !piProvider) {
+        throw new Error('MAKA_PI_PROVIDER is required when using the default Pi CLI transport');
+      }
+      config = {
+        ...baseConfig,
+        llmConnectionSlug: env.MAKA_LLM_CONNECTION_SLUG ?? piProvider ?? 'pi-agent',
+        model,
+      };
+      registerBackends ??= (registry) => {
+        registry.register('pi-agent', (ctx) =>
+          new PiAgentBackend({
+            sessionId: ctx.sessionId,
+            header: ctx.header,
+            appendMessage: ctx.appendMessage ?? ((message) => ctx.store.appendMessage(ctx.sessionId, message)),
+            permissionEngine: new PermissionEngine({ newId, now }),
+            transport: new PiCliJsonTransport({
+              command: env.MAKA_PI_COMMAND ?? 'pi',
+              ...(piProvider ? { provider: piProvider } : {}),
+              model,
+              env: buildPiCliEnv(env, piProvider),
+            }),
+          }),
+        );
+      };
+      break;
+    }
+    case 'fake':
+      config = {
+        ...baseConfig,
+        llmConnectionSlug: env.MAKA_LLM_CONNECTION_SLUG ?? 'fake',
+        model: env.MAKA_MODEL ?? env.HARBOR_MODEL ?? 'fake',
+      };
+      break;
+  }
 
   return await runHarborCell({
     config,
@@ -313,6 +386,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+function buildPiCliEnv(env: RunHarborCellEnv, provider: string | undefined): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = {};
+  copyEnv(result, { ...process.env, ...env }, PI_BASE_ENV_KEYS);
+  copyPrefixedEnv(result, env, 'PI_');
+
+  const normalizedProvider = provider?.toLowerCase() ?? '';
+  const rule = PI_PROVIDER_ENV_RULES.find((candidate) =>
+    candidate.includes.some((value) => normalizedProvider.includes(value)),
+  );
+  copyEnv(result, env, rule?.keys ?? []);
+  for (const prefix of rule?.prefixes ?? []) copyPrefixedEnv(result, env, prefix);
+
+  return result;
+}
+
+function copyPrefixedEnv(target: NodeJS.ProcessEnv, source: RunHarborCellEnv, prefix: string): void {
+  for (const [key, value] of Object.entries(source)) {
+    if (key.startsWith(prefix) && value !== undefined) target[key] = value;
+  }
+}
+
+function copyEnv(target: NodeJS.ProcessEnv, source: RunHarborCellEnv, keys: string[]): void {
+  for (const key of keys) {
+    const value = source[key];
+    if (value !== undefined) target[key] = value;
+  }
+}
+
 export function resolveHarborCellAiSdkEnv(input: {
   provider: ProviderType;
   model: string;
@@ -333,7 +434,7 @@ async function instructionFromEnv(env: RunHarborCellEnv): Promise<string> {
 
 function backendFromEnv(value: string | undefined): BackendKind {
   if (!value) return 'ai-sdk';
-  if (value === 'fake' || value === 'ai-sdk') return value;
+  if (value === 'fake' || value === 'ai-sdk' || value === 'pi-agent') return value;
   throw new Error(`unsupported MAKA_BACKEND: ${value}`);
 }
 
@@ -396,14 +497,21 @@ function providerBaseUrl(provider: ProviderType, env: RunHarborCellEnv): string 
 function apiKeyFromEnv(provider: ProviderType, env: RunHarborCellEnv): string {
   switch (provider) {
     case 'deepseek':
-      return env.DEEPSEEK_API_KEY ?? env.OPENAI_API_KEY ?? '';
+      return env.DEEPSEEK_API_KEY
+        ?? env.OPENAI_API_KEY
+        ?? '';
     case 'openai':
     case 'openai-compatible':
       return env.OPENAI_API_KEY ?? '';
     case 'moonshot':
-      return env.MOONSHOT_API_KEY ?? env.OPENAI_API_KEY ?? '';
+      return env.MOONSHOT_API_KEY
+        ?? env.OPENAI_API_KEY
+        ?? '';
     case 'zai-coding-plan':
-      return env.ZAI_API_KEY ?? env.OPENAI_API_KEY ?? '';
+      return env.ZAI_API_KEY
+        ?? env.ZAI_CODING_CN_API_KEY
+        ?? env.OPENAI_API_KEY
+        ?? '';
     case 'google':
       return env.GOOGLE_API_KEY ?? '';
     case 'anthropic':
