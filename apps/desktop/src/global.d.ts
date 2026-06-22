@@ -351,6 +351,15 @@ declare global {
       };
       dailyReview: {
         day(offsetDays: number, daySpan?: number): Promise<Result<DailyReviewSummary>>;
+        getConfig?(): Promise<DailyReviewConfig>;
+        setConfig?(patch: Partial<DailyReviewConfig>): Promise<DailyReviewConfig>;
+        runOnce?(input: { mode: DailyReviewMode; day?: number }): Promise<{ archiveId: string }>;
+        list?(): Promise<DailyReviewArchiveSummary[]>;
+        get?(archiveId: string): Promise<DailyReviewArchive | null>;
+        delete?(archiveId: string): Promise<void>;
+        listArchives?(): Promise<DailyReviewArchiveSummary[]>;
+        getArchive?(archiveId: string): Promise<DailyReviewArchive | null>;
+        deleteArchive?(archiveId: string): Promise<void>;
         saveMarkdownToFile(input: {
           markdown: string;
           defaultName: string;
@@ -364,12 +373,6 @@ declare global {
          * (e.g. no model configured). Renderer gracefully handles
          * rejection by showing the disabled / fallback form.
          */
-        getConfig?(): Promise<DailyReviewConfig>;
-        setConfig?(patch: Partial<DailyReviewConfig>): Promise<DailyReviewConfig>;
-        runOnce?(opts: { mode: DailyReviewMode }): Promise<{ archiveId: string }>;
-        listArchives?(): Promise<DailyReviewArchiveSummary[]>;
-        getArchive?(archiveId: string): Promise<DailyReviewArchive>;
-        deleteArchive?(archiveId: string): Promise<void>;
       };
       appWindow: {
         subscribeOpenSettings(handler: () => void): () => void;

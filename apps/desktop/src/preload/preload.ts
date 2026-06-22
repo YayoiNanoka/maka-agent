@@ -47,6 +47,10 @@ import type {
   PlanReminder,
   PlanReminderDeliveryTarget,
   PlanReminderRecurrence,
+  DailyReviewArchive,
+  DailyReviewArchiveSummary,
+  DailyReviewConfig,
+  DailyReviewMode,
   DailyReviewSummary,
   WebSearchProvider,
   WebSearchResponse,
@@ -632,6 +636,33 @@ contextBridge.exposeInMainWorld('maka', {
   dailyReview: {
     day(offsetDays: number, daySpan?: number): Promise<Result<DailyReviewSummary>> {
       return ipcRenderer.invoke('daily-review:day', { offsetDays, daySpan });
+    },
+    getConfig(): Promise<DailyReviewConfig> {
+      return ipcRenderer.invoke('daily-review:getConfig');
+    },
+    setConfig(patch: Partial<DailyReviewConfig>): Promise<DailyReviewConfig> {
+      return ipcRenderer.invoke('daily-review:setConfig', patch);
+    },
+    runOnce(input: { mode: DailyReviewMode; day?: number }): Promise<{ archiveId: string }> {
+      return ipcRenderer.invoke('daily-review:runOnce', input);
+    },
+    list(): Promise<DailyReviewArchiveSummary[]> {
+      return ipcRenderer.invoke('daily-review:list');
+    },
+    listArchives(): Promise<DailyReviewArchiveSummary[]> {
+      return ipcRenderer.invoke('daily-review:list');
+    },
+    get(archiveId: string): Promise<DailyReviewArchive | null> {
+      return ipcRenderer.invoke('daily-review:get', archiveId);
+    },
+    getArchive(archiveId: string): Promise<DailyReviewArchive | null> {
+      return ipcRenderer.invoke('daily-review:get', archiveId);
+    },
+    delete(archiveId: string): Promise<void> {
+      return ipcRenderer.invoke('daily-review:delete', archiveId);
+    },
+    deleteArchive(archiveId: string): Promise<void> {
+      return ipcRenderer.invoke('daily-review:delete', archiveId);
     },
     /**
      * PR-DAILY-REVIEW-EXPORT-FILE-0: render the markdown in the renderer
