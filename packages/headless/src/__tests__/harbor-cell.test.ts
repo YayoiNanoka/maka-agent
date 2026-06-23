@@ -19,6 +19,7 @@ import type { HeadlessBackendContext, IsolatedToolExecutor } from '../isolation.
 import {
   buildAiSdkCellBackendRegistration,
   buildHarborCellAiSdkTools,
+  createHarborCellLocalToolExecutor,
   HARBOR_CELL_OUTPUT_FILENAME,
   HARBOR_CELL_RUNTIME_EVENTS_FILENAME,
   resolveHarborCellAiSdkEnv,
@@ -313,6 +314,83 @@ describe('runHarborCell', () => {
       assert.equal(backendInput.tools.find((tool) => tool.name === 'Bash')?.permissionRequired, false);
       assert.equal(backendInput.tools.find((tool) => tool.name === 'Write')?.permissionRequired, false);
       assert.match(backendInput.systemPrompt ?? '', /Prefer Read, Glob, and Grep/);
+    });
+  });
+
+  test('Harbor ai-sdk backend passes an explicit system prompt through unchanged', async () => {
+    await withDirs(async ({ workspaceDir }) => {
+      const registry = new BackendRegistry();
+      const toolExecutor = fakeToolExecutor();
+      const register = buildAiSdkCellBackendRegistration({
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        env: { DEEPSEEK_API_KEY: 'test-key' },
+        now: () => 123,
+        newId: () => 'id',
+      });
+      // Trailing newline kept on purpose: the controller hashes these exact bytes.
+      const candidatePrompt = 'CANDIDATE SYSTEM PROMPT — exact bytes.\n';
+      await register(registry, {
+        config: {
+          id: 'harbor-ai-sdk',
+          backend: 'ai-sdk',
+          llmConnectionSlug: 'deepseek',
+          model: 'deepseek-v4-flash',
+          systemPrompt: candidatePrompt,
+        },
+        task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        workspaceDir,
+        realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
+        toolExecutor,
+      });
+
+      const backend = await registry.build('ai-sdk', backendContext(workspaceDir));
+      const backendInput = (backend as unknown as { input: { systemPrompt?: string } }).input;
+      assert.equal(backendInput.systemPrompt, candidatePrompt);
+      assert.doesNotMatch(backendInput.systemPrompt ?? '', /Maka Runtime|Prefer Read, Glob, and Grep/);
+    });
+  });
+
+  test('Harbor ai-sdk backend honors MAKA_TRIAL_* pricing override', async () => {
+    await withDirs(async ({ workspaceDir }) => {
+      const registry = new BackendRegistry();
+      const toolExecutor = fakeToolExecutor();
+      const register = buildAiSdkCellBackendRegistration({
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        env: {
+          DEEPSEEK_API_KEY: 'test-key',
+          MAKA_TRIAL_INPUT_USD_PER_1M: '0.145',
+          MAKA_TRIAL_OUTPUT_USD_PER_1M: '0.29',
+          MAKA_TRIAL_CACHE_READ_USD_PER_1M: '0.0029',
+        },
+        now: () => 123,
+        newId: () => 'id',
+      });
+      await register(registry, {
+        config: {
+          id: 'harbor-ai-sdk',
+          backend: 'ai-sdk',
+          llmConnectionSlug: 'deepseek',
+          model: 'deepseek-v4-flash',
+        },
+        task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        workspaceDir,
+        realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
+        toolExecutor,
+      });
+
+      const backend = await registry.build('ai-sdk', backendContext(workspaceDir));
+      const lookupPricing = (backend as unknown as {
+        input: { lookupPricing?: (key: string) => unknown };
+      }).input.lookupPricing;
+      assert.ok(lookupPricing, 'expected lookupPricing to be wired');
+      assert.deepEqual(lookupPricing('deepseek:deepseek-v4-flash'), {
+        modelKey: 'deepseek:deepseek-v4-flash',
+        inputUsdPer1M: 0.145,
+        outputUsdPer1M: 0.29,
+        cacheReadUsdPer1M: 0.0029,
+      });
     });
   });
 
@@ -764,6 +842,66 @@ setTimeout(() => {
     assert.equal(deepseek.connection.baseUrl, 'https://fallback.example/v1');
   });
 
+  test('resolves ai-sdk api key from a *_API_KEY_FILE without exposing the secret on argv', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'maka-cell-key-'));
+    try {
+      const keyFile = join(dir, 'deepseek-key');
+      await writeFile(keyFile, 'sk-secret-from-file\n', 'utf8');
+      const resolved = resolveHarborCellAiSdkEnv({
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        env: { DEEPSEEK_API_KEY_FILE: keyFile },
+        ts: 1,
+      });
+      assert.equal(resolved.apiKey, 'sk-secret-from-file');
+
+      // A raw key still wins over the file companion.
+      const rawWins = resolveHarborCellAiSdkEnv({
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        env: { DEEPSEEK_API_KEY: 'sk-raw', DEEPSEEK_API_KEY_FILE: keyFile },
+        ts: 1,
+      });
+      assert.equal(rawWins.apiKey, 'sk-raw');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+});
+
+describe('createHarborCellLocalToolExecutor', () => {
+  test('lets MAKA_CELL_COMMAND_TIMEOUT_MS lower the default per-command timeout', async () => {
+    const executor = createHarborCellLocalToolExecutor({ MAKA_CELL_COMMAND_TIMEOUT_MS: '50' });
+    const result = await executor.exec({ command: 'sleep 1', cwd: process.cwd() });
+    assert.notEqual(result.exitCode, 0);
+  });
+
+  test('honors an explicit per-command timeout over the configured default', async () => {
+    const executor = createHarborCellLocalToolExecutor({ MAKA_CELL_COMMAND_TIMEOUT_MS: '60000' });
+    const result = await executor.exec({ command: 'sleep 1', cwd: process.cwd(), timeoutMs: 50 });
+    assert.notEqual(result.exitCode, 0);
+  });
+
+  test('runs a quick command to completion under the default timeout', async () => {
+    const executor = createHarborCellLocalToolExecutor({});
+    const result = await executor.exec({ command: 'printf ok', cwd: process.cwd() });
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, 'ok');
+  });
+
+  test('scrubs provider API-key env so task commands cannot read the secret', async () => {
+    const executor = createHarborCellLocalToolExecutor({
+      DEEPSEEK_API_KEY_FILE: '/run/secrets/deepseek-key',
+      DEEPSEEK_API_KEY: 'sk-should-not-leak',
+    });
+    const result = await executor.exec({
+      command: 'printf "[%s][%s]" "${DEEPSEEK_API_KEY_FILE:-}" "${DEEPSEEK_API_KEY:-}"',
+      cwd: process.cwd(),
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, '[][]');
+  });
 });
 
 function fakeToolExecutor(): IsolatedToolExecutor {

@@ -31,6 +31,11 @@ describe('Harbor adapter contract', () => {
     assert.match(source, /MAKA_STORAGE_ROOT/);
     assert.match(source, /maka-cell-output\.json/);
     assert.match(source, /run-cell\.mjs/);
+    assert.match(source, /run-host-cell\.mjs/);
+    assert.match(source, /MAKA_HOST_API_KEY_FILE/);
+    assert.match(source, /MAKA_HARBOR_TOOL_EXECUTOR_URL/);
+    assert.match(source, /_run_host_cell/);
+    assert.match(source, /_ToolExecutorServer/);
     assert.match(source, /upload_file\(local_instruction_path, instruction_path\.as_posix\(\)\)/);
     assert.match(source, /bash -lc/);
     assert.match(source, /set -o pipefail/);
@@ -39,8 +44,60 @@ describe('Harbor adapter contract', () => {
     assert.match(source, /Maka cell did not write/);
     assert.match(source, /Maka cell output is not valid JSON/);
     assert.match(source, /_read_cell_output\(required=True\)/);
+    assert.match(source, /MAKA_CELL_TIMEOUT_SEC/);
+    assert.match(source, /timeout_sec=self\._cell_timeout_sec\(\)/);
+    assert.match(source, /deepseek\/deepseek-v4-flash/);
+    assert.doesNotMatch(source, /deepseek\/deepseek-chat/);
     assert.doesNotMatch(source, /and raw else None/);
     assert.doesNotMatch(source, /MAKA_INSTRUCTION_EOF/);
+  });
+
+  test('run-host-cell.mjs keeps provider auth on the host and calls Harbor tools through RPC', async () => {
+    const source = await readRepoFile('packages/headless/harbor/run-host-cell.mjs');
+
+    assert.match(source, /^#!\/usr\/bin\/env node/);
+    assert.match(source, /runHarborCell/);
+    assert.match(source, /buildAiSdkCellBackendRegistration/);
+    assert.match(source, /MAKA_HOST_API_KEY_FILE/);
+    assert.match(source, /MAKA_HOST_API_KEY_ENV_NAME/);
+    assert.match(source, /MAKA_HOST_BASE_URL/);
+    assert.match(source, /MAKA_HARBOR_TOOL_EXECUTOR_URL/);
+    assert.match(source, /MAKA_HARBOR_TOOL_EXECUTOR_TOKEN/);
+    assert.match(source, /fetch\(new URL\('\/exec'/);
+    assert.doesNotMatch(source, /DEEPSEEK_API_KEY_FILE/);
+    assert.doesNotMatch(source, /\/run\/secrets/);
+    assert.doesNotMatch(source, /host\.docker\.internal/);
+  });
+
+  test('run-prompt-optimization.mjs wires the headless run API with a key file, not a raw key', async () => {
+    const source = await readRepoFile('packages/headless/harbor/run-prompt-optimization.mjs');
+    assert.match(source, /runPromptOptimizationRun/);
+    assert.match(source, /discoverCachedHarborTasks/);
+    assert.match(source, /partitionPromptTasks/);
+    assert.match(source, /buildRewardHackVerifierPatterns/);
+    assert.match(source, /DEEPSEEK_V4_FLASH_PRICING/);
+    assert.match(source, /apiKeyFile: keyFile/);
+    assert.match(source, /resolvePromptOptimizationRunRoot/);
+    assert.match(source, /from '#prompt-optimization-run'/);
+    assert.match(source, /from '#prompt-structural-smoke'/);
+    // The secret travels as a file path only — never a raw key on argv/env here.
+    assert.doesNotMatch(source, /DEEPSEEK_API_KEY[^_]/);
+  });
+
+  test('the public headless barrel does not expose prompt-runner internals added for PR 149', async () => {
+    const source = await readRepoFile('packages/headless/src/index.ts');
+    assert.doesNotMatch(source, /RunHarborCell|runHarborCell|buildAiSdkCellBackendRegistration|createHarborCellLocalToolExecutor/);
+    assert.doesNotMatch(source, /runFixedPromptController|RunFixedPromptControllerInput|FixedPromptControllerResult/);
+    assert.doesNotMatch(source, /runPromptCandidateRound|createCliPromptCandidateGit|MetaAgentCompletion|PromptCandidateRoundResult/);
+    assert.doesNotMatch(source, /decidePromptAcceptance|calibratePromptAcceptanceBaseline|PromptAcceptanceDecision/);
+    assert.doesNotMatch(source, /promptStructuralSmokeReport|renderPromptStructuralSmokeMarkdown/);
+    assert.doesNotMatch(source, /createHarborTaskRunner|HarborTaskRunnerOptions|HarborProcessRunner/);
+    assert.doesNotMatch(source, /createAiSdkMetaAgent|createAiSdkMetaAgentCompletion|CreateAiSdkMetaAgentInput/);
+    assert.doesNotMatch(source, /runPromptOptimizationLoop|PromptOptimizationLoopInput/);
+    assert.doesNotMatch(source, /discoverCachedHarborTasks|partitionPromptTasks|buildRewardHackVerifierPatterns/);
+    assert.match(source, /runPromptOptimizationRun/);
+    assert.match(source, /PromptOptimizationRunInput/);
+    assert.match(source, /PromptOptimizationRunResult/);
   });
 
   test('maka_agent.py hydrates a valid cell output without Harbor installed', (t: TestContext) => {
@@ -265,6 +322,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert "node --version" in agent_probe_command, agent_probe_command
     assert "NODE_MAJOR" in agent_probe_command, agent_probe_command
     assert "test -f /opt/maka-agent/packages/headless/harbor/run-cell.mjs" in agent_probe_command, agent_probe_command
+    assert "test -f /opt/maka-agent/packages/headless/harbor/run-host-cell.mjs" in agent_probe_command, agent_probe_command
     assert "test -f /opt/maka-agent/packages/headless/dist/index.js" in agent_probe_command, agent_probe_command
 
     pi_agent = MakaAgent(Path(tmp), extra_env={
@@ -276,22 +334,26 @@ with tempfile.TemporaryDirectory() as tmp:
         "OPENAI_API_KEY_FILE": "/run/secrets/openai-key",
     })
     fake_pi_environment = types.SimpleNamespace(root_commands=[], agent_commands=[])
-    asyncio.run(pi_agent.install(fake_pi_environment))
-    pi_install_command = "\n".join(fake_pi_environment.root_commands)
-    assert "npm install -g" not in pi_install_command, pi_install_command
-    assert "npm prefix -g" not in pi_install_command, pi_install_command
-    pi_probe_command = "\n".join(fake_pi_environment.agent_commands)
-    assert "PI_COMMAND=/opt/pi/bin/pi" in pi_probe_command, pi_probe_command
-    assert "command -v \"$PI_COMMAND\"" in pi_probe_command, pi_probe_command
-    assert "\"$PI_COMMAND\" --version" in pi_probe_command, pi_probe_command
+    try:
+        asyncio.run(pi_agent.install(fake_pi_environment))
+    except RuntimeError as exc:
+        assert "backend=pi-agent is not supported by Maka Harbor v1" in str(exc), str(exc)
+    else:
+        raise AssertionError("expected Harbor adapter to reject pi-agent at install")
     pi_agent._resolved_flags = {"backend": "pi-agent"}
-    pi_env = pi_agent._cell_env(Path("/logs/agent/instruction.txt"))
-    assert pi_env["MAKA_BACKEND"] == "pi-agent", pi_env
-    assert pi_env["MAKA_PI_COMMAND"] == "/opt/pi/bin/pi", pi_env
-    assert pi_env["PI_CODING_AGENT_DIR"] == "/pi-agent", pi_env
-    assert pi_env["MAKA_PI_PROVIDER"] == "volcengine-plan", pi_env
-    assert pi_env["ZAI_CODING_CN_API_KEY"] == "zai-key", pi_env
-    assert pi_env["OPENAI_API_KEY_FILE"] == "/run/secrets/openai-key", pi_env
+    try:
+        pi_agent._cell_env(Path("/logs/agent/instruction.txt"))
+    except RuntimeError as exc:
+        assert "backend=pi-agent is not supported by Maka Harbor v1" in str(exc), str(exc)
+    else:
+        raise AssertionError("expected Harbor adapter to reject pi-agent cell env")
+
+    try:
+        MakaAgent(Path(tmp))._cell_env(Path("/logs/agent/instruction.txt"))
+    except RuntimeError as exc:
+        assert "backend=ai-sdk requires MAKA_HOST_API_KEY or MAKA_HOST_API_KEY_FILE" in str(exc), str(exc)
+    else:
+        raise AssertionError("expected ai-sdk without host-side credentials to fail")
 
     agent = MakaAgent(Path(tmp))
     context = AgentContext()
@@ -406,13 +468,53 @@ with tempfile.TemporaryDirectory() as tmp:
         raise AssertionError("expected invalid zero-token trial pricing to raise")
 
     gateway_agent = MakaAgent(Path(tmp), extra_env={
+        "MAKA_HOST_API_KEY_FILE": "/host/deepseek-key",
         "MAKA_PROVIDER": "openai-compatible",
         "MAKA_MODEL": "anthropic/claude-sonnet-4-5",
+        "MAKA_TRIAL_INPUT_USD_PER_1M": "0.145",
+        "MAKA_TRIAL_OUTPUT_USD_PER_1M": "0.29",
+        "MAKA_TRIAL_CACHE_READ_USD_PER_1M": "0.0029",
+        "MAKA_TRIAL_PRICING_SOURCE": "deepseek-v4-flash",
     })
     gateway_env = gateway_agent._cell_env(Path("/logs/agent/instruction.txt"))
     assert gateway_env["MAKA_PROVIDER"] == "openai-compatible", gateway_env
     assert gateway_env["MAKA_MODEL"] == "anthropic/claude-sonnet-4-5", gateway_env
     assert "MAKA_WORKDIR" not in gateway_env, gateway_env
+    # Trial pricing must reach the in-container cell so it can price unknown models.
+    assert gateway_env["MAKA_TRIAL_INPUT_USD_PER_1M"] == "0.145", gateway_env
+    assert gateway_env["MAKA_TRIAL_OUTPUT_USD_PER_1M"] == "0.29", gateway_env
+    assert gateway_env["MAKA_TRIAL_CACHE_READ_USD_PER_1M"] == "0.0029", gateway_env
+    assert gateway_env["MAKA_TRIAL_PRICING_SOURCE"] == "deepseek-v4-flash", gateway_env
+
+    # Cell wall-clock timeout is operator-configurable with a safe default and a
+    # fallback for malformed or non-positive values.
+    assert MakaAgent(Path(tmp))._cell_timeout_sec() == 900
+    assert MakaAgent(Path(tmp), extra_env={"MAKA_CELL_TIMEOUT_SEC": "1800"})._cell_timeout_sec() == 1800
+    assert MakaAgent(Path(tmp), extra_env={"MAKA_CELL_TIMEOUT_SEC": "oops"})._cell_timeout_sec() == 900
+    assert MakaAgent(Path(tmp), extra_env={"MAKA_CELL_TIMEOUT_SEC": "0"})._cell_timeout_sec() == 900
+
+    # The default model must not be the deprecated deepseek-chat alias.
+    default_model_env = MakaAgent(Path(tmp), extra_env={"MAKA_HOST_API_KEY_FILE": "/host/deepseek-key"})._cell_env(Path("/logs/agent/instruction.txt"))
+    assert default_model_env["MAKA_MODEL"] == "deepseek/deepseek-v4-flash", default_model_env
+
+    # The in-container Bash command-timeout floor reaches the cell.
+    command_timeout_env = MakaAgent(Path(tmp), extra_env={
+        "MAKA_BACKEND": "fake",
+        "MAKA_CELL_COMMAND_TIMEOUT_MS": "600000",
+    })._cell_env(Path("/logs/agent/instruction.txt"))
+    assert command_timeout_env["MAKA_CELL_COMMAND_TIMEOUT_MS"] == "600000", command_timeout_env
+
+    # Host-side LLM mode must not forward provider secrets into the task-cell env.
+    host_agent = MakaAgent(Path(tmp), extra_env={
+        "MAKA_HOST_API_KEY_FILE": "/host/secrets/deepseek-key",
+        "DEEPSEEK_API_KEY": "raw-secret",
+        "DEEPSEEK_API_KEY_FILE": "/run/secrets/deepseek-key",
+        "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+    })
+    host_env = host_agent._cell_env(Path("/logs/agent/instruction.txt"))
+    assert "DEEPSEEK_API_KEY" not in host_env, host_env
+    assert "DEEPSEEK_API_KEY_FILE" not in host_env, host_env
+    assert "DEEPSEEK_BASE_URL" not in host_env, host_env
 `;
 }
 

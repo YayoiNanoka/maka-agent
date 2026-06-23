@@ -3,6 +3,7 @@ import { appendFile, mkdir, readFile, truncate, writeFile } from 'node:fs/promis
 import { dirname } from 'node:path';
 import { validateHarborCellOutput, type HarborCellOutput, type HarborCellTokenSummary } from './cell-output.js';
 import type { Config } from './contracts.js';
+import { assertFinitePositive, assertPositiveInt, assertRatio } from './numeric-guards.js';
 
 export const FIXED_PROMPT_WAL_SCHEMA_VERSION = 1;
 
@@ -181,6 +182,12 @@ export async function runFixedPromptController(
 ): Promise<FixedPromptControllerResult> {
   const now = input.now ?? Date.now;
   const newId = input.newId ?? randomId;
+  // Fail loud on out-of-contract guard knobs before any work: a NaN ceiling or
+  // ratio would make `cost >= ceiling` / `rate > ratio` always false and
+  // silently disable the guard (maxConcurrency is checked in normalizeMaxConcurrency).
+  if (input.costCeilingUsd !== undefined) assertFinitePositive('costCeilingUsd', input.costCeilingUsd);
+  if (input.maxInfraFailureRate !== undefined) assertRatio('maxInfraFailureRate', input.maxInfraFailureRate);
+  assertUniqueTaskIds(input.tasks.map((task) => task.id));
   const systemPrompt = await readFile(input.systemPromptPath, 'utf8');
   const expectedPromptHash = hashSystemPrompt(systemPrompt);
   const config = { ...input.config, systemPrompt };
@@ -193,7 +200,10 @@ export async function runFixedPromptController(
     maxInfraFailureRate: input.maxInfraFailureRate,
     costCeilingUsd: input.costCeilingUsd,
   });
-  const maxConcurrency = hasStopGuard(input) ? 1 : normalizeMaxConcurrency(input.maxConcurrency);
+  // Always validate the requested concurrency (even when a stop guard forces the
+  // effective value to 1) so a fractional/NaN value never slips through unchecked.
+  const requestedConcurrency = normalizeMaxConcurrency(input.maxConcurrency);
+  const maxConcurrency = hasStopGuard(input) ? 1 : requestedConcurrency;
 
   for (let index = 0; index < input.tasks.length;) {
     if (stopReason) break;
@@ -240,6 +250,18 @@ export async function runFixedPromptController(
     resultsTsvPath: input.resultsTsvPath,
     ...(stopReason ? { stopReason } : {}),
   };
+}
+
+function assertUniqueTaskIds(taskIds: readonly string[]): void {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const taskId of taskIds) {
+    if (seen.has(taskId)) duplicates.add(taskId);
+    seen.add(taskId);
+  }
+  if (duplicates.size > 0) {
+    throw new Error(`tasks contain duplicate id(s): ${[...duplicates].sort().join(', ')}`);
+  }
 }
 
 export async function readFixedPromptWal(path: string): Promise<FixedPromptWalEvent[]> {
@@ -324,33 +346,45 @@ async function runTaskAndBuildEvent(input: {
   id: string;
   ts: number;
 }): Promise<FixedPromptTaskWalEvent> {
+  const runHarbor = () => input.input.harborRunner({
+    runId: input.input.runId,
+    roundId: input.input.roundId,
+    task: input.task,
+    config: input.config,
+    systemPrompt: input.systemPrompt,
+  });
+  let output;
   try {
-    const output = await input.input.harborRunner({
-      runId: input.input.runId,
-      roundId: input.input.roundId,
-      task: input.task,
-      config: input.config,
-      systemPrompt: input.systemPrompt,
-    });
-    return taskEventFromOutput({
-      output,
-      expectedPromptHash: input.expectedPromptHash,
-      taskId: input.task.id,
-      runId: input.input.runId,
-      roundId: input.input.roundId,
-      id: input.id,
-      ts: input.ts,
-    });
-  } catch (error) {
-    return taskInfraFailedEvent({
-      error,
-      taskId: input.task.id,
-      runId: input.input.runId,
-      roundId: input.input.roundId,
-      id: input.id,
-      ts: input.ts,
-    });
+    output = await runHarbor();
+  } catch {
+    // #64: a thrown Harbor/Docker error is an infra failure, often a transient
+    // flake (container build hiccup, timeout). Retry the same task + prompt once
+    // before recording task_infra_failed, so a single blip does not pollute the
+    // candidate's decision. A second failure is treated as a real infra failure.
+    // A plumbing failure (a successful run with bad output) does not throw and is
+    // not retried — it is deterministic.
+    try {
+      output = await runHarbor();
+    } catch (error) {
+      return taskInfraFailedEvent({
+        error,
+        taskId: input.task.id,
+        runId: input.input.runId,
+        roundId: input.input.roundId,
+        id: input.id,
+        ts: input.ts,
+      });
+    }
   }
+  return taskEventFromOutput({
+    output,
+    expectedPromptHash: input.expectedPromptHash,
+    taskId: input.task.id,
+    runId: input.input.runId,
+    roundId: input.input.roundId,
+    id: input.id,
+    ts: input.ts,
+  });
 }
 
 function taskEventFromOutput(input: {
@@ -586,10 +620,8 @@ function taskEventsCostUsd(events: readonly FixedPromptTaskWalEvent[]): number {
 
 function normalizeMaxConcurrency(value: number | undefined): number {
   if (value === undefined) return 1;
-  if (!Number.isFinite(value) || value < 1) {
-    throw new Error('maxConcurrency must be at least 1');
-  }
-  return Math.floor(value);
+  // A fractional concurrency must fail loud, not be silently floored.
+  return assertPositiveInt('maxConcurrency', value);
 }
 
 async function truncateTornWalTail(path: string): Promise<void> {

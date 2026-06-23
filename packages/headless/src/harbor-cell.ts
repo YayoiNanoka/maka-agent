@@ -1,10 +1,12 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { exec as nodeExec } from 'node:child_process';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type {
   BackendKind,
   LlmConnection,
+  PricingConfig,
   ProviderType,
 } from '@maka/core';
 import { PROVIDER_DEFAULTS } from '@maka/core';
@@ -203,7 +205,7 @@ export async function runHarborCellFromEnv(
 
   switch (backend) {
     case 'ai-sdk': {
-      const modelSpec = parseModelSpec(env.MAKA_MODEL ?? env.HARBOR_MODEL ?? 'deepseek/deepseek-chat', env.MAKA_PROVIDER);
+      const modelSpec = parseModelSpec(env.MAKA_MODEL ?? env.HARBOR_MODEL ?? 'deepseek/deepseek-v4-flash', env.MAKA_PROVIDER);
       config = {
         ...baseConfig,
         llmConnectionSlug: env.MAKA_LLM_CONNECTION_SLUG ?? modelSpec.provider,
@@ -291,6 +293,11 @@ export function buildAiSdkCellBackendRegistration(input: {
     env: input.env,
     ts: input.now(),
   });
+  const modelKey = `${connection.providerType}:${input.model}`;
+  const pricingOverride = resolveHarborCellPricingOverride(input.env, modelKey);
+  const lookupPricing = pricingOverride
+    ? (key: string): PricingConfig | null => (key === modelKey ? pricingOverride : getBuiltinPricing(key))
+    : getBuiltinPricing;
   const permissionEngine = new PermissionEngine({ newId: input.newId, now: input.now });
   return (registry, context) => {
     if (!context.toolExecutor) {
@@ -315,7 +322,7 @@ export function buildAiSdkCellBackendRegistration(input: {
         toolAvailability: buildIsolatedHeadlessToolAvailability(),
         providerOptions: buildProviderOptions(connection, input.model),
         systemPrompt: harborCellSystemPrompt(context.config.systemPrompt),
-        lookupPricing: getBuiltinPricing,
+        lookupPricing,
         newId: input.newId,
         now: input.now,
         recordRunTrace: ctx.recordRunTrace,
@@ -336,8 +343,14 @@ export function buildHarborCellAiSdkTools(
   ));
 }
 
+export const HARBOR_CELL_DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
+
 export function createHarborCellLocalToolExecutor(env: RunHarborCellEnv = process.env): IsolatedToolExecutor {
   const childEnv = childProcessEnv(env);
+  // A command that does not request its own timeout falls back to this. Some
+  // Terminal-Bench tasks build or test for longer than the 2-minute default, so
+  // the floor is operator-configurable instead of a hard-coded failure source.
+  const defaultTimeoutMs = numericEnv(env.MAKA_CELL_COMMAND_TIMEOUT_MS) ?? HARBOR_CELL_DEFAULT_COMMAND_TIMEOUT_MS;
   return {
     exec: async ({ command, cwd, timeoutMs, boundedTail }) => {
       if (boundedTail) {
@@ -374,7 +387,7 @@ export function createHarborCellLocalToolExecutor(env: RunHarborCellEnv = proces
         const result = await execAsync(command, {
           cwd,
           env: childEnv,
-          timeout: timeoutMs ?? 120_000,
+          timeout: timeoutMs ?? defaultTimeoutMs,
           maxBuffer: HARBOR_CELL_TOOL_MAX_BUFFER_BYTES,
         });
         return { exitCode: 0, stdout: result.stdout, stderr: result.stderr };
@@ -389,22 +402,59 @@ export function createHarborCellLocalToolExecutor(env: RunHarborCellEnv = proces
   };
 }
 
+// When the cell is given an explicit system prompt (MAKA_SYSTEM_PROMPT), it is
+// the complete prompt and is passed through byte-for-byte: the prompt-optimization
+// controller hashes exactly this string and verifies the round-trip against the
+// systemPromptHash the runtime stamps, so any wrapping here would break the check
+// (and make "the prompt being optimized" differ from "the prompt that ran").
+// The built-in preamble is only the default for prompt-less ad-hoc cell runs.
 function harborCellSystemPrompt(configPrompt: string | undefined): string {
+  if (configPrompt !== undefined) return configPrompt;
   return [
-    [
-      'You are Maka Runtime running inside an isolated Harbor benchmark task container.',
-      'Prefer Read, Glob, and Grep for file inspection and search.',
-      'Prefer Edit and Write for file changes.',
-      'Use Bash for running programs, tests, and shell-specific debugging only.',
-    ].join('\n'),
-    configPrompt,
-  ].filter((part): part is string => typeof part === 'string' && part.trim().length > 0).join('\n\n');
+    'You are Maka Runtime running inside an isolated Harbor benchmark task container.',
+    'Prefer Read, Glob, and Grep for file inspection and search.',
+    'Prefer Edit and Write for file changes.',
+    'Use Bash for running programs, tests, and shell-specific debugging only.',
+  ].join('\n');
 }
+
+// Builtin pricing has no entry for newer DeepSeek models (e.g. deepseek-v4-flash),
+// so without an override the cell would emit costUsd=0 and the controller would
+// flag every task as a zero_cost_with_tokens plumbing failure. Honor the same
+// MAKA_TRIAL_*_USD_PER_1M env the Python adapter (trial_pricing.py) already reads,
+// so one pricing source feeds both the runtime cell cost and the Harbor trial cost.
+function resolveHarborCellPricingOverride(env: RunHarborCellEnv, modelKey: string): PricingConfig | null {
+  const inputUsdPer1M = numericEnv(env.MAKA_TRIAL_INPUT_USD_PER_1M);
+  const outputUsdPer1M = numericEnv(env.MAKA_TRIAL_OUTPUT_USD_PER_1M);
+  if (inputUsdPer1M === undefined || outputUsdPer1M === undefined) return null;
+  const cacheReadUsdPer1M = numericEnv(env.MAKA_TRIAL_CACHE_READ_USD_PER_1M);
+  const cacheWriteUsdPer1M = numericEnv(env.MAKA_TRIAL_CACHE_WRITE_USD_PER_1M);
+  return {
+    modelKey,
+    inputUsdPer1M,
+    outputUsdPer1M,
+    ...(cacheReadUsdPer1M !== undefined ? { cacheReadUsdPer1M } : {}),
+    ...(cacheWriteUsdPer1M !== undefined ? { cacheWriteUsdPer1M } : {}),
+  };
+}
+
+function numericEnv(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/** Provider secrets the LLM backend already captured; task tool subprocesses must
+ * never see them, or a candidate prompt could `cat $..._API_KEY_FILE` and exfiltrate. */
+const TOOL_CHILD_SECRET_ENV = /_API_KEY(_FILE)?$/;
 
 function childProcessEnv(env: RunHarborCellEnv): NodeJS.ProcessEnv {
   const childEnv: NodeJS.ProcessEnv = { ...process.env };
   for (const [key, value] of Object.entries(env)) {
     if (value !== undefined) childEnv[key] = value;
+  }
+  for (const key of Object.keys(childEnv)) {
+    if (TOOL_CHILD_SECRET_ENV.test(key)) delete childEnv[key];
   }
   return childEnv;
 }
@@ -539,30 +589,42 @@ function providerBaseUrl(provider: ProviderType, env: RunHarborCellEnv): string 
 function apiKeyFromEnv(provider: ProviderType, env: RunHarborCellEnv): string {
   switch (provider) {
     case 'deepseek':
-      return env.DEEPSEEK_API_KEY
-        ?? env.OPENAI_API_KEY
-        ?? '';
+      return resolveApiKey(env, ['DEEPSEEK_API_KEY', 'OPENAI_API_KEY']);
     case 'openai':
     case 'openai-compatible':
-      return env.OPENAI_API_KEY ?? '';
+      return resolveApiKey(env, ['OPENAI_API_KEY']);
     case 'moonshot':
-      return env.MOONSHOT_API_KEY
-        ?? env.OPENAI_API_KEY
-        ?? '';
+      return resolveApiKey(env, ['MOONSHOT_API_KEY', 'OPENAI_API_KEY']);
     case 'zai-coding-plan':
-      return env.ZAI_API_KEY
-        ?? env.ZAI_CODING_CN_API_KEY
-        ?? env.OPENAI_API_KEY
-        ?? '';
+      return resolveApiKey(env, ['ZAI_API_KEY', 'ZAI_CODING_CN_API_KEY', 'OPENAI_API_KEY']);
     case 'google':
-      return env.GOOGLE_API_KEY ?? '';
+      return resolveApiKey(env, ['GOOGLE_API_KEY']);
     case 'anthropic':
     case 'kimi-coding-plan':
     case 'claude-subscription':
-      return env.ANTHROPIC_API_KEY ?? '';
+      return resolveApiKey(env, ['ANTHROPIC_API_KEY']);
     default:
-      return env.OPENAI_API_KEY ?? '';
+      return resolveApiKey(env, ['OPENAI_API_KEY']);
   }
+}
+
+// Resolve an API key from either the raw env var or its `<NAME>_FILE` companion.
+// The file path is what travels through the Harbor CLI / job config, so the secret
+// itself stays in a mounted file — never on a command line or in config.json.
+function resolveApiKey(env: RunHarborCellEnv, names: readonly string[]): string {
+  for (const name of names) {
+    const raw = env[name];
+    if (raw) return raw;
+    const filePath = env[`${name}_FILE`];
+    if (filePath) {
+      try {
+        return readFileSync(filePath, 'utf8').trim();
+      } catch {
+        // Fall through to the next candidate (or empty) when the file is unreadable.
+      }
+    }
+  }
+  return '';
 }
 
 function runtimeEventsJsonl(invocation: InvocationResult): string {
