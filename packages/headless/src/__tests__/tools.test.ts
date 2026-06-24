@@ -188,6 +188,8 @@ describe('isolated headless tools', () => {
     assert.ok(names.includes('inventory_submit'));
     assert.ok(names.includes('todo_update'));
     assert.ok(names.includes('self_check_submit'));
+    assert.ok(!names.includes('engineering_record'));
+    assert.ok(!names.includes('check_record'));
   });
 
   test('Read, Write, Glob, and Grep delegate to native isolated executor methods', async () => {

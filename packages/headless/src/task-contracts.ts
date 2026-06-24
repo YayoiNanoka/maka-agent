@@ -312,6 +312,7 @@ export interface HeavyTaskInventoryState {
 export interface HeavyTaskTodoItem {
   id: string;
   content: string;
+  kind?: 'inspect' | 'implement' | 'runnable_artifact' | 'public_check' | 'repair' | 'final_self_check';
   status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
   priority: 'high' | 'medium' | 'low';
   evidence?: string;

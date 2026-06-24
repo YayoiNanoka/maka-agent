@@ -33,6 +33,9 @@ export const heavyTaskInventorySubmitSchema = z.object({
 export const heavyTaskTodoItemSchema = z.object({
   id: z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9._:-]+$/),
   content: z.string().trim().min(1).max(MAX_ITEM_CHARS),
+  kind: z.enum(['inspect', 'implement', 'runnable_artifact', 'public_check', 'repair', 'final_self_check'])
+    .optional()
+    .describe('Optional lightweight phase marker. Use runnable_artifact and public_check for the early runnable/check gate.'),
   status: z.enum(['pending', 'in_progress', 'completed', 'cancelled']),
   priority: z.enum(['high', 'medium', 'low']),
   evidence: z.string().trim().min(1).max(MAX_ITEM_CHARS).optional(),
@@ -177,7 +180,8 @@ export function renderHeavyTaskProgressForPrompt(projection: {
     const active = todos.items.find((item) => item.status === 'in_progress');
     lines.push(`- Active todo: ${active ? active.id : 'none'}`);
     for (const item of todos.items.slice(0, 12)) {
-      lines.push(`  - [${item.status}] (${item.priority}) ${item.id}: ${oneLine(item.content, 160)}`);
+      const kind = item.kind ? ` ${item.kind}` : '';
+      lines.push(`  - [${item.status}] (${item.priority})${kind} ${item.id}: ${oneLine(item.content, 160)}`);
     }
     if (todos.items.length > 12) {
       lines.push(`  - ${todos.items.length - 12} more todo item(s) omitted`);

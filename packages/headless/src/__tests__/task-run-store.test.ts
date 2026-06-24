@@ -384,6 +384,22 @@ describe('TaskRunStore', () => {
           ts: 3,
           items: [
             { id: 'edit', content: 'Patch implementation', status: 'completed', priority: 'high' },
+            {
+              id: 'artifact',
+              kind: 'runnable_artifact',
+              content: 'Create first runnable artifact',
+              status: 'completed',
+              priority: 'high',
+              evidence: 'Runnable artifact exists.',
+            },
+            {
+              id: 'check',
+              kind: 'public_check',
+              content: 'Run public check',
+              status: 'completed',
+              priority: 'high',
+              evidence: 'Public check passed.',
+            },
             { id: 'optional', content: 'Optional polish', status: 'cancelled', priority: 'low', evidence: 'Not required by public task.' },
           ],
           source: { kind: 'model_tool', toolCallId: 'tool-2' },

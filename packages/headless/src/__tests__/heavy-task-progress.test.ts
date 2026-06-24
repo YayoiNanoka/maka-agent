@@ -62,12 +62,15 @@ describe('heavy-task progress tools', () => {
     const result = await todoUpdate.impl({
       items: [
         { id: 'inspect', content: 'Inspect public files', status: 'completed', priority: 'high' },
-        { id: 'edit', content: 'Patch implementation', status: 'in_progress', priority: 'high' },
+        { id: 'artifact', kind: 'runnable_artifact', content: 'Patch implementation', status: 'in_progress', priority: 'high' },
+        { id: 'check', kind: 'public_check', content: 'Run public check', status: 'pending', priority: 'high' },
       ],
     }, toolContext) as { accepted: boolean; todos: HeavyTaskTodoState };
 
     assert.equal(result.accepted, true);
     assert.equal(result.todos.items[1]?.status, 'in_progress');
+    assert.equal(result.todos.items[1]?.kind, 'runnable_artifact');
+    assert.equal(result.todos.items[2]?.kind, 'public_check');
     assert.throws(() => heavyTaskTodoUpdateSchema.parse({
       items: [
         { id: 'same', content: 'First', status: 'pending', priority: 'medium' },
@@ -102,14 +105,19 @@ describe('heavy-task progress tools', () => {
         todoSetId: 'todos-1',
         taskRunId: 'run-3',
         ts: 2,
-        items: [{ id: 'edit', content: 'Patch implementation', status: 'in_progress', priority: 'high' }],
+        items: [
+          { id: 'artifact', kind: 'runnable_artifact', content: 'Patch implementation', status: 'in_progress', priority: 'high' },
+          { id: 'check', kind: 'public_check', content: 'Run public check', status: 'pending', priority: 'high' },
+        ],
         source: { kind: 'model_tool', toolCallId: 'tool-2' },
       },
     });
 
     assert.match(rendered ?? '', /Heavy-task progress state/);
     assert.match(rendered ?? '', /README\.md/);
-    assert.match(rendered ?? '', /Active todo: edit/);
+    assert.match(rendered ?? '', /Active todo: artifact/);
+    assert.match(rendered ?? '', /runnable_artifact/);
+    assert.match(rendered ?? '', /public_check/);
   });
 });
 

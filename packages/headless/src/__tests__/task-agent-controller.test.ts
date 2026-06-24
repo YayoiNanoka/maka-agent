@@ -260,7 +260,10 @@ class ProgressToolBackend implements AgentBackend {
       items: [{ path: 'README.md', kind: 'file', status: 'observed' }],
     }, toolCtx);
     await todoUpdate.impl({
-      items: [{ id: 'edit', content: 'Patch implementation', status: 'in_progress', priority: 'high' }],
+      items: [
+        { id: 'artifact', kind: 'runnable_artifact', content: 'Patch first runnable artifact', status: 'in_progress', priority: 'high' },
+        { id: 'check', kind: 'public_check', content: 'Run public check after artifact exists', status: 'pending', priority: 'high' },
+      ],
     }, toolCtx);
     await selfCheckSubmit.impl({
       status: 'pass',
@@ -424,6 +427,8 @@ describe('runTaskOnce', () => {
       assert.equal(result.projection.latestHeavyTaskInventory?.summary, 'Inspected public files.');
       assert.equal(result.projection.latestHeavyTaskInventory?.items[0]?.path, 'README.md');
       assert.equal(result.projection.latestHeavyTaskTodos?.items[0]?.status, 'in_progress');
+      assert.equal(result.projection.latestHeavyTaskTodos?.items[0]?.kind, 'runnable_artifact');
+      assert.equal(result.projection.latestHeavyTaskTodos?.items[1]?.kind, 'public_check');
       assert.equal(result.projection.latestHeavyTaskSelfCheck?.status, 'pass');
       assert.equal(result.projection.latestHeavyTaskSelfCheck?.guard.status, 'accepted');
       assert.equal(

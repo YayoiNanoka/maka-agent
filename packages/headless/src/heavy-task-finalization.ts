@@ -11,6 +11,10 @@ import type {
   TaskRunStatus,
 } from './task-contracts.js';
 
+type HeavyTaskPhaseGateKind = 'runnable_artifact' | 'public_check';
+
+const REQUIRED_PHASE_GATE_KINDS: readonly HeavyTaskPhaseGateKind[] = ['runnable_artifact', 'public_check'];
+
 export type HeavyTaskRuntimeCapKind =
   | 'none'
   | 'tool_call_step_cap'
@@ -127,10 +131,18 @@ function semanticStatusFromInput(input: HeavyTaskCompletionInput): HeavyTaskComp
   if (unresolvedTodoIds.length > 0) {
     return { ...base, status: 'incomplete', reason: 'latest heavy-task todos contain unresolved work' };
   }
+  const missingPhaseGateKinds = missingPhaseGateKindsFrom(todos);
+  if (missingPhaseGateKinds.length > 0) {
+    return {
+      ...base,
+      status: 'incomplete',
+      reason: `missing completed early runnable/check phase-gate todos: ${missingPhaseGateKinds.join(', ')}`,
+    };
+  }
   return {
     ...base,
     status: 'complete',
-    reason: 'accepted public self-check passed and latest todos are resolved/nonblocking',
+    reason: 'accepted public self-check passed, todos are resolved/nonblocking, and early runnable/check phase gate is complete',
   };
 }
 
@@ -150,6 +162,12 @@ function isResolvedOrNonblockingTodo(item: HeavyTaskTodoItem): boolean {
 
 function isNonblockingTodo(item: HeavyTaskTodoItem): boolean {
   return item.status === 'cancelled' && typeof item.evidence === 'string' && item.evidence.trim().length > 0;
+}
+
+function missingPhaseGateKindsFrom(todos: HeavyTaskTodoState): HeavyTaskPhaseGateKind[] {
+  return REQUIRED_PHASE_GATE_KINDS.filter((kind) =>
+    !todos.items.some((item) => item.kind === kind && item.status === 'completed'),
+  );
 }
 
 function classifyCapKind(input: HeavyTaskCompletionInput, reason: string | undefined): HeavyTaskRuntimeCapKind {

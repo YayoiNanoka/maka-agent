@@ -119,13 +119,16 @@ describe('heavy-task policy', () => {
     assert.match(prompt, /inspect public task files/);
     assert.match(prompt, /inventory_submit/);
     assert.match(prompt, /todo_update/);
-    assert.match(prompt, /engineering_record/);
-    assert.match(prompt, /check_record/);
+    assert.match(prompt, /runnable_artifact/);
+    assert.match(prompt, /public_check/);
+    assert.match(prompt, /Early runnable\/check phase gate/);
     assert.match(prompt, /self_check_submit/);
-    assert.match(prompt, /inventory -> hypothesize -> patch -> targeted_check -> repair -> semantic_self_check -> finish_or_continue/);
+    assert.match(prompt, /inventory -> runnable_artifact -> public_check -> repair_or_continue -> semantic_self_check -> finish_or_continue/);
     assert.match(prompt, /public, task-derived semantic self-check evidence/);
+    assert.match(prompt, /derived from the trace/);
     assert.match(prompt, /source guard rejects hidden, private, or evaluator-only material/);
     assert.match(prompt, /Official benchmark scoring remains external and authoritative/);
+    assert.doesNotMatch(prompt, /engineering_record|check_record|evidenceChain/);
   });
 
   test('policy guardrails use generic forbidden-source categories only', () => {

@@ -368,6 +368,22 @@ describe('task run export', () => {
   test('exports semantic incomplete and finalization ineligible when todos are unresolved', () => {
     const events = heavyTaskCompletionEvents([
       { id: 'edit', content: 'Patch implementation', status: 'completed', priority: 'high' },
+      {
+        id: 'artifact',
+        kind: 'runnable_artifact',
+        content: 'Create first runnable artifact',
+        status: 'completed',
+        priority: 'high',
+        evidence: 'Runnable artifact exists in public workspace.',
+      },
+      {
+        id: 'check',
+        kind: 'public_check',
+        content: 'Run public check',
+        status: 'completed',
+        priority: 'high',
+        evidence: 'Public check passed.',
+      },
       { id: 'verify', content: 'Run public checks', status: 'pending', priority: 'high' },
     ]);
     const exported = taskRunExportFromProjection(projectTaskRun(events, 'run-heavy-complete'));
@@ -651,6 +667,22 @@ describe('task run export', () => {
 
 function heavyTaskCompletionEvents(todos: HeavyTaskTodoItem[] = [
   { id: 'edit', content: 'Patch implementation', status: 'completed', priority: 'high' },
+  {
+    id: 'artifact',
+    kind: 'runnable_artifact',
+    content: 'Create first runnable artifact',
+    status: 'completed',
+    priority: 'high',
+    evidence: 'Runnable artifact exists in public workspace.',
+  },
+  {
+    id: 'check',
+    kind: 'public_check',
+    content: 'Run public check',
+    status: 'completed',
+    priority: 'high',
+    evidence: 'Public check passed.',
+  },
   {
     id: 'optional-polish',
     content: 'Optional polish',

@@ -25,7 +25,7 @@ describe('heavy-task finalization status', () => {
       taxonomy: 'budget_exhausted',
       heavyTaskMode,
       latestHeavyTaskSelfCheck: selfCheck('pass'),
-      latestHeavyTaskTodos: todos([{ id: 'edit', status: 'completed' }]),
+      latestHeavyTaskTodos: phaseGateTodos([{ id: 'edit', status: 'completed' }]),
     });
 
     assert.equal(status.runtime.capLike, true);
@@ -43,7 +43,7 @@ describe('heavy-task finalization status', () => {
       taxonomy: 'agent_incomplete',
       heavyTaskMode,
       latestHeavyTaskSelfCheck: selfCheck('pass'),
-      latestHeavyTaskTodos: todos([
+      latestHeavyTaskTodos: phaseGateTodos([
         { id: 'implemented', status: 'completed' },
         { id: 'optional-polish', status: 'cancelled', evidence: 'Out of scope after public README review.' },
       ]),
@@ -73,7 +73,7 @@ describe('heavy-task finalization status', () => {
         taxonomy: 'budget_exhausted',
         heavyTaskMode,
         latestHeavyTaskSelfCheck: item.selfCheck,
-        latestHeavyTaskTodos: todos([{ id: 'edit', status: 'completed' }]),
+        latestHeavyTaskTodos: phaseGateTodos([{ id: 'edit', status: 'completed' }]),
       });
 
       assert.equal(status.semantic.status, 'incomplete', item.name);
@@ -85,12 +85,12 @@ describe('heavy-task finalization status', () => {
     const cases = [
       { name: 'missing todos', todos: undefined, unresolved: [] },
       { name: 'empty todos', todos: todos([]), unresolved: [] },
-      { name: 'pending todo', todos: todos([{ id: 'inspect', status: 'pending' }]), unresolved: ['inspect'] },
-      { name: 'in-progress todo', todos: todos([{ id: 'edit', status: 'in_progress' }]), unresolved: ['edit'] },
-      { name: 'cancelled without evidence', todos: todos([{ id: 'optional', status: 'cancelled' }]), unresolved: ['optional'] },
+      { name: 'pending todo', todos: phaseGateTodos([{ id: 'inspect', status: 'pending' }]), unresolved: ['inspect'] },
+      { name: 'in-progress todo', todos: phaseGateTodos([{ id: 'edit', status: 'in_progress' }]), unresolved: ['edit'] },
+      { name: 'cancelled without evidence', todos: phaseGateTodos([{ id: 'optional', status: 'cancelled' }]), unresolved: ['optional'] },
       {
         name: 'unknown future status',
-        todos: todos([{ id: 'future', status: 'blocked' as HeavyTaskTodoItem['status'] }]),
+        todos: phaseGateTodos([{ id: 'future', status: 'blocked' as HeavyTaskTodoItem['status'] }]),
         unresolved: ['future'],
       },
     ];
@@ -106,6 +106,45 @@ describe('heavy-task finalization status', () => {
 
       assert.equal(status.semantic.status, 'incomplete', item.name);
       assert.deepEqual(status.semantic.unresolvedTodoIds, item.unresolved, item.name);
+      assert.equal(status.finalization.eligible, false, item.name);
+    }
+  });
+
+  test('requires completed early runnable and public check phase-gate todos', () => {
+    const cases = [
+      {
+        name: 'missing both gate kinds',
+        todos: todos([{ id: 'edit', content: 'Patch implementation', status: 'completed', priority: 'high' }]),
+        reason: /runnable_artifact, public_check/,
+      },
+      {
+        name: 'missing public check',
+        todos: todos([
+          { id: 'artifact', kind: 'runnable_artifact', content: 'Create runnable artifact', status: 'completed', priority: 'high' },
+        ]),
+        reason: /public_check/,
+      },
+      {
+        name: 'public check still pending',
+        todos: todos([
+          { id: 'artifact', kind: 'runnable_artifact', content: 'Create runnable artifact', status: 'completed', priority: 'high' },
+          { id: 'check', kind: 'public_check', content: 'Run public check', status: 'pending', priority: 'high' },
+        ]),
+        reason: /unresolved work/,
+      },
+    ];
+
+    for (const item of cases) {
+      const status = evaluateHeavyTaskCompletionStatus({
+        status: 'budget_exhausted',
+        taxonomy: 'budget_exhausted',
+        heavyTaskMode,
+        latestHeavyTaskSelfCheck: selfCheck('pass'),
+        latestHeavyTaskTodos: item.todos,
+      });
+
+      assert.equal(status.semantic.status, 'incomplete', item.name);
+      assert.match(status.semantic.reason, item.reason, item.name);
       assert.equal(status.finalization.eligible, false, item.name);
     }
   });
@@ -137,7 +176,7 @@ describe('heavy-task finalization status', () => {
         decisions: item.reason ? [{ id: `decision-${item.name}`, taskRunId: 'run-1', ts: 1, decision: 'stop', reason: item.reason }] : undefined,
         heavyTaskMode,
         latestHeavyTaskSelfCheck: selfCheck('pass'),
-        latestHeavyTaskTodos: todos([{ id: 'edit', status: 'completed' }]),
+        latestHeavyTaskTodos: phaseGateTodos([{ id: 'edit', status: 'completed' }]),
       });
 
       assert.equal(status.runtime.capLike, true, item.name);
@@ -150,7 +189,7 @@ describe('heavy-task finalization status', () => {
       taxonomy: 'verification_failed',
       heavyTaskMode,
       latestHeavyTaskSelfCheck: selfCheck('pass'),
-      latestHeavyTaskTodos: todos([{ id: 'edit', status: 'completed' }]),
+      latestHeavyTaskTodos: phaseGateTodos([{ id: 'edit', status: 'completed' }]),
     });
     assert.equal(verifierFailure.runtime.capLike, false);
     assert.equal(verifierFailure.runtime.capKind, 'none');
@@ -184,19 +223,41 @@ function selfCheck(
   };
 }
 
-function todos(items: Array<{ id: string; status: HeavyTaskTodoItem['status']; evidence?: string }>): HeavyTaskTodoState {
+function phaseGateTodos(items: Array<{ id: string; status: HeavyTaskTodoItem['status']; evidence?: string }>): HeavyTaskTodoState {
+  return todos([
+    ...items.map((item) => ({
+      id: item.id,
+      content: `Work item ${item.id}`,
+      status: item.status,
+      priority: 'high' as const,
+      ...(item.evidence ? { evidence: item.evidence } : {}),
+    })),
+    {
+      id: 'artifact',
+      kind: 'runnable_artifact' as const,
+      content: 'Create first runnable artifact',
+      status: 'completed' as const,
+      priority: 'high' as const,
+      evidence: 'Runnable artifact exists in public workspace.',
+    },
+    {
+      id: 'check',
+      kind: 'public_check' as const,
+      content: 'Run public check',
+      status: 'completed' as const,
+      priority: 'high' as const,
+      evidence: 'Public check command passed.',
+    },
+  ]);
+}
+
+function todos(items: HeavyTaskTodoItem[]): HeavyTaskTodoState {
   return {
     schemaVersion: 1,
     todoSetId: 'todos-1',
     taskRunId: 'run-1',
     ts: 3,
-    items: items.map((item) => ({
-      id: item.id,
-      content: `Work item ${item.id}`,
-      status: item.status,
-      priority: 'high',
-      ...(item.evidence ? { evidence: item.evidence } : {}),
-    })),
+    items,
     source: { kind: 'model_tool', toolCallId: 'tool-todos' },
   };
 }
