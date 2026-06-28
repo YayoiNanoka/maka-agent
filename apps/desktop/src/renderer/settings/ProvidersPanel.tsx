@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from 'react';
 import { ChevronRight, X } from '@maka/ui/icons';
-import { nextRadioId, tabbableRadioId } from './model-table-keyboard';
+import {
+  canPickDefaultModel,
+  canSaveDefaultModelChange,
+  nextRadioId,
+  selectableDefaultModelIds,
+  tabbableRadioId,
+} from './model-table-keyboard';
 import {
   CATALOG_PROVIDER_TYPES,
   PROVIDER_DEFAULTS,
@@ -10,6 +16,7 @@ import {
   type ConnectionTestResult,
   type CreateConnectionInput,
   type LlmConnection,
+  type ModelCatalogEntry,
   type ModelDiscoveryResult,
   type ModelInfo,
   type ProviderCategory,
@@ -29,6 +36,7 @@ import { formatRelativeTimestamp } from '@maka/core';
 import { PasswordInput } from './password-input';
 import { ProviderBrandMark } from './provider-brand-marks';
 import { chipStatusText, rollupForGroup } from './provider-connection-status';
+import { buildCatalogModelChoices } from '../model-catalog-choices';
 
 export interface ConnectionsBridge {
   list(): Promise<LlmConnection[]>;
@@ -1466,17 +1474,26 @@ function ConnectionDetail(props: {
     models,
   ]);
 
-  // Picker entries: when source is 'fetched', use the fetched list verbatim
-  // (even if empty — that's the truthful state and the small empty-state
-  // hint below tells the user). When 'fallback', merge fallback IDs in so
-  // the dropdown isn't empty before first save / fetch.
-  const modelChoices =
-    modelSource === 'fetched' || models.length > 0
-      ? models
-      : fallbackModels.map((id) => ({ id }));
+  // Picker entries come from the same catalog merge path as Chat and Daily
+  // Review, but use the local unsaved editor draft for model/default changes.
+  const modelChoices = buildCatalogModelChoices({
+    slug: connection.slug,
+    providerType: connection.providerType,
+    defaultModel,
+    models: modelSource === 'fetched' || models.length > 0 ? models : undefined,
+    modelSource,
+    modelsFetchedAt: connection.modelsFetchedAt,
+  });
 
   async function save() {
     if (busyRef.current || testingRef.current || fetchingModelsRef.current || settingDefaultRef.current || deletingRef.current) return;
+    if (!canSaveDefaultModelChange(connection.defaultModel, defaultModel, modelChoices)) {
+      toast.error(
+        '默认模型不可用',
+        '请选择一个当前可用于聊天的模型后再保存。',
+      );
+      return;
+    }
     const lifecycle = connectionDetailLifecycleRef.current;
     busyRef.current = true;
     setBusy(true);
@@ -1825,7 +1842,7 @@ function modelListsEqual(left: ModelInfo[], right: ModelInfo[]): boolean {
  * with. The picker is now a workspace, not a form field.
  */
 function ModelTable(props: {
-  modelChoices: ModelInfo[];
+  modelChoices: ModelCatalogEntry[];
   defaultModel: string;
   onPickDefault(id: string): void;
   modelSource: 'fetched' | 'fallback';
@@ -1841,10 +1858,13 @@ function ModelTable(props: {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return props.modelChoices;
-    return props.modelChoices.filter((m) => m.id.toLowerCase().includes(q));
+    return props.modelChoices.filter((m) => {
+      const displayName = modelTableDisplayLabel(m).toLowerCase();
+      return m.id.toLowerCase().includes(q) || displayName.includes(q);
+    });
   }, [props.modelChoices, query]);
-  const visibleModelIds = useMemo(() => filtered.map((m) => m.id), [filtered]);
-  const tabbableModelId = tabbableRadioId(props.defaultModel || undefined, visibleModelIds);
+  const selectableModelIds = useMemo(() => selectableDefaultModelIds(filtered), [filtered]);
+  const tabbableModelId = tabbableRadioId(props.defaultModel || undefined, selectableModelIds);
 
   const headerLine =
     props.modelSource === 'fetched'
@@ -1865,11 +1885,10 @@ function ModelTable(props: {
     if (radios.length === 0) return;
     const focusedRadio = (document.activeElement as HTMLElement | null)?.closest<HTMLButtonElement>('button[role="radio"]');
     const currentId = focusedRadio?.dataset.modelId;
-    const nextId = nextRadioId(currentId, visibleModelIds, event.key);
+    const nextId = nextRadioId(currentId, selectableModelIds, event.key);
     if (nextId === null || nextId === currentId) return;
     event.preventDefault();
-    const nextIndex = visibleModelIds.indexOf(nextId);
-    const next = radios[nextIndex];
+    const next = radios.find((radio) => radio.dataset.modelId === nextId);
     next?.focus({ preventScroll: false });
     next?.scrollIntoView({ block: 'nearest' });
     // ARIA radiogroup pattern (per @xuan PR92 follow-up): arrow keys move
@@ -1949,6 +1968,10 @@ function ModelTable(props: {
         >
           {filtered.map((model) => {
             const isDefault = model.id === props.defaultModel;
+            const displayName = modelTableDisplayLabel(model);
+            const showRawId = displayName !== model.id;
+            const warning = modelTableEntryWarning(model);
+            const canPickDefault = canPickDefaultModel(model);
             return (
               <li key={model.id} role="none">
                 <Button
@@ -1957,16 +1980,25 @@ function ModelTable(props: {
                   variant="ghost"
                   role="radio"
                   aria-checked={isDefault}
+                  aria-disabled={!canPickDefault || props.disabled ? true : undefined}
                   data-default={isDefault ? 'true' : undefined}
+                  data-disabled={!canPickDefault ? 'true' : undefined}
                   data-model-id={model.id}
-                  disabled={props.disabled}
+                  disabled={props.disabled || !canPickDefault}
                   // Only the active radio is in the tab order; arrow keys
                   // move focus inside the group. Standard ARIA radiogroup.
                   tabIndex={tabbableModelId === model.id ? 0 : -1}
-                  onClick={() => props.onPickDefault(model.id)}
+                  onClick={() => {
+                    if (!canPickDefault) return;
+                    props.onPickDefault(model.id);
+                  }}
                 >
                   <span className="modelTableRowRadio" aria-hidden="true" />
-                  <code className="modelTableRowId">{model.id}</code>
+                  <span className="modelTableRowText">
+                    <span className="modelTableRowName">{displayName}</span>
+                    {showRawId && <code className="modelTableRowId">{model.id}</code>}
+                    {warning && <span className="modelTableRowWarning">{warning}</span>}
+                  </span>
                   <ModelCapabilityChips model={model} />
                   {isDefault && <span className="modelTableDefaultBadge">默认</span>}
                 </Button>
@@ -1979,9 +2011,21 @@ function ModelTable(props: {
   );
 }
 
-function ModelCapabilityChips(props: { model: ModelInfo }) {
+function modelTableDisplayLabel(model: Pick<ModelCatalogEntry, 'id' | 'displayName'>): string {
+  return model.displayName?.trim() || model.id;
+}
+
+function modelTableEntryWarning(model: Pick<ModelCatalogEntry, 'unavailableReason' | 'availability'>): string | null {
+  if (model.unavailableReason === 'not_in_live_list') {
+    return '已保存，但当前模型列表未返回，可能不可用。';
+  }
+  if (model.availability === 'blocked') return '当前不可用。';
+  if (model.availability === 'warning') return '模型列表可能已过期。';
+  return null;
+}
+
+function ModelCapabilityChips(props: { model: Pick<ModelCatalogEntry, 'capabilities' | 'contextWindow'> }) {
   const caps = props.model.capabilities;
-  if (!caps) return null;
   const chips: string[] = [];
   if (caps.vision) chips.push('vision');
   if (caps.reasoning) chips.push('reasoning');

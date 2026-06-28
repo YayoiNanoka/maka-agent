@@ -31,7 +31,6 @@ import {
   MAX_IMPORTED_TEXT_FILE_SAMPLE_BYTES,
   preflightDroppedTextFilesForPromptImport,
 } from '@maka/core';
-import { PROVIDER_DEFAULTS } from '@maka/core';
 import {
   applyAssistantComplete,
   applyAssistantDelta,
@@ -94,6 +93,7 @@ import {
 import { deriveTurnFooterActions } from './turn-footer-actions';
 import { readScrollMotionBehavior } from './scroll-motion-policy';
 import { deriveBranchBanner } from './branch-banner';
+import { buildCatalogChatModelChoices, buildCatalogDailyReviewModelOptions } from './model-catalog-choices';
 import { applyTheme, applyThemePalette, applyUiLocale } from './theme';
 import { openPathActionLabel, openPathFailureCopy } from './open-path';
 import {
@@ -181,44 +181,16 @@ function commandPaletteConnectionTestFailureFallback(result: ConnectionTestResul
 }
 
 function buildChatModelChoices(connections: readonly LlmConnection[]): ChatModelChoice[] {
-  const choices: ChatModelChoice[] = [];
-  for (const connection of connections) {
-    const defaults = PROVIDER_DEFAULTS[connection.providerType];
-    if (!connection.enabled || defaults.backendKind !== 'ai-sdk') continue;
-    if (
-      defaults.authKind === 'oauth_token' &&
-      connection.providerType !== 'claude-subscription' &&
-      connection.providerType !== 'codex-subscription'
-    ) {
-      continue;
-    }
-    const seen = new Set<string>();
-    const rawModels = connection.models !== undefined
-      ? connection.models.map((model) => model.id)
-      : connection.defaultModel
-        ? [connection.defaultModel]
-        : defaults.fallbackModels;
-    const safeModels = connection.providerType === 'codex-subscription'
-      ? rawModels.filter((model) => !CODEX_SUBSCRIPTION_UNSUPPORTED_CHATGPT_MODELS.has(model.trim()))
-      : rawModels;
-    const models = safeModels.length || connection.providerType !== 'codex-subscription'
-      ? safeModels
-      : defaults.fallbackModels;
-    for (const model of models) {
-      const trimmed = model.trim();
-      if (!trimmed || seen.has(trimmed)) continue;
-      seen.add(trimmed);
-      /* No connection name/label here: `connection.name` embeds the OAuth
-         account email (PR-CHAT-CHROME-FIX-0). The menu heading is derived
-         from `providerType` (+ slug on collision) in `modelMenuGroups`. */
-      choices.push({
-        connectionSlug: connection.slug,
-        providerType: connection.providerType,
-        model: trimmed,
-      });
-    }
-  }
-  return choices;
+  return buildCatalogChatModelChoices(connections);
+}
+
+const DAILY_REVIEW_CONFIG_MODEL_VALUE = '__maka_daily_review_config_model__';
+
+function buildDailyReviewRunModelOptions(connections: readonly LlmConnection[]): Array<readonly [string, string]> {
+  return [
+    [DAILY_REVIEW_CONFIG_MODEL_VALUE, '使用设置中的分析模型'],
+    ...buildCatalogDailyReviewModelOptions(connections, ''),
+  ];
 }
 
 function normalizeActiveChatModel(
@@ -240,6 +212,15 @@ function normalizeActiveChatModel(
     return choices.find((choice) => choice.connectionSlug === session.llmConnectionSlug)?.model;
   }
   return requested;
+}
+
+function chatModelChoiceLabel(
+  choices: readonly ChatModelChoice[],
+  connectionSlug: string | undefined,
+  model: string | undefined,
+): string | undefined {
+  if (!connectionSlug || !model) return model;
+  return choices.find((choice) => choice.connectionSlug === connectionSlug && choice.model === model)?.label ?? model;
 }
 
 function App() {
@@ -432,15 +413,17 @@ function AppShell() {
   // off a stable reference instead of refetching on every render.
   const dailyReviewBridge = useMemo(
     () => ({
+      modelOptions: buildDailyReviewRunModelOptions(connections),
       async fetchDay(offsetDays: number, daySpan?: number) {
         const result = await window.maka.dailyReview.day(offsetDays, daySpan);
         if (!result.ok) throw new Error(result.error.message);
         return result.data;
       },
-      runOnce(input: { mode: DailyReviewMode }) {
+      runOnce(input: { mode: DailyReviewMode; modelKey?: string }) {
         const runOnce = window.maka.dailyReview.runOnce;
         if (!runOnce) throw new Error('每日回顾生成暂不可用');
-        return runOnce(input);
+        const modelKey = input.modelKey === DAILY_REVIEW_CONFIG_MODEL_VALUE ? undefined : input.modelKey;
+        return runOnce({ ...input, modelKey });
       },
       listArchives() {
         const listArchives = window.maka.dailyReview.listArchives;
@@ -470,7 +453,7 @@ function AppShell() {
         return setConfig(patch);
       },
     }),
-    [],
+    [connections],
   );
   async function saveDailyReviewMarkdown(input: {
     markdown: string;
@@ -538,9 +521,13 @@ function AppShell() {
   const activeConnectionLabel = activeSession?.backend === 'fake'
     ? '本地模拟连接'
     : activeConnection?.name ?? activeSession?.llmConnectionSlug;
-  const activeModelLabel = activeSession?.backend === 'fake'
+  const activeModel = activeSession?.backend === 'fake'
     ? undefined
     : normalizeActiveChatModel(activeSession, activeConnection, chatModelChoices);
+  const activeModelLabel = activeSession?.backend === 'fake'
+    ? undefined
+    : chatModelChoiceLabel(chatModelChoices, activeSession?.llmConnectionSlug, activeModel);
+  const newChatModelLabel = chatModelChoiceLabel(chatModelChoices, newChatModel?.llmConnectionSlug, newChatModel?.model);
 
   // Surface a credential-lifecycle alert directly in the chat header when
   // the active session's connection is in `needs_reauth` / `error` or has
@@ -3182,15 +3169,16 @@ function AppShell() {
                 onImportFolderOutline={importFolderOutlineIntoComposer}
                 modelLabel={
                   activeModelLabel
-                  ?? validPendingNewChatModel?.model
-                  ?? activeConnection?.defaultModel
-                  ?? activeConnection?.models?.[0]?.id
-                  ?? defaultConnectionEntry?.defaultModel
-                  ?? defaultConnectionEntry?.models?.[0]?.id
+                  ?? newChatModelLabel
+                  ?? chatModelChoiceLabel(chatModelChoices, activeConnection?.slug, activeConnection?.defaultModel)
+                  ?? chatModelChoiceLabel(chatModelChoices, activeConnection?.slug, activeConnection?.models?.[0]?.id)
+                  ?? chatModelChoiceLabel(chatModelChoices, defaultConnectionEntry?.slug, defaultConnectionEntry?.defaultModel)
+                  ?? chatModelChoiceLabel(chatModelChoices, defaultConnectionEntry?.slug, defaultConnectionEntry?.models?.[0]?.id)
                   ?? undefined
                 }
                 activeSession={activeSessionForView}
                 activeConnectionLabel={activeConnectionLabel}
+                activeModel={activeModel}
                 activeModelLabel={activeModelLabel}
                 modelChoices={chatModelChoices}
                 modelChangePending={activeId ? pendingSessionModelBySession[activeId] === true : false}

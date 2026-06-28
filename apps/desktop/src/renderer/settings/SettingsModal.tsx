@@ -80,7 +80,7 @@ import {
   webSearchCredentialStatusFromResponse,
 } from '@maka/core';
 import { BOT_PROVIDERS, MAX_ALLOWED_USER_IDS, createDefaultSettings, parseAllowedUserIdsFromText } from '@maka/core/settings';
-import { CODEX_SUBSCRIPTION_UNSUPPORTED_CHATGPT_MODELS, PROVIDER_DEFAULTS } from '@maka/core/llm-connections';
+import { PROVIDER_DEFAULTS } from '@maka/core/llm-connections';
 import {
   Alert,
   AlertDescription,
@@ -118,6 +118,7 @@ import {
   presentConnectionUiStatus,
   type ConnectionUiStatus,
 } from '../connection-status';
+import { buildCatalogDailyReviewModelOptions } from '../model-catalog-choices';
 import {
   NAV_GROUP_ORDER,
   type SettingsNavGroup,
@@ -1271,7 +1272,7 @@ function SettingsPage(props: {
         />
       );
     case 'daily-review':
-      return <DailyReviewSettingsPage onOpenDailyReview={props.onOpenDailyReview} />;
+      return <DailyReviewSettingsPage connections={props.connections} onOpenDailyReview={props.onOpenDailyReview} />;
     case 'voice':
       // PR-VOICE-GATEWAY-SPLIT-0 (WAWQAQ msg `d3ea9a33` 2026-06-26):
       // 语音 + 网关 是两套独立的功能（一个是本地麦克风/转写管线，
@@ -1500,66 +1501,19 @@ const DAILY_REVIEW_DEFAULT_MODEL_VALUE = '__maka_daily_review_default_model__';
 
 function buildDailyReviewModelOptions(
   connections: readonly LlmConnection[],
-  defaultConnectionSlug: string | null,
   currentModelKey: string,
 ): Array<readonly [string, string]> {
-  const defaultConnection = defaultConnectionSlug
-    ? connections.find((connection) => connection.slug === defaultConnectionSlug)
-    : null;
   const options: Array<readonly [string, string]> = [
     [DAILY_REVIEW_DEFAULT_MODEL_VALUE, '跟随对话默认'],
   ];
-  type Entry = { key: string; model: string; connectionName: string };
-  const entries: Entry[] = [];
-  const seenKeys = new Set<string>();
-  for (const connection of connections) {
-    if (!connection.enabled) continue;
-    const defaults = PROVIDER_DEFAULTS[connection.providerType];
-    const rawModels = connection.models?.length
-      ? connection.models.map((model) => model.id)
-      : connection.defaultModel
-        ? [connection.defaultModel]
-        : defaults.fallbackModels;
-    const safeModels = connection.providerType === 'codex-subscription'
-      ? rawModels.filter((model) => !CODEX_SUBSCRIPTION_UNSUPPORTED_CHATGPT_MODELS.has(model.trim()))
-      : rawModels;
-    for (const rawModel of safeModels) {
-      const model = rawModel.trim();
-      if (!model) continue;
-      const key = `${connection.slug}::${model}`;
-      if (seenKeys.has(key)) continue;
-      seenKeys.add(key);
-      entries.push({ key, model, connectionName: connection.name });
-    }
-  }
-  // Finding #4 (kenji audit 2026-06-25): when two connections both expose
-  // the same model id, the flat-label list becomes "gpt-5.5 / gpt-5.5" and
-  // looks unselectable. Only disambiguate the entries that actually collide;
-  // the common case (unique model ids) stays terse per WAWQAQ's
-  // 「只用模型名就行了」 directive.
-  const modelCounts = new Map<string, number>();
-  for (const entry of entries) {
-    modelCounts.set(entry.model, (modelCounts.get(entry.model) ?? 0) + 1);
-  }
-  for (const entry of entries) {
-    const label = (modelCounts.get(entry.model) ?? 0) > 1
-      ? `${entry.model} · ${entry.connectionName}`
-      : entry.model;
-    options.push([entry.key, label]);
-  }
-  const trimmedCurrent = currentModelKey.trim();
-  if (
-    trimmedCurrent &&
-    trimmedCurrent !== DAILY_REVIEW_DEFAULT_MODEL_VALUE &&
-    !options.some(([value]) => value === trimmedCurrent)
-  ) {
-    const tail = trimmedCurrent.split('::').pop() || trimmedCurrent;
-    options.push([trimmedCurrent, tail]);
-  }
+  options.push(...buildCatalogDailyReviewModelOptions(
+    connections,
+    currentModelKey.trim() === DAILY_REVIEW_DEFAULT_MODEL_VALUE ? '' : currentModelKey,
+  ));
   return options;
 }
 
-function DailyReviewSettingsPage(props: { onOpenDailyReview?: () => void }) {
+function DailyReviewSettingsPage(props: { connections: readonly LlmConnection[]; onOpenDailyReview?: () => void }) {
   const toast = useToast();
   const dailyReviewIpc = window.maka.dailyReview;
   const hasConfigIpc = Boolean(dailyReviewIpc.getConfig && dailyReviewIpc.setConfig);
@@ -1570,9 +1524,6 @@ function DailyReviewSettingsPage(props: { onOpenDailyReview?: () => void }) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [savingKey, setSavingKey] = useState<string | null>(null);
   const [runningMode, setRunningMode] = useState<DailyReviewMode | null>(null);
-  const [modelConnections, setModelConnections] = useState<LlmConnection[]>([]);
-  const [defaultConnectionSlug, setDefaultConnectionSlug] = useState<string | null>(null);
-  const [modelLoadError, setModelLoadError] = useState<string | null>(null);
   const mountedRef = useRef(true);
   const savingKeyRef = useRef<string | null>(null);
   const runningModeRef = useRef<DailyReviewMode | null>(null);
@@ -1613,33 +1564,6 @@ function DailyReviewSettingsPage(props: { onOpenDailyReview?: () => void }) {
       cancelled = true;
     };
   }, [hasConfigIpc, dailyReviewIpc]);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function reloadModelConnections() {
-      try {
-        const [connections, defaultSlug] = await Promise.all([
-          window.maka.connections.list(),
-          window.maka.connections.getDefault(),
-        ]);
-        if (cancelled || !mountedRef.current) return;
-        setModelConnections(connections);
-        setDefaultConnectionSlug(defaultSlug);
-        setModelLoadError(null);
-      } catch (err) {
-        if (cancelled || !mountedRef.current) return;
-        setModelLoadError(settingsActionErrorMessage(err));
-      }
-    }
-    void reloadModelConnections();
-    const unsubscribe = window.maka.connections.subscribeEvents(() => {
-      void reloadModelConnections();
-    });
-    return () => {
-      cancelled = true;
-      unsubscribe();
-    };
-  }, []);
 
   async function patchConfig(key: string, patch: Partial<DailyReviewConfig>) {
     if (!dailyReviewIpc.setConfig || !config || savingKeyRef.current !== null) return;
@@ -1684,8 +1608,8 @@ function DailyReviewSettingsPage(props: { onOpenDailyReview?: () => void }) {
   const effectiveConfig = config;
   const formDisabled = !hasConfigIpc || loading || Boolean(loadError) || !effectiveConfig || savingKey !== null;
   const modelOptions = useMemo(
-    () => buildDailyReviewModelOptions(modelConnections, defaultConnectionSlug, effectiveConfig?.modelKey ?? ''),
-    [defaultConnectionSlug, effectiveConfig?.modelKey, modelConnections],
+    () => buildDailyReviewModelOptions(props.connections, effectiveConfig?.modelKey ?? ''),
+    [effectiveConfig?.modelKey, props.connections],
   );
   const selectedModelValue = effectiveConfig?.modelKey?.trim()
     ? effectiveConfig.modelKey.trim()
@@ -1785,7 +1709,6 @@ function DailyReviewSettingsPage(props: { onOpenDailyReview?: () => void }) {
             <strong>分析模型</strong>
             <small>
               用于生成回顾和分析的模型连接；默认跟随当前对话默认模型。
-              {modelLoadError ? ` 模型列表读取失败：${modelLoadError}` : ''}
             </small>
           </div>
           <SettingsSelect
