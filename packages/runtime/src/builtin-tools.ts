@@ -44,6 +44,7 @@ export interface BuildBuiltinToolsOptions {
 
 export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaTool[] {
   const executor = options.executor ?? createLocalWorkspaceExecutor();
+  const executionFacts = executor.facts;
   return [
     {
       name: 'Bash',
@@ -53,6 +54,7 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
         timeout_ms: z.number().int().positive().max(600_000).optional(),
       }),
       permissionRequired: true,
+      executionFacts,
       impl: async ({ command, timeout_ms }, { cwd, abortSignal, emitOutput }) => {
         const timeout = timeout_ms ?? 120_000;
         const result = await executor.exec({
@@ -86,6 +88,7 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
         limit: z.number().int().positive().optional(),
       }),
       permissionRequired: false,
+      executionFacts,
       impl: async ({ path, offset, limit }, { cwd }) => {
         const abs = await resolveExistingInsideCwd(cwd, path, 'Read');
         const { content } = await executor.readFile({ cwd, path: abs });
@@ -101,6 +104,7 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
       description: 'Write content to a file (creates or overwrites). Subject to permission policy.',
       parameters: z.object({ path: z.string(), content: z.string() }),
       permissionRequired: true,
+      executionFacts,
       impl: async ({ path, content }, { cwd }) => {
         // Resolve inside the lock so the containment check and the write are one
         // atomic critical section per file (no concurrent op can alter the target
@@ -126,6 +130,7 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
         new_string: z.string(),
       }),
       permissionRequired: true,
+      executionFacts,
       impl: async ({ path, old_string, new_string }, { cwd }) => {
         // Resolve + read + write all inside the lock so the read-modify-write is
         // one atomic critical section per file. The key is lexical (stable across
@@ -156,6 +161,7 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
         cwd: z.string().optional(),
       }),
       permissionRequired: false,
+      executionFacts,
       impl: async ({ pattern, cwd: relCwd }, { cwd }) => {
         assertRelativeGlobPattern(pattern);
         const base = relCwd ? await resolveExistingInsideCwd(cwd, relCwd, 'Glob cwd') : await fs.realpath(cwd);
@@ -171,6 +177,7 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
         glob: z.string().optional(),
       }),
       permissionRequired: false,
+      executionFacts,
       impl: async ({ pattern, path, glob }, { cwd, abortSignal }) => {
         const searchPath = path ? await resolveExistingInsideCwd(cwd, path, 'Grep') : await fs.realpath(cwd);
         // Self-bound: ripgrep finishes in well under a second normally, but a

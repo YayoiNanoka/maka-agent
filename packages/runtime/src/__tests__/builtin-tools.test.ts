@@ -8,7 +8,25 @@ import {
   LOCAL_WORKSPACE_EXECUTOR_FACTS,
   type WorkspaceExecInput,
   type WorkspaceExecutor,
+  type WorkspaceExecutorFacts,
 } from '../workspace-executor.js';
+
+describe('builtin tool executor facts', () => {
+  test('attaches executor facts to every built-in tool', () => {
+    const facts: WorkspaceExecutorFacts = {
+      isolation: 'worktree',
+      writesAffectHost: false,
+      writeBack: 'diff_review',
+      network: 'sandbox',
+      secrets: 'none',
+    };
+
+    const tools = buildBuiltinTools({ executor: fakeExecutor({ facts }) });
+
+    expect(tools.length > 0).toBe(true);
+    expect(tools.every((tool) => tool.executionFacts === facts)).toBe(true);
+  });
+});
 
 describe('builtin Bash streaming output', () => {
   test('delegates Bash execution to an injected workspace executor', async () => {
