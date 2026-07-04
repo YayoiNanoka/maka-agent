@@ -66,7 +66,30 @@ export type {
 } from './pi-agent-backend.js';
 
 export { buildBuiltinTools } from './builtin-tools.js';
-export type { MakaTool as BuiltinMakaTool, MakaToolContext as BuiltinMakaToolContext } from './builtin-tools.js';
+export type {
+  BuildBuiltinToolsOptions,
+  MakaTool as BuiltinMakaTool,
+  MakaToolContext as BuiltinMakaToolContext,
+} from './builtin-tools.js';
+export {
+  LOCAL_WORKSPACE_EXECUTOR_FACTS,
+  LocalWorkspaceExecutor,
+  createLocalWorkspaceExecutor,
+} from './workspace-executor.js';
+export type {
+  WorkspaceExecInput,
+  WorkspaceExecResult,
+  WorkspaceExecutor,
+  WorkspaceExecutorFacts,
+  WorkspaceIsolationKind,
+  WorkspaceNetworkMode,
+  WorkspaceReadFileInput,
+  WorkspaceReadFileResult,
+  WorkspaceSecretMode,
+  WorkspaceWriteBackMode,
+  WorkspaceWriteFileInput,
+  WorkspaceWriteFileResult,
+} from './workspace-executor.js';
 export { computeEditedSource, COMPUTE_EDITED_SOURCE_FN_SOURCE } from './edit-replace.js';
 export type { EditMatch, EditMatchStrategy } from './edit-replace.js';
 export { truncateToolOutput } from './tool-output.js';
