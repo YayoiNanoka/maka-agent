@@ -49,7 +49,7 @@
   transition: background-color var(--duration-base) var(--ease-out-strong), color var(--duration-base) var(--ease-out-strong);
 }
 .settingsBackButton:hover {
-  background: oklch(from var(--foreground) l c h / 0.05);
+  background: var(--state-hover-bg);
   color: var(--foreground);
 }
 .settingsBackButton:focus-visible {
@@ -186,21 +186,18 @@
 .settingsSidebar .settingsNavItem:hover {
   border: 0;
   box-shadow: none;
-  transform: none;
 }
 
 .settingsNavItem:hover {
-  background: var(--foreground-5);
+  background: var(--state-hover-bg);
   color: var(--foreground);
 }
 
 .settingsNavItem[data-active="true"] {
-  /* PR-SETTINGS-NAV-FOCUS-0 (round 14/15): bump the active state from
-     the muted `--settings-nav-row-selected-bg` token to a slightly
-     more visible 6.5% foreground overlay + 500 weight.
-     WAWQAQ msg 49bd00e1: keep the selected row neutral. A leading
+  /* Active state via the shared --state-selected-bg token + 500 weight.
+     Keep the selected row neutral (WAWQAQ msg 49bd00e1): a leading
      accent rail reads like a stray status marker in the Settings nav. */
-  background: oklch(from var(--foreground) l c h / 0.065);
+  background: var(--state-selected-bg);
   color: var(--foreground);
   font-weight: 500;
   box-shadow: none;
@@ -237,7 +234,7 @@
 }
 
 /* PR-UI-11 (@yuejing 2026-05-22): inactive glyph stays muted; active
- * glyph is overridden above to `--accent` for selection visibility. */
+ * glyph is overridden above to `--foreground` for selection visibility. */
 
 .settingsNavItem strong {
   overflow: hidden;
@@ -612,31 +609,12 @@
 }
 
 .settingsFormRow:hover {
-  background: oklch(from var(--foreground) l c h / 0.025);
+  background: var(--state-hover-bg);
 }
 
-/* PR-SETTINGS-MOTION-TYPO-TOKENS-0 (round 15/15) — tactile press
-   feedback. 12-principles `physics-active-state` + Taste-Skill +
-   UIDB all converge on `:active { scale(0.98) }` as the cheapest way
-   to make UI feel handled vs simulated. Applied only when reduced-
-   motion is not preferred — the @media block above already strips
-   transition; here we keep `transform` declarations so the
-   `:active` *snap* still fires (it's instant, not animated). */
-/* Self-review: `.settingsFormRow` and `.settingsRow` are <div>
-   containers wrapping <input>/<Switch>/<button> children. `:active`
-   on the wrapper fires when the user presses ANY of those children
-   (event bubbles), so pressing an input or switch knob scaled the
-   whole row — visually buggy. Restricted to actual <button>s. */
 .settingsBackButton:active,
 .settingsNavItem:active {
-  transform: scale(0.985);
-  transition: transform 100ms var(--ease-out-strong);
-}
-@media (prefers-reduced-motion: reduce) {
-  .settingsBackButton:active,
-  .settingsNavItem:active {
-    transform: none;
-  }
+  background: var(--state-selected-bg);
 }
 
 /* PR-SETTINGS-A11Y-POLISH-0 (round 11/15) — keyboard-only focus ring

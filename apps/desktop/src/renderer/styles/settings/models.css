@@ -34,7 +34,7 @@
   transition: background-color 130ms var(--ease-out-strong);
 }
 
-.enabledProviderTrigger:hover { background: var(--hover); }
+.enabledProviderTrigger:hover { background: var(--state-hover-bg); }
 
 .enabledProviderName {
   font-size: var(--font-size-ui);
@@ -109,7 +109,7 @@
 }
 
 .enabledConnRow[data-default="true"] {
-  background: oklch(from var(--control) l c h / 0.07);
+  background: var(--state-selected-bg);
 }
 
 .enabledConnRow[data-disabled="true"] {
@@ -157,7 +157,7 @@
 }
 
 .catalogPillTabs button:hover {
-  background: var(--foreground-10);
+  background: var(--state-hover-bg);
   color: var(--foreground);
 }
 
@@ -376,7 +376,7 @@
 }
 
 .maka-browser-navbtn:hover:not(:disabled) {
-  background: var(--foreground-8);
+  background: var(--state-hover-bg);
 }
 
 .maka-browser-navbtn:disabled {
@@ -460,7 +460,7 @@
 }
 
 .maka-artifact-pane-collapse:hover {
-  background: var(--foreground-3);
+  background: var(--state-hover-bg);
   color: var(--foreground);
   border-color: oklch(from var(--foreground) l c h / 0.08);
 }
@@ -533,7 +533,7 @@
 }
 
 .maka-artifact-error-retry:hover {
-  background: var(--foreground-5);
+  background: var(--state-hover-bg);
 }
 
 .maka-artifact-error-retry:disabled {
@@ -572,12 +572,6 @@
   margin: 0;
 }
 
-/* PR-ARTIFACT-ROW-TACTILE-0 (WAWQAQ msg `ed67a267`, skills round
-   task #116): Emil agents-with-taste — every clickable row needs
-   `:active { scale(0.97) }` so press feels physical, and a subtle
-   transform on hover gives spatial feedback. Without it, rows feel
-   like inert color blocks. Transitions limited to transform +
-   background (GPU-friendly, no reflow). */
 .maka-artifact-row {
   width: 100%;
   display: grid;
@@ -594,29 +588,25 @@
   font-size: var(--font-size-caption);
   transition:
     background 140ms var(--ease-out-strong),
-    border-color 140ms var(--ease-out-strong),
-    transform var(--duration-quick) var(--ease-out-strong);
+    border-color 140ms var(--ease-out-strong);
 }
 
 .maka-artifact-row:hover {
-  background: var(--foreground-5);
+  background: var(--state-hover-bg);
 }
 
 .maka-artifact-row:active:not([data-deleted="true"]) {
-  transform: scale(0.98);
+  background: var(--state-selected-bg);
 }
 
 .maka-artifact-row[data-selected="true"] {
-  background: oklch(from var(--nav-active) l c h / 0.10);
-  border-color: oklch(from var(--nav-active) l c h / 0.24);
+  background: var(--state-selected-bg);
+  border-color: var(--border-strong);
 }
 
 @media (prefers-reduced-motion: reduce) {
   .maka-artifact-row {
     transition: background 0ms, border-color 0ms;
-  }
-  .maka-artifact-row:active:not([data-deleted="true"]) {
-    transform: none;
   }
 }
 
@@ -908,7 +898,7 @@
 }
 
 .maka-artifact-toolbar-button:hover {
-  background: var(--foreground-5);
+  background: var(--state-hover-bg);
 }
 
 .maka-artifact-toolbar-button:disabled {

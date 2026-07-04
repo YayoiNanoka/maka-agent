@@ -139,7 +139,7 @@
 
 .maka-shell-topbar-button:hover {
   color: var(--foreground);
-  background: var(--foreground-5);
+  background: var(--state-hover-bg);
 }
 
 .maka-resize-handle {
@@ -272,7 +272,7 @@
 
 .maka-workspace-icon-action:hover {
   color: var(--foreground);
-  background: var(--foreground-5);
+  background: var(--state-hover-bg);
 }
 
 .maka-session-panel {
@@ -331,7 +331,7 @@
   border-radius: var(--radius-control);
 }
 .maka-search-modal-close:hover {
-  background: oklch(from var(--foreground) l c h / 0.04);
+  background: var(--state-hover-bg);
   color: var(--foreground);
 }
 .maka-search-modal-close:focus-visible {
@@ -376,7 +376,7 @@
   color: var(--muted-foreground);
 }
 .maka-search-modal-clear:hover {
-  background: oklch(from var(--foreground) l c h / 0.06);
+  background: var(--state-hover-bg);
   color: var(--foreground);
 }
 .maka-search-modal-clear:focus-visible {
@@ -457,16 +457,15 @@
     transform var(--duration-emphasized) var(--ease-out-strong);
 }
 .maka-search-modal-result:hover:not([disabled]) {
-  background: oklch(from var(--foreground) l c h / 0.05);
+  background: var(--state-hover-bg);
   transform: translateX(1px);
 }
 .maka-search-modal-result[data-active="true"]:not([disabled]) {
-  background: oklch(from var(--nav-active) l c h / 0.08);
-  box-shadow: inset 2px 0 0 var(--nav-active);
+  background: var(--state-selected-bg);
 }
 .maka-search-modal-result:focus-visible {
   outline: none;
-  background: oklch(from var(--foreground) l c h / 0.04);
+  background: var(--state-hover-bg);
   box-shadow: 0 0 0 2px oklch(from var(--focus-ring) l c h / 0.18);
 }
 .maka-search-modal-result[disabled] {
@@ -730,37 +729,22 @@
   background: transparent;
   color: var(--foreground);
   overflow: hidden;
-  transition:
-    background-color var(--duration-base) var(--ease-out-strong),
-    transform var(--duration-emphasized) var(--ease-out-strong);
+  transition: background-color var(--duration-base) var(--ease-out-strong);
 }
 
 .maka-list-row:hover {
-  background: oklch(from var(--foreground) l c h / 0.06);
+  background: var(--state-hover-bg);
 }
 
-/* PR-SESSION-ROW-TACTILE-0 (WAWQAQ msg `ed67a267`, skills round
-   task #116): consistent `:active scale(0.98)` press feedback —
-   sidebar session rows are the most-clicked surface in the app
-   and previously had no press signal. Pattern matches
-   .maka-onboarding-card / .maka-skill-library-row / .maka-prompt-chip
-   / .maka-artifact-row. Reduced-motion clause below keeps
-   contracts clean. */
 .maka-list-row:active {
-  transform: scale(0.98);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .maka-list-row:active {
-    transform: none;
-  }
+  background: var(--state-selected-bg);
 }
 
 /* Active session row: slightly stronger than hover so the current
    session is distinguishable from hover, but lighter than nav-row
    active (0.09) so the main navigation reads as the primary surface. */
 .maka-list-row[data-active="true"] {
-  background: oklch(from var(--foreground) l c h / 0.07);
+  background: var(--state-selected-bg);
 }
 
 .maka-list-row[data-active="true"] .maka-list-row-name {
@@ -784,7 +768,6 @@
   color: inherit;
   padding: var(--space-0-5) var(--space-2) var(--space-0-5) var(--space-2-5);
   text-align: left;
-  transition: transform 160ms var(--ease-out-strong);
 }
 
 .maka-list-row-actions {
@@ -817,8 +800,8 @@
   background: linear-gradient(
     to right,
     transparent 0%,
-    var(--foreground-3) 24%,
-    var(--foreground-3) 100%
+    var(--state-hover-bg) 24%,
+    var(--state-hover-bg) 100%
   );
   opacity: 0;
   transform: translateX(8px);
@@ -856,8 +839,8 @@
   background: linear-gradient(
     to right,
     transparent 0%,
-    var(--foreground-5) 24%,
-    var(--foreground-5) 100%
+    var(--state-selected-bg) 24%,
+    var(--state-selected-bg) 100%
   );
 }
 
@@ -922,8 +905,8 @@
    * uses lighter pills; we keep two-line content (label + hint)
    * but pull the visual weight down so the grid feels lighter and
    * less card-like. Border drops to hairline `--border`,
-   * background to transparent (inherits warm panel bg) — accent
-   * tint only appears on hover. */
+   * background to transparent (inherits warm panel bg); hover uses
+   * neutral `--state-hover-bg` + `--border-strong` (no brand tint). */
   border: 1px solid var(--foreground-8);
   border-radius: var(--radius-control);
   background: transparent;
@@ -932,18 +915,16 @@
   text-align: left;
   transition:
     border-color 140ms var(--ease-out-strong),
-    background 140ms var(--ease-out-strong),
-    transform 140ms var(--ease-out-strong);
+    background 140ms var(--ease-out-strong);
 }
 
 .maka-prompt-chip:hover {
-  border-color: oklch(from var(--nav-active) l c h / 0.32);
-  background: oklch(from var(--nav-active) l c h / 0.04);
-  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  background: var(--state-hover-bg);
 }
 
 .maka-prompt-chip:active {
-  transform: translateY(0) scale(0.99);
+  background: var(--state-selected-bg);
 }
 
 .maka-prompt-chip-label {

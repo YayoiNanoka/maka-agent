@@ -431,7 +431,7 @@ color: oklch(0.55 0.015 220);
 }
 
 .maka-skill-template-row:hover {
-  background: oklch(from var(--foreground) l c h / 0.04);
+  background: var(--state-hover-bg);
 }
 
 .maka-skill-template-icon {
@@ -523,9 +523,7 @@ color: oklch(0.55 0.015 220);
   color: var(--foreground);
   white-space: normal !important;
   text-align: left;
-  transition:
-    background-color var(--duration-base) var(--ease-out-strong),
-    transform var(--duration-emphasized) var(--ease-out-strong);
+  transition: background-color var(--duration-base) var(--ease-out-strong);
 }
 
 /* PR-UI-PIXEL-0 (2026-06-21): reference rule #2 — hover/selected states are
@@ -533,12 +531,11 @@ color: oklch(0.55 0.015 220);
    The purple-tinted row hover read as "themed"; neutral reads calmer/native.
    See notes/近期 UI study §1.4, §4. */
 .maka-skill-library-row:hover {
-  background: oklch(from var(--foreground) l c h / 0.06);
-  transform: translateX(1px);
+  background: var(--state-hover-bg);
 }
 
 .maka-skill-library-row:active {
-  transform: translateY(1px);
+  background: var(--state-selected-bg);
 }
 
 .maka-skill-library-row:focus-visible {
@@ -637,16 +634,12 @@ color: oklch(0.55 0.015 220);
   font-size: var(--font-size-caption);
   font-weight: 600;
   text-align: center;
-  opacity: 1;
-  transform: none;
-  transition: opacity var(--duration-base) var(--ease-out-strong), transform var(--duration-base) var(--ease-out-strong), background-color var(--duration-base) var(--ease-out-strong), color var(--duration-base) var(--ease-out-strong);
+  transition: background-color var(--duration-base) var(--ease-out-strong), color var(--duration-base) var(--ease-out-strong);
 }
 
 .maka-skill-library-row:hover .maka-skill-library-action,
 .maka-skill-library-row:focus-visible .maka-skill-library-action {
-  opacity: 1;
-  transform: translateX(0);
-  background: oklch(from var(--foreground) l c h / 0.06);
+  background: var(--state-hover-bg);
   color: var(--foreground);
 }
 
@@ -699,8 +692,6 @@ color: oklch(0.55 0.015 220);
   .maka-skill-library-action {
     grid-column: 2;
     justify-self: start;
-    opacity: 1;
-    transform: none;
   }
 
   .maka-skill-library-switch {
