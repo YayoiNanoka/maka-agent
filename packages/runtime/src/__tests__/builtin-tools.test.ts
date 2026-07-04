@@ -291,6 +291,53 @@ describe('builtin read tools path containment', () => {
 });
 
 describe('builtin write tools path containment', () => {
+  test('Write delegates file writing to the injected workspace executor', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-write-executor-'));
+    const writes: Array<{ path: string; content: string }> = [];
+    const write = buildBuiltinTools({ executor: fakeExecutor({
+      writeFile: async ({ path, content }) => {
+        writes.push({ path, content });
+        return { ok: true, path, bytes: Buffer.byteLength(content, 'utf8') };
+      },
+    }) }).find((candidate) => candidate.name === 'Write');
+    if (!write) throw new Error('Write tool missing');
+
+    const result = await runTool(write, { path: 'created.txt', content: 'from-executor' }, root);
+
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.path.endsWith('created.txt')).toBe(true);
+    expect(writes[0]?.content).toBe('from-executor');
+    expect(result).toMatchObject({ ok: true, bytes: 13 });
+  });
+
+  test('Edit reads and writes through the injected workspace executor', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-edit-executor-'));
+    await writeFile(join(root, 'data.txt'), 'local content that should not be used', 'utf8');
+    const reads: string[] = [];
+    const writes: Array<{ path: string; content: string }> = [];
+    const edit = buildBuiltinTools({ executor: fakeExecutor({
+      readFile: async ({ path }) => {
+        reads.push(path);
+        return { content: 'hello world\n' };
+      },
+      writeFile: async ({ path, content }) => {
+        writes.push({ path, content });
+        return { ok: true, path, bytes: Buffer.byteLength(content, 'utf8') };
+      },
+    }) }).find((candidate) => candidate.name === 'Edit');
+    if (!edit) throw new Error('Edit tool missing');
+
+    const result = await runTool(edit, { path: 'data.txt', old_string: 'world', new_string: 'Maka' }, root);
+
+    expect(reads).toHaveLength(1);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.content).toBe('hello Maka\n');
+    expect(result).toMatchObject({
+      ok: true,
+      replacements: 1,
+    });
+  });
+
   test('Write rejects absolute, parent traversal, and symlink-parent escape paths', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-write-root-'));
     const outside = await mkdtemp(join(tmpdir(), 'maka-write-outside-'));

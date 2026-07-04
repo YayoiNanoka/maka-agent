@@ -112,8 +112,7 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
         // file exists yet.
         return await withFileWriteLock(await fileWriteLockKey(cwd, path), async () => {
           const abs = await resolveWritableInsideCwd(cwd, path, 'Write');
-          await fs.writeFile(abs, content, 'utf8');
-          return { ok: true, path: abs, bytes: Buffer.byteLength(content, 'utf8') };
+          return await executor.writeFile({ path: abs, content });
         });
       },
     },
@@ -138,9 +137,9 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
         // the lock rather than racing.
         return await withFileWriteLock(await fileWriteLockKey(cwd, path), async () => {
           const abs = await resolveExistingInsideCwd(cwd, path, 'Edit');
-          const current = await fs.readFile(abs, 'utf8');
+          const { content: current } = await executor.readFile({ path: abs });
           const result = computeEditedSource(current, old_string, new_string, path);
-          await fs.writeFile(abs, result.content, 'utf8');
+          await executor.writeFile({ path: abs, content: result.content });
           return {
             ok: true,
             path: abs,
