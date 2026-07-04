@@ -8,6 +8,7 @@ import { readSavedBounds, writeSavedBounds, type SavedBounds } from './window-st
 import { BrowserViewController } from './browser/controller.js';
 import { BrowserViewManager } from './browser/view-manager.js';
 import type { VisualSmokeFixture } from './visual-smoke-fixture.js';
+import { isThemePreference, toNativeThemeSource } from './theme-source.js';
 
 type SettingsReader = {
   get(): Promise<AppSettings>;
@@ -17,6 +18,7 @@ export interface MainWindowController {
   createWindow(): Promise<void>;
   send(channel: string, ...args: unknown[]): void;
   setTitlebarControlsVisible(sender: Electron.WebContents, visible: unknown): void;
+  setThemeSource(sender: Electron.WebContents, themePref: unknown): void;
   showOpenDialog(options: Electron.OpenDialogOptions): Promise<Electron.OpenDialogReturnValue>;
   showSaveDialog(options: Electron.SaveDialogOptions): Promise<Electron.SaveDialogReturnValue>;
   capturePage(): Promise<Electron.NativeImage | null>;
@@ -107,6 +109,12 @@ export function createMainWindowController(deps: MainWindowControllerDeps): Main
       themePref === 'dark' ||
       (themePref === 'auto' && nativeTheme.shouldUseDarkColors);
     const initialBg = isDark ? '#1c1d21' : '#f3f3f5';
+    // Astro-Han review (#493): sync nativeTheme here too, not only via the
+    // renderer's later setThemeSource() IPC call -- otherwise the vibrancy
+    // material behind the sidebar can still flash the *system* theme's tint
+    // for the first frame or two on a cold start where the OS appearance
+    // disagrees with the persisted in-app preference.
+    nativeTheme.themeSource = toNativeThemeSource(themePref);
 
     mainWindow = new BrowserWindow({
       width: bounds.width,
@@ -273,6 +281,12 @@ export function createMainWindowController(deps: MainWindowControllerDeps): Main
       target.setWindowButtonPosition(
         shouldShow ? MAIN_WINDOW_TRAFFIC_LIGHT_POSITION : HIDDEN_TRAFFIC_LIGHT_POSITION,
       );
+    },
+    setThemeSource(sender, themePref) {
+      const target = BrowserWindow.fromWebContents(sender);
+      if (!target || target !== mainWindow) return;
+      if (!isThemePreference(themePref)) return;
+      nativeTheme.themeSource = toNativeThemeSource(themePref);
     },
     showOpenDialog(options) {
       return mainWindow

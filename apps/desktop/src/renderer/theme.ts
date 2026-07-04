@@ -29,6 +29,11 @@ export function applyTheme(pref: ThemePreference): () => void {
   // pre-React paint reapplies the auto → system-matchMedia branch itself.
   safeLocalStorageSet('maka-theme-v1', pref);
 
+  // Also syncs Electron's own native chrome (nativeTheme.themeSource) --
+  // see toNativeThemeSource() in main-window.ts for why this DOM-only flip
+  // isn't enough on its own.
+  void window.maka.appWindow.setThemeSource(pref).catch(() => {});
+
   if (pref === 'auto') {
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
     setDarkClass(mq.matches);
