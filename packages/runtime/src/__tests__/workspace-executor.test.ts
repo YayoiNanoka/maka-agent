@@ -69,8 +69,8 @@ describe('LocalWorkspaceExecutor file operations', () => {
     const executor = new LocalWorkspaceExecutor();
     const file = join(cwd, 'data.txt');
 
-    const writeResult = await executor.writeFile({ path: file, content: 'hello' });
-    const readResult = await executor.readFile({ path: file });
+    const writeResult = await executor.writeFile({ cwd, path: file, content: 'hello' });
+    const readResult = await executor.readFile({ cwd, path: file });
 
     expect(writeResult).toMatchObject({
       ok: true,

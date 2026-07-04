@@ -16,6 +16,10 @@ export type {
   BenchmarkVerifierOutput,
 } from './benchmark-adapters.js';
 export { resolveBenchmarkAdapter } from './benchmark-adapters.js';
+export {
+  ISOLATED_WORKSPACE_EXECUTOR_FACTS,
+  isolatedToolExecutorToWorkspaceExecutor,
+} from './workspace-executor-adapter.js';
 export type {
   ArtifactFreezeResult,
   BenchmarkContract,

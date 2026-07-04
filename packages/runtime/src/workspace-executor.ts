@@ -44,6 +44,7 @@ export interface WorkspaceExecResult {
 }
 
 export interface WorkspaceReadFileInput {
+  cwd: string;
   path: string;
 }
 
@@ -52,6 +53,7 @@ export interface WorkspaceReadFileResult {
 }
 
 export interface WorkspaceWriteFileInput {
+  cwd: string;
   path: string;
   content: string;
 }
