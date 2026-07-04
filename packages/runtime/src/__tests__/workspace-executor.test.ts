@@ -1,5 +1,5 @@
 import { describe, test } from 'node:test';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect } from '../test-helpers.js';
@@ -79,5 +79,44 @@ describe('LocalWorkspaceExecutor file operations', () => {
     });
     expect(readResult).toMatchObject({ content: 'hello' });
     expect(await readFile(file, 'utf8')).toBe('hello');
+  });
+
+  test('globs files from the provided cwd with a result cap', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'maka-workspace-glob-'));
+    await mkdir(join(cwd, 'src'), { recursive: true });
+    await writeFile(join(cwd, 'src', 'a.ts'), 'a', 'utf8');
+    await writeFile(join(cwd, 'src', 'b.ts'), 'b', 'utf8');
+    await writeFile(join(cwd, 'src', 'c.js'), 'c', 'utf8');
+    const executor = new LocalWorkspaceExecutor();
+
+    const result = await executor.globFiles({ cwd, pattern: 'src/*.*', limit: 2 });
+
+    expect(result.files).toHaveLength(2);
+    expect(result.files.every((file) => file.startsWith('src/'))).toBe(true);
+  });
+
+  test('greps file contents with rg-compatible no-match behavior', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'maka-workspace-grep-'));
+    await mkdir(join(cwd, 'src'), { recursive: true });
+    await writeFile(join(cwd, 'src', 'main.ts'), 'export const token = 1;\n', 'utf8');
+    const executor = new LocalWorkspaceExecutor();
+
+    const hit = await executor.grepFiles({
+      cwd,
+      pattern: 'token',
+      path: join(cwd, 'src'),
+      maxMatches: 50,
+      timeoutMs: 5_000,
+    });
+    const miss = await executor.grepFiles({
+      cwd,
+      pattern: 'absent',
+      path: join(cwd, 'src'),
+      maxMatches: 50,
+      timeoutMs: 5_000,
+    });
+
+    expect(hit.matches.some((match) => match.includes('main.ts'))).toBe(true);
+    expect(miss).toMatchObject({ matches: [] });
   });
 });

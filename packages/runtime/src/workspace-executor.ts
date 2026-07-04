@@ -1,5 +1,10 @@
 import { promises as fs } from 'node:fs';
+import { exec } from 'node:child_process';
+import { glob as nodeGlob } from 'node:fs/promises';
+import { promisify } from 'node:util';
 import { runShellWithBoundedTail } from './shell-exec.js';
+
+const execAsync = promisify(exec);
 
 export type WorkspaceIsolationKind = 'none' | 'worktree' | 'container' | 'remote';
 export type WorkspaceWriteBackMode = 'direct' | 'diff_review';
@@ -57,11 +62,37 @@ export interface WorkspaceWriteFileResult {
   bytes: number;
 }
 
+export interface WorkspaceGlobInput {
+  cwd: string;
+  pattern: string;
+  limit?: number;
+}
+
+export interface WorkspaceGlobResult {
+  files: string[];
+}
+
+export interface WorkspaceGrepInput {
+  cwd: string;
+  pattern: string;
+  path: string;
+  glob?: string;
+  maxMatches: number;
+  timeoutMs: number;
+  abortSignal?: AbortSignal;
+}
+
+export interface WorkspaceGrepResult {
+  matches: string[];
+}
+
 export interface WorkspaceExecutor {
   readonly facts: WorkspaceExecutorFacts;
   exec(input: WorkspaceExecInput): Promise<WorkspaceExecResult>;
   readFile(input: WorkspaceReadFileInput): Promise<WorkspaceReadFileResult>;
   writeFile(input: WorkspaceWriteFileInput): Promise<WorkspaceWriteFileResult>;
+  globFiles(input: WorkspaceGlobInput): Promise<WorkspaceGlobResult>;
+  grepFiles(input: WorkspaceGrepInput): Promise<WorkspaceGrepResult>;
 }
 
 export class LocalWorkspaceExecutor implements WorkspaceExecutor {
@@ -95,8 +126,41 @@ export class LocalWorkspaceExecutor implements WorkspaceExecutor {
       bytes: Buffer.byteLength(input.content, 'utf8'),
     };
   }
+
+  async globFiles(input: WorkspaceGlobInput): Promise<WorkspaceGlobResult> {
+    const files: string[] = [];
+    const limit = input.limit ?? 200;
+    for await (const file of nodeGlob(input.pattern, { cwd: input.cwd })) {
+      files.push(typeof file === 'string' ? file : (file as { name: string }).name);
+      if (files.length >= limit) break;
+    }
+    return { files };
+  }
+
+  async grepFiles(input: WorkspaceGrepInput): Promise<WorkspaceGrepResult> {
+    const args = ['-n', '--no-heading', `--max-count=${input.maxMatches}`];
+    if (input.glob) args.push('--glob', input.glob);
+    args.push(input.pattern, input.path);
+    const command = `rg ${args.map(shellEscape).join(' ')}`;
+    try {
+      const { stdout } = await execAsync(command, {
+        cwd: input.cwd,
+        maxBuffer: 5 * 1024 * 1024,
+        timeout: input.timeoutMs,
+        ...(input.abortSignal ? { signal: input.abortSignal } : {}),
+      });
+      return { matches: stdout.split('\n').filter(Boolean).slice(0, input.maxMatches) };
+    } catch (error: any) {
+      if (error?.code === 1) return { matches: [] };
+      throw error;
+    }
+  }
 }
 
 export function createLocalWorkspaceExecutor(): WorkspaceExecutor {
   return new LocalWorkspaceExecutor();
+}
+
+function shellEscape(arg: string): string {
+  return `'${arg.replaceAll("'", "'\\''")}'`;
 }
