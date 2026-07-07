@@ -257,6 +257,24 @@ SandboxTransformResult
 - [ ] macOS 平台先路由到 macOS Seatbelt backend。
 - [ ] Linux 平台先返回 unsupported 或 feature-gated stub，等 Phase 10 实现。
 
+> 具体方案：Phase 3 只建立 runtime 层的 sandbox 选择和 command transform 边界，不接现有 Bash tool，不启动真实平台 sandbox，不改变当前 Maka 的运行行为。
+>
+> `SandboxManager` 的职责限定为：根据 active `PermissionProfile`、`SandboxablePreference` 和 platform 选择 sandbox 类型；把 argv-based command 转换成最终执行请求；在 sandbox 必需但不可用时 fail closed。它不负责 UI、不负责审批、不负责 telemetry、不负责命令执行，也不负责 unsandboxed retry 编排。
+>
+> 第一版引入 `SandboxablePreference = auto | require | forbid`，语义对齐 Codex。`auto` 由 `PermissionProfile` 决定是否需要 sandbox；`require` 强制需要平台 sandbox，平台或 backend 不可用则失败；`forbid` 直接选择 `none`。`forbid` 是 runtime 内部参数，不暴露给 UI / settings；未来只能由 explicit approval / unsandboxed retry orchestration 产生。
+>
+> 第一版不实现 unsandboxed retry，但保留接口语义。未来如果 sandboxed attempt 因 sandbox denial 失败，`ToolOrchestrator` / `PermissionEngine` 可以在用户批准后以 `SandboxablePreference.forbid` 再发起一次执行。`SandboxManager` 只接受 preference 并选择 sandbox，不判断用户是否已经批准。
+>
+> command 采用 argv-based 形状：`program`、`args`、`cwd`、`env`、`profile`、`pathContext`。`pathContext` 显式携带 `workspaceRoots`、`tmpdir`、`slashTmp`、`minimalRoots` 等 symbolic path 解析上下文，供后续 macOS/Linux backend 把 `:workspace_roots`、`:tmpdir` 这类 profile entry 转换成真实路径。后续 Bash tool 接入时，可以把 shell string 包成 `/bin/zsh -lc <command>` 作为内层 argv，再交给 `SandboxManager.transform()` 生成最终 argv。Phase 3 不改当前 `runShellWithBoundedTail(command, { shell: true })` 路径。
+>
+> `selectInitial()` 和 `transform()` 都使用 result union，不通过 throw 表达可预期的 sandbox 选择失败。失败原因第一版包含 `unsupported_platform`、`backend_not_available`、`backend_not_implemented`、`sandbox_required`、`invalid_request`，用于后续 UI、diagnostics、telemetry 和 ToolOrchestrator 编排。
+>
+> backend 通过 constructor injection 注入：`SandboxManager` 接收 `SandboxBackend[]`，Phase 3 测试用 fake macOS backend 验证选择和委托；Phase 4 再加入真实 `MacosSeatbeltBackend`。
+>
+> 平台策略第一版固定为：`darwin + restricted/require -> macos-seatbelt`，没有 macOS backend 时 `backend_not_available`；`linux + restricted/require -> backend_not_implemented`，等 Phase 10；`win32` 和其他平台在需要 sandbox 时返回 `unsupported_platform`。`danger-full-access`、`disabled`、顶层 `external` profile 以及 `forbid` 都选择 `none`。
+>
+> 顶层 `PermissionProfile.External` 表示文件系统隔离由外部环境负责，Phase 3 不叠加 Maka 本地 platform sandbox。即使 external profile 仍携带 network policy，第一版也只保留该语义，不在 `SandboxManager` 中实现 network-only enforcement。
+
 验收标准：
 
 - 上层不直接知道 `sandbox-exec` 细节。
@@ -292,6 +310,26 @@ SandboxTransformResult
 - [ ] 固定使用 `/usr/bin/sandbox-exec`，不要从 PATH 查找。
 - [ ] 确认 policy string 不把未转义路径直接拼进危险位置。
 - [ ] 提供 `createSeatbeltExecArgs()`，输出 `['-p', policy, '--', ...innerArgv]` 或完整 wrapper argv。
+
+> 具体方案：Phase 4 实现 macOS Seatbelt backend，但仍不接现有 Bash tool，不执行真实 runtime sandbox path，也不改变当前 Maka 的运行行为。它只负责把 active `PermissionProfile` 和 Phase 3 `SandboxCommand.pathContext` 转换成 SBPL policy 与 `/usr/bin/sandbox-exec` wrapper argv。
+>
+> Phase 4 引入 Maka-owned base SBPL policy，参考 Codex 的 Seatbelt 设计思想。base policy 承担 shell、系统库、基础 macOS runtime 兼容性；业务权限仍由后续 read/write/network policy section 追加表达。base policy 不提前放开 `network*`。
+>
+> Phase 4 明确实现：`MacosSeatbeltBackend`、`buildSeatbeltPolicy()`、`createSeatbeltExecArgs()`、`createDefaultSandboxManager()`、固定 `/usr/bin/sandbox-exec`、`PermissionProfile + pathContext -> SBPL`、readable/writable roots、tmpdir/slash_tmp roots、protected metadata deny-write、network restricted/enabled、contract tests、macOS-only smoke tests。
+>
+> Phase 4 明确不实现：Bash tool 接入、argv runner、自动 runtime sandbox 执行、Linux backend、Windows sandbox、managed network/proxy、unsandboxed retry、Read/Write/Edit/Glob/Grep 文件工具的 profile enforcement。
+>
+> 普通 root path 不直接拼进 SBPL policy。Phase 4 对齐 Codex，使用 `-DREADABLE_ROOT_0=/path`、`-DWRITABLE_ROOT_0=/path` 传给 `sandbox-exec`，policy 中使用 `(param "READABLE_ROOT_0")` / `(param "WRITABLE_ROOT_0")` 引用，降低路径字符串注入风险。
+>
+> protected metadata 第一版固定使用 `.git`、`.agents`、`.codex`。它们不通过单独顶层 deny 覆盖，而是在 writable root 的 allow rule 中使用 `require-not regex` 排除。regex 覆盖 workspace root 下任意层级的 protected metadata 名称，包含第一次创建 `.codex` 目录的场景。root 和 metadata name 都必须做 regex escape。
+>
+> read/write 映射第一版固定为：`read-only` 允许读取 `workspaceRoots`，不允许写；`workspace-write` 允许读写 `workspaceRoots`、`tmpdir`、`slashTmp`，并对 workspace writable roots 加 protected metadata deny-write。Phase 4 不给 workspace-write 增加业务上的 `:root` read；系统运行所需的只读访问放在 base policy 中。
+>
+> network policy 第一版只实现 `restricted` 和 `enabled`：`restricted -> (deny network*)`，`enabled -> (allow network*)`。不实现 managed network proxy、domain allowlist、loopback port exception、MITM CA 或 network env rewriting。`enabled` 只做 policy contract test，不要求真实联网 smoke 成功。
+>
+> `MacosSeatbeltBackend` 只处理 `managed + fileSystem.kind = restricted` profile。`disabled`、`external`、`danger-full-access` / unrestricted 应该已经由 Phase 3 `SandboxManager` 选择 `none`；如果错误传到 backend，backend 返回 `ok: false` / `invalid_request`，不在 backend 内部降级成 host execution。
+>
+> Phase 4 smoke test 可以真实调用 `/usr/bin/sandbox-exec`，但必须 macOS-only，非 macOS 或缺少 binary 时自动 skip。smoke 只覆盖稳定场景：workspace 内普通文件写入成功、workspace 外写入失败、protected metadata 写入失败、network restricted 失败。
 
 验收标准：
 
