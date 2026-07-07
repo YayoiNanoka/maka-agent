@@ -704,7 +704,7 @@ export function buildHarborCellContextBudgetBackendOptions(
     env.MAKA_HARBOR_CONTEXT_STALE_TOOL_RESULT_PRUNE ??
     env.MAKA_TOOL_RESULT_PRUNE,
     'MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE',
-  ) ?? false;
+  ) ?? true;
   const activePruneEnabled = booleanEnv(
     env.MAKA_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE ??
     env.MAKA_HARBOR_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE ??
@@ -760,7 +760,9 @@ export function buildHarborCellContextBudgetBackendOptions(
     contextBudget.staleToolResultPrune = {
       enabled: true,
       ...(maxResultEstimatedTokens !== undefined ? { maxResultEstimatedTokens } : {}),
-      ...(minRecentTurnsFull !== undefined ? { minRecentTurnsFull } : {}),
+      // Explicit so the runtime protection window matches the policy snapshot
+      // and desktop default (2) instead of the runtime's internal ?? 1 fallback.
+      minRecentTurnsFull: minRecentTurnsFull ?? minRecentTurns ?? 2,
     };
   }
 
