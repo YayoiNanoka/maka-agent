@@ -56,6 +56,9 @@ import type {
   SessionHeader,
 } from '@maka/core/session';
 import type {
+  AgentBackend,
+  BackendCompactHistoryInput,
+  BackendCompactHistoryResult,
   BackendSendInput,
   PermissionDecision,
 } from '@maka/core/backend-types';
@@ -63,7 +66,6 @@ import type { AgentSpec } from '@maka/core/runtime-inputs';
 import type { LlmConnection } from '@maka/core/llm-connections';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type {
-  CompactionDecisionDiagnostic,
   LlmCallRecord,
   PricingConfig,
   ToolInvocationRecord,
@@ -140,21 +142,27 @@ import {
 import {
   ARCHIVED_TOOL_RESULT_REWRITE_VERSION,
   applyRuntimeEventContextBudget,
+  buildContextBudgetDiagnosticShell,
+  buildHistorySearchSource,
   buildPromptSegmentEstimates,
   collectStaleToolResultArchiveCandidates,
   estimateRuntimeEventsTokens,
-  historyCompactBlockToRuntimeEvent,
+  mergeContextBudgetDiagnostic,
+  mergeContextBudgetDiagnosticPatches,
+  mergeRuntimeEventsInOriginalOrder,
+  minimalContextBudgetDiagnostic,
   rawEvidenceRequestReason,
+  replaceHistoryCompactReplayBlocks,
   retrieveArchivedToolResultsForReplay,
+  retrieveReplayHistoryAroundSearchSource,
   retrieveRuntimeEventHistoryAround,
-  searchRuntimeEventHistory,
+  runtimeEventTurnKey,
   selectSynthesisCacheForReplay,
+  shouldAppendContextCompactedNote,
   type ContextBudgetPolicy,
   type HistoryCompactBlock,
   type ActiveArchivedToolResultPlaceholder,
   type ActiveToolResultArchiveCandidate,
-  type RuntimeEventHistoryAroundResult,
-  type RuntimeEventHistorySearchPolicy,
   type StaleToolResultArchiveCandidate,
   type SynthesisCacheBlock,
   type SynthesisSourceRef,
@@ -169,33 +177,20 @@ export {
   TOOL_ERROR_RESULT_MAX_CHARS,
   formatSyntheticToolErrorText,
 } from './tool-runtime.js';
-export type { MakaTool, MakaToolContext } from './tool-runtime.js';
 export { normalizeAiSdkUsage } from './model-adapter.js';
 export type { ModelFactory, ModelFactoryInput, RepairableAiSdkToolCall } from './model-adapter.js';
 export type { RunTraceEvent, RunTraceRecorder } from './run-trace.js';
 
 // ============================================================================
-// AgentBackend interface
+// AgentBackend interface — port contract now lives in @maka/core/backend-types;
+// re-exported here for backward compatibility with existing import sites.
 // ============================================================================
 
-export interface BackendCompactHistoryInput {
-  turnId: string;
-  runtimeContext: readonly RuntimeEvent[];
-}
-
-export interface BackendCompactHistoryResult {
-  contextBudget?: ContextBudgetDiagnostic;
-}
-
-export interface AgentBackend {
-  readonly kind: BackendKind;
-  readonly sessionId: string;
-  send(input: BackendSendInput): AsyncIterable<SessionEvent>;
-  compactHistory?(input: BackendCompactHistoryInput): Promise<BackendCompactHistoryResult>;
-  stop(reason: 'user_stop' | 'redirect'): Promise<void>;
-  respondToPermission(decision: PermissionDecision): Promise<void>;
-  dispose(): Promise<void>;
-}
+export type {
+  AgentBackend,
+  BackendCompactHistoryInput,
+  BackendCompactHistoryResult,
+} from '@maka/core/backend-types';
 
 export const INVALID_TOOL_NAME = 'invalid';
 
@@ -2590,197 +2585,6 @@ function hasBlockingReplayDiagnostics(plan: RuntimeEventModelReplayPlan): boolea
   );
 }
 
-function mergeRuntimeEventsInOriginalOrder(
-  original: readonly RuntimeEvent[],
-  current: readonly RuntimeEvent[],
-  extra: readonly RuntimeEvent[],
-): RuntimeEvent[] {
-  const wantedIds = new Set<string>();
-  const byId = new Map<string, RuntimeEvent>();
-  for (const event of current) {
-    wantedIds.add(event.id);
-    byId.set(event.id, event);
-  }
-  for (const event of extra) {
-    wantedIds.add(event.id);
-    if (!byId.has(event.id)) byId.set(event.id, event);
-  }
-  const out: RuntimeEvent[] = [];
-  for (const event of original) {
-    if (!wantedIds.has(event.id)) continue;
-    out.push(byId.get(event.id) ?? event);
-  }
-  return out;
-}
-
-function buildContextBudgetDiagnosticShell(
-  before: readonly RuntimeEvent[],
-  after: readonly RuntimeEvent[],
-  policy: ContextBudgetPolicy | undefined,
-): ContextBudgetDiagnostic {
-  const charsPerToken = policy?.charsPerToken ?? 4;
-  const turnCountBefore = new Set(before.map((event) => runtimeEventTurnKey(event))).size;
-  const turnCountAfter = new Set(after.map((event) => runtimeEventTurnKey(event))).size;
-  return {
-    enabled: true,
-    ...(policy?.name ? { policyName: policy.name } : {}),
-    ...(policy?.maxHistoryEstimatedTokens !== undefined
-      ? { maxHistoryEstimatedTokens: policy.maxHistoryEstimatedTokens }
-      : {}),
-    ...(policy?.maxHistoryTurns !== undefined ? { maxHistoryTurns: policy.maxHistoryTurns } : {}),
-    estimatedTokensBefore: estimateRuntimeEventsTokens(before, charsPerToken),
-    estimatedTokensAfter: estimateRuntimeEventsTokens(after, charsPerToken),
-    keptTurns: turnCountAfter,
-    droppedTurns: Math.max(0, turnCountBefore - turnCountAfter),
-    keptEvents: after.length,
-    droppedEvents: Math.max(0, before.length - after.length),
-    ...(policy?.historyRewrite?.enabled === true
-      ? {
-          historyRewriteVersion: policy.historyRewrite.historyRewriteVersion,
-          historyRewriteResetReason: policy.historyRewrite.resetReason,
-          historyRewriteGate: policy.historyRewrite.name ?? 'history-rewrite',
-        }
-      : {}),
-  };
-}
-
-function runtimeEventTurnKey(event: RuntimeEvent): string {
-  return event.turnId || '<unknown-turn>';
-}
-
-function retrieveReplayHistoryAroundSearchSource(
-  replayEvents: readonly RuntimeEvent[],
-  searchEvents: readonly RuntimeEvent[],
-  query: string,
-  policy: RuntimeEventHistorySearchPolicy | undefined,
-  options: { charsPerToken?: number } = {},
-): RuntimeEventHistoryAroundResult {
-  if (policy?.enabled !== true) {
-    return { events: [], hits: [], diagnosticPatch: {} };
-  }
-  const charsPerToken = options.charsPerToken ?? 4;
-  const around = Math.max(0, Math.floor(policy.around ?? 1));
-  const maxEstimatedTokens = typeof policy.maxEstimatedTokens === 'number'
-    && Number.isFinite(policy.maxEstimatedTokens)
-    && policy.maxEstimatedTokens > 0
-    ? Math.floor(policy.maxEstimatedTokens)
-    : 4_096;
-  const hits = searchRuntimeEventHistory(searchEvents, policy.query ?? query, policy);
-  const selectedIndexes = new Set<number>();
-  const indexesByEventId = new Map(replayEvents.map((event, index) => [event.id, index]));
-  let skipped = 0;
-  for (const hit of hits) {
-    const index = indexesByEventId.get(hit.eventId);
-    if (index === undefined) {
-      skipped += 1;
-      continue;
-    }
-    for (let cursor = Math.max(0, index - around); cursor <= Math.min(replayEvents.length - 1, index + around); cursor += 1) {
-      selectedIndexes.add(cursor);
-    }
-  }
-
-  const selectedEvents: RuntimeEvent[] = [];
-  let selectedTokens = 0;
-  for (const index of [...selectedIndexes].sort((a, b) => a - b)) {
-    const event = replayEvents[index]!;
-    const estimate = estimateRuntimeEventsTokens([event], charsPerToken);
-    if (selectedTokens + estimate > maxEstimatedTokens) {
-      skipped += 1;
-      continue;
-    }
-    selectedEvents.push(event);
-    selectedTokens += estimate;
-  }
-
-  return {
-    events: selectedEvents,
-    hits,
-    diagnosticPatch: {
-      historySearchMatches: hits.length,
-      historyAroundRetrievedEvents: selectedEvents.length,
-      historyAroundEstimatedTokens: selectedTokens,
-      ...(skipped > 0 ? { historyAroundSkippedEvents: skipped } : {}),
-    },
-  };
-}
-
-function buildHistorySearchSource(
-  events: readonly RuntimeEvent[],
-  policy: ContextBudgetPolicy | undefined,
-): readonly RuntimeEvent[] {
-  if (policy?.staleToolResultPrune?.enabled !== true) return events;
-  return applyRuntimeEventContextBudget(events, {
-    ...policy,
-    maxHistoryEstimatedTokens: undefined,
-    maxHistoryTurns: undefined,
-    archiveRetrieval: undefined,
-    historySearch: undefined,
-    historyRewrite: undefined,
-  })?.events ?? events;
-}
-
-function mergeContextBudgetDiagnostic(
-  base: ContextBudgetDiagnostic,
-  patch: Partial<ContextBudgetDiagnostic>,
-): ContextBudgetDiagnostic {
-  return {
-    ...base,
-    ...patch,
-    archiveRetrievalFailureReasonCounts: mergeCountRecords(
-      base.archiveRetrievalFailureReasonCounts,
-      patch.archiveRetrievalFailureReasonCounts,
-    ),
-    archiveRetrievalSkippedReasonCounts: mergeCountRecords(
-      base.archiveRetrievalSkippedReasonCounts,
-      patch.archiveRetrievalSkippedReasonCounts,
-    ),
-    synthesisCacheSkippedReasonCounts: mergeCountRecords(
-      base.synthesisCacheSkippedReasonCounts,
-      patch.synthesisCacheSkippedReasonCounts,
-    ),
-    synthesisCacheInvalidationReasonCounts: mergeCountRecords(
-      base.synthesisCacheInvalidationReasonCounts,
-      patch.synthesisCacheInvalidationReasonCounts,
-    ),
-    synthesisCacheLoadSkippedReasonCounts: mergeCountRecords(
-      base.synthesisCacheLoadSkippedReasonCounts,
-      patch.synthesisCacheLoadSkippedReasonCounts,
-    ),
-    synthesisCacheWriteSkippedReasonCounts: mergeCountRecords(
-      base.synthesisCacheWriteSkippedReasonCounts,
-      patch.synthesisCacheWriteSkippedReasonCounts,
-    ),
-    synthesisCacheEvictionReasonCounts: mergeCountRecords(
-      base.synthesisCacheEvictionReasonCounts,
-      patch.synthesisCacheEvictionReasonCounts,
-    ),
-    historyCompactSkippedReasonCounts: mergeCountRecords(
-      base.historyCompactSkippedReasonCounts,
-      patch.historyCompactSkippedReasonCounts,
-    ),
-    historyCompactLoadSkippedReasonCounts: mergeCountRecords(
-      base.historyCompactLoadSkippedReasonCounts,
-      patch.historyCompactLoadSkippedReasonCounts,
-    ),
-    historyCompactWriteSkippedReasonCounts: mergeCountRecords(
-      base.historyCompactWriteSkippedReasonCounts,
-      patch.historyCompactWriteSkippedReasonCounts,
-    ),
-    ...mergeCompactionDecisionDiagnostics(base.compactionDecisions, patch.compactionDecisions),
-  };
-}
-
-function mergeContextBudgetDiagnosticPatches(
-  left: Partial<ContextBudgetDiagnostic> | undefined,
-  right: Partial<ContextBudgetDiagnostic> | undefined,
-): Partial<ContextBudgetDiagnostic> | undefined {
-  if (!left && !right) return undefined;
-  if (!left) return right;
-  if (!right) return left;
-  return mergeContextBudgetDiagnostic(left as ContextBudgetDiagnostic, right);
-}
-
 function mergeActiveToolResultPruneDiagnosticPatches(
   left: ActiveToolResultPruneDiagnosticPatch,
   right: ActiveToolResultPruneDiagnosticPatch,
@@ -2818,71 +2622,6 @@ function contextBudgetWithActivePrepareStepDiagnostics(
   const mergedPatch = mergeContextBudgetDiagnosticPatches(prunePatch, activeFullCompactPatch);
   if (!mergedPatch) return base;
   return mergeContextBudgetDiagnostic(base ?? minimalContextBudgetDiagnostic(), mergedPatch);
-}
-
-function shouldAppendContextCompactedNote(contextBudget: ContextBudgetDiagnostic | undefined): boolean {
-  if ((contextBudget?.historyCompactBlocksWritten ?? 0) <= 0) return false;
-  return contextBudget?.compactionDecisions?.some((decision) =>
-    decision.stage === 'priorReplay'
-    && decision.boundaryKind === 'historyCompact'
-    && decision.decision === 'replaced'
-  ) === true;
-}
-
-function minimalContextBudgetDiagnostic(): ContextBudgetDiagnostic {
-  return {
-    enabled: true,
-    estimatedTokensBefore: 0,
-    estimatedTokensAfter: 0,
-    keptTurns: 0,
-    droppedTurns: 0,
-    keptEvents: 0,
-    droppedEvents: 0,
-  };
-}
-
-function mergeCountRecords(
-  left: Record<string, number> | undefined,
-  right: Record<string, number> | undefined,
-): Record<string, number> | undefined {
-  if (!left && !right) return undefined;
-  const out: Record<string, number> = { ...(left ?? {}) };
-  for (const [key, value] of Object.entries(right ?? {})) {
-    out[key] = (out[key] ?? 0) + value;
-  }
-  return out;
-}
-
-function mergeCompactionDecisionDiagnostics(
-  left: readonly CompactionDecisionDiagnostic[] | undefined,
-  right: readonly CompactionDecisionDiagnostic[] | undefined,
-): { compactionDecisions: CompactionDecisionDiagnostic[] } | Record<string, never> {
-  if (!left && !right) return {};
-  if (!right || right.length === 0) return { compactionDecisions: [...(left ?? [])] };
-  const replacesHistoryCompact = right.some((decision) =>
-    decision.stage === 'priorReplay'
-    && decision.boundaryKind === 'historyCompact'
-  );
-  const retainedLeft = replacesHistoryCompact
-    ? (left ?? []).filter((decision) =>
-        !(
-          decision.stage === 'priorReplay'
-          && decision.boundaryKind === 'historyCompact'
-        )
-      )
-    : (left ?? []);
-  return { compactionDecisions: [...retainedLeft, ...right] };
-}
-
-function replaceHistoryCompactReplayBlocks(
-  events: readonly RuntimeEvent[],
-  blocks: readonly HistoryCompactBlock[],
-): RuntimeEvent[] {
-  if (blocks.length === 0) return [...events];
-  return [
-    ...blocks.map((block) => historyCompactBlockToRuntimeEvent(block)),
-    ...events.filter((event) => !event.id.startsWith('history-compact:')),
-  ];
 }
 
 function incrementRecord(counts: Record<string, number>, key: string): void {
