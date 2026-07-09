@@ -2,15 +2,19 @@ import { describe, test } from 'node:test';
 import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createWorkspaceWritePermissionProfile } from '@maka/core/permission-profile';
 import { expect } from '../test-helpers.js';
 import { buildBuiltinTools } from '../builtin-tools.js';
 import type { ShellRunToolController } from '../shell-tools.js';
 import {
   LOCAL_WORKSPACE_EXECUTOR_FACTS,
+  SandboxedCommandWorkspaceExecutor,
   type WorkspaceExecInput,
   type WorkspaceExecutor,
   type WorkspaceExecutorFacts,
 } from '../workspace-executor.js';
+import type { BoundedProcessOptions } from '../shell-exec.js';
+import type { SandboxTransformRequest, SandboxTransformResult } from '../sandbox/index.js';
 
 describe('builtin tool executor facts', () => {
   test('attaches executor facts to every built-in tool', () => {
@@ -216,6 +220,81 @@ describe('builtin Bash streaming output', () => {
       exitCode: 0,
       stdout: 'delegated-out',
       stderr: 'delegated-err',
+    });
+  });
+
+  test('foreground Bash preserves terminal shape when injected executor is sandboxed', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'maka-bash-sandboxed-executor-'));
+    const runnerArgv: Array<readonly string[]> = [];
+    const sandboxManager = {
+      transform(request: SandboxTransformRequest): SandboxTransformResult {
+        return {
+          ok: true,
+          exec: {
+            argv: ['/usr/bin/sandbox-exec', '-p', 'policy', '--', request.command.program, ...request.command.args],
+            cwd: request.command.cwd,
+            env: request.command.env,
+            sandboxType: 'macos-seatbelt',
+            effectiveProfile: request.command.profile,
+          },
+          sandboxType: 'macos-seatbelt',
+          requiresSandbox: true,
+          preference: 'auto',
+        };
+      },
+    };
+    const executor = new SandboxedCommandWorkspaceExecutor({
+      inner: fakeExecutor({}),
+      getSandboxContext: () => ({
+        profile: createWorkspaceWritePermissionProfile(),
+        workspaceRoots: [cwd],
+        sandboxManager,
+        platform: 'darwin',
+      }),
+      runProcess: async (argv: readonly string[], _options: BoundedProcessOptions) => {
+        runnerArgv.push(argv);
+        return {
+          exitCode: 0,
+          stdout: 'sandboxed-out',
+          stderr: 'sandboxed-err',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          timedOut: false,
+          aborted: false,
+        };
+      },
+    });
+    const bash = buildBuiltinTools({ executor }).find((tool) => tool.name === 'Bash');
+    if (!bash) throw new Error('Bash tool missing');
+
+    const result = await bash.impl(
+      { command: 'echo visible', timeout_ms: 5_000 },
+      {
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        cwd,
+        toolCallId: 'tool-1',
+        abortSignal: new AbortController().signal,
+        emitOutput: () => {},
+      },
+    );
+
+    expect(runnerArgv).toEqual([[
+      '/usr/bin/sandbox-exec',
+      '-p',
+      'policy',
+      '--',
+      '/bin/sh',
+      '-lc',
+      'echo visible',
+    ]]);
+    expect(result).toMatchObject({
+      kind: 'terminal',
+      cwd,
+      cmd: 'echo visible',
+      exitCode: 0,
+      stdout: 'sandboxed-out',
+      stderr: 'sandboxed-err',
     });
   });
 

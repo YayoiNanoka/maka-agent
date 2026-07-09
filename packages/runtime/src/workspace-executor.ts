@@ -1,10 +1,26 @@
 import { promises as fs } from 'node:fs';
 import { exec } from 'node:child_process';
 import { glob as nodeGlob } from 'node:fs/promises';
+import { tmpdir as osTmpdir } from 'node:os';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { ToolExecutionFacts } from '@maka/core/permission';
-import { runShellWithBoundedTail } from './shell-exec.js';
+import type { PermissionProfile } from '@maka/core/permission-profile';
+import {
+  runProcessWithBoundedTail,
+  runShellWithBoundedTail,
+  type BoundedProcessOptions,
+  type BoundedProcessResult,
+} from './shell-exec.js';
+import type {
+  SandboxPathContext,
+  SandboxPlatform,
+  SandboxTransformFailureReason,
+  SandboxTransformRequest,
+  SandboxTransformResult,
+  SandboxType,
+  SandboxablePreference,
+} from './sandbox/index.js';
 
 const execAsync = promisify(exec);
 
@@ -26,6 +42,7 @@ export interface WorkspaceExecInput {
   command: string;
   cwd: string;
   timeoutMs: number;
+  env?: NodeJS.ProcessEnv;
   abortSignal?: AbortSignal;
   emitOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void;
 }
@@ -183,6 +200,60 @@ export interface WorkspaceExecutor
     WorkspaceGlobExecutor,
     WorkspaceGrepExecutor {}
 
+export interface WorkspaceCommandSandboxManager {
+  transform(request: SandboxTransformRequest): SandboxTransformResult;
+}
+
+export interface WorkspaceCommandSandboxContext {
+  profile: PermissionProfile;
+  workspaceRoots: readonly string[];
+  sandboxManager: WorkspaceCommandSandboxManager;
+  preference?: SandboxablePreference;
+  platform?: SandboxPlatform;
+  pathContext?: Partial<Omit<SandboxPathContext, 'workspaceRoots'>>;
+}
+
+export type WorkspaceCommandSandboxContextProvider =
+  () => WorkspaceCommandSandboxContext | undefined;
+
+export type WorkspaceCommandRunner = (
+  argv: readonly string[],
+  options: BoundedProcessOptions,
+) => Promise<BoundedProcessResult>;
+
+export type WorkspaceCommandSandboxErrorReason =
+  | 'missing_context'
+  | 'missing_workspace_roots'
+  | SandboxTransformFailureReason;
+
+export interface WorkspaceCommandSandboxErrorDetails {
+  reason: WorkspaceCommandSandboxErrorReason;
+  sandboxType?: SandboxType;
+  requiresSandbox?: boolean;
+  message?: string;
+}
+
+export class WorkspaceCommandSandboxError extends Error {
+  readonly code = 'SANDBOX_COMMAND_BLOCKED';
+  readonly reason: WorkspaceCommandSandboxErrorReason;
+  readonly sandboxType?: SandboxType;
+  readonly requiresSandbox?: boolean;
+
+  constructor(details: WorkspaceCommandSandboxErrorDetails) {
+    super(details.message ?? defaultSandboxErrorMessage(details.reason));
+    this.name = 'WorkspaceCommandSandboxError';
+    this.reason = details.reason;
+    this.sandboxType = details.sandboxType;
+    this.requiresSandbox = details.requiresSandbox;
+  }
+}
+
+export interface SandboxedCommandWorkspaceExecutorOptions {
+  inner: WorkspaceExecutor;
+  getSandboxContext: WorkspaceCommandSandboxContextProvider;
+  runProcess?: WorkspaceCommandRunner;
+}
+
 export class LocalWorkspaceExecutor implements WorkspaceExecutor {
   readonly facts = LOCAL_WORKSPACE_EXECUTOR_FACTS;
 
@@ -190,6 +261,7 @@ export class LocalWorkspaceExecutor implements WorkspaceExecutor {
     const result = await runShellWithBoundedTail(input.command, {
       cwd: input.cwd,
       timeoutMs: input.timeoutMs,
+      ...(input.env ? { env: input.env } : {}),
       ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
       ...(input.emitOutput ? { emitOutput: input.emitOutput } : {}),
     });
@@ -264,8 +336,117 @@ export class LocalWorkspaceExecutor implements WorkspaceExecutor {
   }
 }
 
+export class SandboxedCommandWorkspaceExecutor implements WorkspaceExecutor {
+  readonly facts: WorkspaceExecutorFacts;
+  private readonly inner: WorkspaceExecutor;
+  private readonly getSandboxContext: WorkspaceCommandSandboxContextProvider;
+  private readonly runProcess: WorkspaceCommandRunner;
+
+  constructor(options: SandboxedCommandWorkspaceExecutorOptions) {
+    this.inner = options.inner;
+    this.facts = options.inner.facts;
+    this.getSandboxContext = options.getSandboxContext;
+    this.runProcess = options.runProcess ?? runProcessWithBoundedTail;
+  }
+
+  async exec(input: WorkspaceExecInput): Promise<WorkspaceExecResult> {
+    const context = this.getSandboxContext();
+    if (!context) {
+      throw new WorkspaceCommandSandboxError({
+        reason: 'missing_context',
+        message: 'Sandbox context is required for command execution but was unavailable.',
+      });
+    }
+    if (!context.workspaceRoots || context.workspaceRoots.length === 0) {
+      throw new WorkspaceCommandSandboxError({
+        reason: 'missing_workspace_roots',
+        message: 'Sandbox workspace roots are required for command execution but were unavailable.',
+      });
+    }
+
+    const transform = context.sandboxManager.transform({
+      command: {
+        program: '/bin/sh',
+        args: ['-lc', input.command],
+        cwd: input.cwd,
+        ...(input.env ? { env: input.env } : {}),
+        profile: context.profile,
+        pathContext: {
+          tmpdir: osTmpdir(),
+          slashTmp: '/tmp',
+          ...context.pathContext,
+          workspaceRoots: context.workspaceRoots,
+        },
+      },
+      ...(context.preference ? { preference: context.preference } : {}),
+      ...(context.platform ? { platform: context.platform } : {}),
+    });
+
+    if (!transform.ok) {
+      throw new WorkspaceCommandSandboxError({
+        reason: transform.reason,
+        sandboxType: transform.sandboxType,
+        requiresSandbox: transform.requiresSandbox,
+        message: transform.message,
+      });
+    }
+
+    const result = await this.runProcess(transform.exec.argv, {
+      cwd: transform.exec.cwd,
+      timeoutMs: input.timeoutMs,
+      ...(transform.exec.env ? { env: transform.exec.env as NodeJS.ProcessEnv } : {}),
+      ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+      ...(input.emitOutput ? { emitOutput: input.emitOutput } : {}),
+    });
+
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.timedOut ? 124 : result.aborted ? 130 : result.exitCode,
+      stdoutTruncated: result.stdoutTruncated,
+      stderrTruncated: result.stderrTruncated,
+      timedOut: result.timedOut,
+      aborted: result.aborted,
+    };
+  }
+
+  readFile(input: WorkspaceReadFileInput): Promise<WorkspaceReadFileResult> {
+    return this.inner.readFile(input);
+  }
+
+  writeFile(input: WorkspaceWriteFileInput): Promise<WorkspaceWriteFileResult> {
+    return this.inner.writeFile(input);
+  }
+
+  resolveExistingPath(input: WorkspaceResolvePathInput): Promise<WorkspaceResolvePathResult> {
+    return this.inner.resolveExistingPath(input);
+  }
+
+  resolveWritablePath(input: WorkspaceResolvePathInput): Promise<WorkspaceResolvePathResult> {
+    return this.inner.resolveWritablePath(input);
+  }
+
+  writeLockKey(input: WorkspaceWriteLockKeyInput): Promise<WorkspaceWriteLockKeyResult> {
+    return this.inner.writeLockKey(input);
+  }
+
+  globFiles(input: WorkspaceGlobInput): Promise<WorkspaceGlobResult> {
+    return this.inner.globFiles(input);
+  }
+
+  grepFiles(input: WorkspaceGrepInput): Promise<WorkspaceGrepResult> {
+    return this.inner.grepFiles(input);
+  }
+}
+
 export function createLocalWorkspaceExecutor(): WorkspaceExecutor {
   return new LocalWorkspaceExecutor();
+}
+
+function defaultSandboxErrorMessage(reason: WorkspaceCommandSandboxErrorReason): string {
+  if (reason === 'missing_context') return 'Sandbox context is required for command execution but was unavailable.';
+  if (reason === 'missing_workspace_roots') return 'Sandbox workspace roots are required for command execution but were unavailable.';
+  return `Sandbox command transform failed: ${reason}.`;
 }
 
 function shellEscape(arg: string): string {

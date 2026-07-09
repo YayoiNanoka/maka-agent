@@ -377,17 +377,17 @@ SandboxTransformResult
 
 任务：
 
-- [ ] 新增 `runProcessWithBoundedTail()` 或等价函数。
-- [ ] 输入 argv：`command: string[]` 或 `program + args`。
-- [ ] 保留 cwd。
-- [ ] 保留 env。
-- [ ] 保留 timeout。
-- [ ] 保留 abort signal。
-- [ ] 保留 stdout/stderr streaming。
-- [ ] 保留 bounded tail output。
-- [ ] 保留 POSIX process group termination。
-- [ ] 保留 Windows taskkill 逻辑，但 Windows sandbox 本轮不实现。
-- [ ] 保留现有 `runShellWithBoundedTail()`，作为 shell-string compatibility path。
+- [x] 新增 `runProcessWithBoundedTail()` 或等价函数。
+- [x] 输入 argv：`command: string[]` 或 `program + args`。
+- [x] 保留 cwd。
+- [x] 保留 env。
+- [x] 保留 timeout。
+- [x] 保留 abort signal。
+- [x] 保留 stdout/stderr streaming。
+- [x] 保留 bounded tail output。
+- [x] 保留 POSIX process group termination。
+- [x] 保留 Windows taskkill 逻辑，但 Windows sandbox 本轮不实现。
+- [x] 保留现有 `runShellWithBoundedTail()`，作为 shell-string compatibility path。
 
 > 具体方案：Phase 5 只在 `packages/runtime/src/shell-exec.ts` 增加 argv-based process runner，不改变现有 `WorkspaceExecutor.exec()`、Bash tool 或 ToolRuntime 行为。现有命令继续走 `runShellWithBoundedTail(command)`；Phase 6 再把 Bash 接到 `SandboxManager.transform() -> runProcessWithBoundedTail(argv)`。
 >
@@ -427,15 +427,33 @@ SandboxTransformResult
 
 任务：
 
-- [ ] 定义 Bash 执行所需的 permission context 输入。
-- [ ] 让 Bash impl 能拿到 active `PermissionProfile`。
-- [ ] Bash command 转换成 `/bin/sh -lc <command>` 内层 argv。
-- [ ] 调用 `SandboxManager.transform()` 得到最终 argv。
-- [ ] 使用 argv runner 执行。
-- [ ] 保留 terminal result shape：cwd、cmd、exitCode、stdout、stderr。
-- [ ] sandbox denial 返回清晰错误。
-- [ ] 不做 unsandboxed retry。
-- [ ] sandbox 必需但不可用时 fail closed 或明确 prompt/block。
+- [x] 定义 Bash 执行所需的 permission context 输入。
+- [x] 让 Bash impl 能拿到 active `PermissionProfile`。
+- [x] Bash command 转换成 `/bin/sh -lc <command>` 内层 argv。
+- [x] 调用 `SandboxManager.transform()` 得到最终 argv。
+- [x] 使用 argv runner 执行。
+- [x] 保留 terminal result shape：cwd、cmd、exitCode、stdout、stderr。
+- [x] sandbox denial 返回清晰错误。
+- [x] 不做 unsandboxed retry。
+- [x] sandbox 必需但不可用时 fail closed 或明确 prompt/block。
+
+> 范围决定：Phase 6 第一版只接 foreground Bash，也就是没有 `shellRuns` 时的 `buildExecutorBashTool() -> WorkspaceExecutor.exec()` 路径。它用于普通短命令，一次 tool call 内等待命令结束并返回 terminal result。
+>
+> Phase 6 第一版暂不接 background Bash，也就是有 `shellRuns` 时的 `buildBackgroundBashTool() -> ShellRunProcessManager.runBash()` 路径。background Bash 还涉及 long-running task、runtime ref、durable shell run record、`Read(ref)`、`StopBackgroundTask`、observe/yield 和后台进程生命周期，后续需要单独补齐 sandbox-aware 启动逻辑。
+>
+> 后续补齐项：background Bash 必须接入同一套 active `PermissionProfile`、`SandboxManager.transform()` 和 argv-based spawn，不能长期停留在 host shell execution。实现时需要保持后台任务 ref、输出 tail、停止任务、超时/abort 和 durable record 行为不回退。
+>
+> 后续补齐项：当前 Maka 没有统一的 `WorkspaceExecutor` factory。`desktop`、`cli`、`headless` 和测试分别在各自入口组装 tools / executor，Phase 6 不做这层重构。等 sandbox 主链路完成后，需要单独补一个 runtime tool/executor assembly 阶段，统一 desktop / cli 的 tool 构建入口，把 active `PermissionProfile`、`SandboxManager`、foreground Bash、background Bash 和后续文件工具 enforcement 接到同一条默认运行时路径。
+>
+> 具体方案：Phase 6 新增 `SandboxedCommandWorkspaceExecutor` wrapper，采用 C2 动态上下文方案。它持有 `inner: WorkspaceExecutor` 和 `getSandboxContext()`；只覆盖 `exec()`，其他 `WorkspaceExecutor` 方法全部委托 `inner`。命名使用 `Command`，明确第一版只 sandbox command execution，不表示 Read / Write / Edit / Glob / Grep 已经获得 OS sandbox 兜底。
+>
+> `getSandboxContext()` 每次 `exec()` 时动态返回当前 active sandbox context，至少包含 `profile`、非空 `workspaceRoots`、`sandboxManager`，并可携带 `preference`、`platform`、`pathContext`。Phase 6 采用 fail-closed：缺少 context、缺少 `workspaceRoots`、`workspaceRoots` 为空都直接抛出 structured error，不回退到 host shell。`bypass` / `danger-full-access` 也应返回 context，由 `SandboxManager.transform()` 明确选择 `none`，而不是通过缺少 context 隐式绕过 sandbox。
+>
+> `WorkspaceExecInput` 增加可选 `env`。`SandboxedCommandWorkspaceExecutor.exec()` 把 Bash command 固定包成 `/bin/sh -lc <command>` 内层 argv，调用 `SandboxManager.transform()` 生成最终 argv，再用 Phase 5 的 `runProcessWithBoundedTail()` 执行。runner 支持构造函数注入，默认使用真实 runner，测试使用 fake runner 验证最终 argv、cwd、env、timeout、abort、streaming 参数。
+>
+> transform 失败时抛出带字段的 `WorkspaceCommandSandboxError`，`code = 'SANDBOX_COMMAND_BLOCKED'`，`reason` 为 `missing_context`、`missing_workspace_roots` 或 `SandboxTransformFailureReason`，并保留 `sandboxType`、`requiresSandbox` 等诊断字段。Phase 6 不做 unsandboxed retry；sandbox 必需但不可用时 fail closed。
+>
+> Phase 6 第一版测试以 unit tests 为主，不强制 macOS smoke。测试覆盖：fake `SandboxManager` 收到 `/bin/sh -lc <command>`；fake runner 执行最终 argv；`cwd` / `env` / `timeout` / `abortSignal` / `emitOutput` 传递不丢；missing context fail closed；missing / empty `workspaceRoots` fail closed；transform failure 抛 structured error；非 exec 文件方法委托 `inner`；`buildBuiltinTools({ executor: sandboxed })` 下 Bash terminal result shape 不变；`buildBuiltinTools({ shellRuns })` background Bash 不受 Phase 6 改动影响。
 
 验收标准：
 

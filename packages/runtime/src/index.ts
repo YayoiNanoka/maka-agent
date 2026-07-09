@@ -110,13 +110,22 @@ export type {
 export {
   LOCAL_WORKSPACE_EXECUTOR_FACTS,
   LocalWorkspaceExecutor,
+  SandboxedCommandWorkspaceExecutor,
+  WorkspaceCommandSandboxError,
   createLocalWorkspaceExecutor,
 } from './workspace-executor.js';
 export type {
+  SandboxedCommandWorkspaceExecutorOptions,
   WorkspaceExecInput,
   WorkspaceExecResult,
   WorkspaceBashExecutor,
   WorkspaceCommandExecutor,
+  WorkspaceCommandRunner,
+  WorkspaceCommandSandboxContext,
+  WorkspaceCommandSandboxContextProvider,
+  WorkspaceCommandSandboxErrorDetails,
+  WorkspaceCommandSandboxErrorReason,
+  WorkspaceCommandSandboxManager,
   WorkspaceEditExecutor,
   WorkspaceExistingPathResolver,
   WorkspaceExecutor,
