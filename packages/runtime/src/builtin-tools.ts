@@ -7,7 +7,6 @@
 
 import { z } from 'zod';
 import { isAbsolute } from 'node:path';
-import { computeEditedSource } from './edit-replace.js';
 import {
   buildBackgroundBashTool,
   buildStopBackgroundTaskTool,
@@ -18,7 +17,9 @@ import { isShellRunResourceRef } from './shell-run-manager.js';
 import {
   createLocalWorkspaceExecutor,
   type WorkspaceExecResult,
+  type WorkspaceBashExecutor,
   type WorkspaceExecutor,
+  type WorkspaceFileOperations,
 } from './workspace-executor.js';
 
 // Single source of truth for tool shape. AiSdkBackend exports them; we just
@@ -35,21 +36,31 @@ const GREP_TIMEOUT_MS = 120_000;
 
 export interface BuildBuiltinToolsOptions {
   shellRuns?: ShellRunToolController;
+  commandExecutor?: WorkspaceBashExecutor;
+  fileOperations?: WorkspaceFileOperations;
+  /** @deprecated Pass commandExecutor and fileOperations explicitly. */
   executor?: WorkspaceExecutor;
 }
 
 export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaTool[] {
-  const executor = options.executor ?? createLocalWorkspaceExecutor();
-  const executionFacts = executor.facts;
+  const needsLocal = !options.executor && (!options.commandExecutor || !options.fileOperations);
+  const local = needsLocal ? createLocalWorkspaceExecutor() : undefined;
+  const commandExecutor = options.commandExecutor ?? options.executor ?? local;
+  const fileOperations = options.fileOperations ?? options.executor ?? local;
+  if (!commandExecutor || !fileOperations) {
+    throw new Error('buildBuiltinTools requires explicit commandExecutor and fileOperations');
+  }
+  const commandExecutionFacts = commandExecutor.facts;
+  const fileExecutionFacts = fileOperations.facts;
   const readDescription = options.shellRuns
     ? 'Read a file from disk by path relative to session cwd, or read a runtime background task ref.'
     : 'Read a file from disk by path relative to session cwd.';
   const bashTools = options.shellRuns
     ? [
-      buildBackgroundBashTool(options.shellRuns, { executionFacts }),
+      buildBackgroundBashTool(options.shellRuns, { executionFacts: commandExecutionFacts }),
       buildStopBackgroundTaskTool(options.shellRuns),
     ]
-    : [buildExecutorBashTool(executor)];
+    : [buildExecutorBashTool(commandExecutor)];
   return [
     ...bashTools,
     {
@@ -61,17 +72,16 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
         limit: z.number().int().positive().optional(),
       }),
       permissionRequired: false,
-      executionFacts,
+      executionFacts: fileExecutionFacts,
       impl: async ({ path, offset, limit }, { cwd, sessionId }) => {
         if (path.startsWith('maka://runtime/')) {
           if (!isShellRunResourceRef(path)) throw new Error(`Unsupported runtime resource ref: ${path}`);
           if (!options.shellRuns) throw new Error('Runtime background task resources are not available in this toolset');
           return await options.shellRuns.readResource(sessionId, path);
         }
-        const { path: resolvedPath } = await executor.resolveExistingPath({ cwd, path, label: 'Read' });
-        return await executor.readFile({
+        return await fileOperations.read({
           cwd,
-          path: resolvedPath,
+          path,
           ...(offset !== undefined ? { offset } : {}),
           ...(limit !== undefined ? { limit } : {}),
         });
@@ -82,12 +92,11 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
       description: 'Write content to a file (creates or overwrites). Subject to permission policy.',
       parameters: z.object({ path: z.string(), content: z.string() }),
       permissionRequired: true,
-      executionFacts,
+      executionFacts: fileExecutionFacts,
       impl: async ({ path, content }, { cwd }) => {
-        const { key } = await executor.writeLockKey({ cwd, path });
+        const { key } = await fileOperations.writeLockKey({ cwd, path });
         return await withFileWriteLock(key, async () => {
-          const { path: resolvedPath } = await executor.resolveWritablePath({ cwd, path, label: 'Write' });
-          return await executor.writeFile({ cwd, path: resolvedPath, content });
+          return await fileOperations.write({ cwd, path, content });
         });
       },
     },
@@ -105,22 +114,16 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
         new_string: z.string(),
       }),
       permissionRequired: true,
-      executionFacts,
+      executionFacts: fileExecutionFacts,
       impl: async ({ path, old_string, new_string }, { cwd }) => {
-        const { key } = await executor.writeLockKey({ cwd, path });
+        const { key } = await fileOperations.writeLockKey({ cwd, path });
         return await withFileWriteLock(key, async () => {
-          const { path: resolvedPath } = await executor.resolveExistingPath({ cwd, path, label: 'Edit' });
-          const { content: current } = await executor.readFile({ cwd, path: resolvedPath });
-          const result = computeEditedSource(current, old_string, new_string, path);
-          await executor.writeFile({ cwd, path: resolvedPath, content: result.content });
-          return {
-            ok: true,
-            path: resolvedPath,
-            replacements: 1,
-            matchedVia: result.matchedVia,
-            startLine: result.startLine,
-            endLine: result.endLine,
-          };
+          return await fileOperations.edit({
+            cwd,
+            path,
+            oldString: old_string,
+            newString: new_string,
+          });
         });
       },
     },
@@ -133,15 +136,15 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
         cwd: z.string().optional(),
       }),
       permissionRequired: false,
-      executionFacts,
+      executionFacts: fileExecutionFacts,
       impl: async ({ pattern, cwd: relCwd }, { cwd }) => {
         assertRelativeGlobPattern(pattern);
-        const { path: base } = await executor.resolveExistingPath({
+        return await fileOperations.glob({
           cwd,
           path: relCwd ?? '.',
-          label: 'Glob cwd',
+          pattern,
+          limit: 200,
         });
-        return await executor.globFiles({ cwd: base, pattern, limit: 200 });
       },
     },
     {
@@ -153,21 +156,16 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
         glob: z.string().optional(),
       }),
       permissionRequired: false,
-      executionFacts,
+      executionFacts: fileExecutionFacts,
       impl: async ({ pattern, path, glob }, { cwd, abortSignal }) => {
-        const { path: searchPath } = await executor.resolveExistingPath({
-          cwd,
-          path: path ?? '.',
-          label: 'Grep',
-        });
         // Self-bound: ripgrep finishes in well under a second normally, but a
         // pathological tree (network mount, /proc, a FIFO) could hang it. The
         // stream watchdog no longer caps tool execution, so each spawning tool
         // must carry its own wall-clock timeout and honour the turn's abort.
-        return await executor.grepFiles({
+        return await fileOperations.grep({
           cwd,
           pattern,
-          path: searchPath,
+          path: path ?? '.',
           ...(glob ? { glob } : {}),
           maxCountPerFile: 50,
           limit: 200,
@@ -179,7 +177,7 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
   ];
 }
 
-function buildExecutorBashTool(executor: WorkspaceExecutor): MakaTool {
+function buildExecutorBashTool(executor: WorkspaceBashExecutor): MakaTool {
   return {
     name: 'Bash',
     description: 'Run a shell command in the session cwd. Subject to permission policy.',

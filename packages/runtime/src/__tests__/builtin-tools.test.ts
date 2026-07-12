@@ -21,6 +21,7 @@ import {
 } from '../workspace-executor.js';
 import type { BoundedProcessOptions } from '../shell-exec.js';
 import type { SandboxTransformRequest, SandboxTransformResult } from '../sandbox/index.js';
+import { computeEditedSource } from '../edit-replace.js';
 
 describe('builtin tool executor facts', () => {
   test('attaches executor facts to every built-in tool', () => {
@@ -952,8 +953,54 @@ function fakeExecutor(overrides: Partial<WorkspaceExecutor>): WorkspaceExecutor 
     writeLockKey: async ({ cwd, path }) => ({ key: `${cwd}:${path}` }),
     globFiles: async () => ({ files: [] }),
     grepFiles: async () => ({ matches: [] }),
+    read: async () => ({ content: '' }),
+    write: async ({ path, content }) => ({ ok: true, path, bytes: Buffer.byteLength(content, 'utf8') }),
+    edit: async ({ path }) => ({ ok: true, path, replacements: 1, matchedVia: 'exact', startLine: 1, endLine: 1 }),
+    glob: async () => ({ files: [] }),
+    grep: async () => ({ matches: [] }),
   };
-  return Object.assign(base, overrides);
+  const executor = Object.assign(base, overrides);
+  if (!overrides.read) {
+    executor.read = async (input) => {
+      const resolved = await executor.resolveExistingPath({ cwd: input.cwd, path: input.path, label: 'Read' });
+      return await executor.readFile({ ...input, path: resolved.path });
+    };
+  }
+  if (!overrides.write) {
+    executor.write = async (input) => {
+      const resolved = await executor.resolveWritablePath({ cwd: input.cwd, path: input.path, label: 'Write' });
+      return await executor.writeFile({ ...input, path: resolved.path });
+    };
+  }
+  if (!overrides.edit) {
+    executor.edit = async (input) => {
+      const resolved = await executor.resolveExistingPath({ cwd: input.cwd, path: input.path, label: 'Edit' });
+      const current = await executor.readFile({ cwd: input.cwd, path: resolved.path });
+      const edited = computeEditedSource(current.content, input.oldString, input.newString, input.path);
+      await executor.writeFile({ cwd: input.cwd, path: resolved.path, content: edited.content });
+      return {
+        ok: true,
+        path: resolved.path,
+        replacements: 1,
+        matchedVia: edited.matchedVia,
+        startLine: edited.startLine,
+        endLine: edited.endLine,
+      };
+    };
+  }
+  if (!overrides.glob) {
+    executor.glob = async (input) => {
+      const resolved = await executor.resolveExistingPath({ cwd: input.cwd, path: input.path, label: 'Glob cwd' });
+      return await executor.globFiles({ cwd: resolved.path, pattern: input.pattern, limit: input.limit });
+    };
+  }
+  if (!overrides.grep) {
+    executor.grep = async (input) => {
+      const resolved = await executor.resolveExistingPath({ cwd: input.cwd, path: input.path, label: 'Grep' });
+      return await executor.grepFiles({ ...input, path: resolved.path });
+    };
+  }
+  return executor;
 }
 
 async function captureToolError(fn: () => Promise<unknown>): Promise<Error> {

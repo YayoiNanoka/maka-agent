@@ -711,6 +711,18 @@ function fakeExecutor(overrides: Partial<WorkspaceExecutor> = {}): WorkspaceExec
     writeLockKey: async ({ cwd, path }) => ({ key: `${cwd}:${path}` }),
     globFiles: async () => ({ files: [] }),
     grepFiles: async () => ({ matches: [] }),
+    read: async () => ({ content: '' }),
+    write: async ({ path, content }) => ({ ok: true, path, bytes: Buffer.byteLength(content, 'utf8') }),
+    edit: async ({ path }) => ({
+      ok: true,
+      path,
+      replacements: 1,
+      matchedVia: 'exact',
+      startLine: 1,
+      endLine: 1,
+    }),
+    glob: async () => ({ files: [] }),
+    grep: async () => ({ matches: [] }),
   };
   return Object.assign(base, overrides);
 }

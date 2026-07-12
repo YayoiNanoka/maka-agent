@@ -26,6 +26,7 @@ import type {
   SandboxType,
   SandboxablePreference,
 } from './sandbox/index.js';
+import { computeEditedSource, type EditMatchStrategy } from './edit-replace.js';
 
 const execAsync = promisify(exec);
 
@@ -129,6 +130,45 @@ export interface WorkspaceGrepResult {
   matches: string[];
 }
 
+export interface WorkspaceReadInput extends WorkspaceReadFileInput {}
+export type WorkspaceReadResult = WorkspaceReadFileResult;
+
+export interface WorkspaceWriteInput extends WorkspaceWriteFileInput {}
+export type WorkspaceWriteResult = WorkspaceWriteFileResult;
+
+export interface WorkspaceEditInput {
+  cwd: string;
+  path: string;
+  oldString: string;
+  newString: string;
+}
+
+export interface WorkspaceEditResult {
+  ok: true;
+  path: string;
+  replacements: 1;
+  matchedVia: EditMatchStrategy;
+  startLine: number;
+  endLine: number;
+}
+
+export interface WorkspaceGlobOperationInput {
+  cwd: string;
+  path: string;
+  pattern: string;
+  limit?: number;
+}
+
+export interface WorkspaceGrepOperationInput extends WorkspaceGrepInput {}
+
+export interface WorkspaceFileOperations extends WorkspaceExecutorFactsProvider, WorkspaceWriteLockProvider {
+  read(input: WorkspaceReadInput): Promise<WorkspaceReadResult>;
+  write(input: WorkspaceWriteInput): Promise<WorkspaceWriteResult>;
+  edit(input: WorkspaceEditInput): Promise<WorkspaceEditResult>;
+  glob(input: WorkspaceGlobOperationInput): Promise<WorkspaceGlobResult>;
+  grep(input: WorkspaceGrepOperationInput): Promise<WorkspaceGrepResult>;
+}
+
 export interface WorkspaceExecutorFactsProvider {
   readonly facts: WorkspaceExecutorFacts;
 }
@@ -199,6 +239,7 @@ export type WorkspaceSearchExecutor = WorkspaceGlobExecutor & WorkspaceGrepExecu
 
 export interface WorkspaceExecutor
   extends WorkspaceBashExecutor,
+    WorkspaceFileOperations,
     WorkspaceReadExecutor,
     WorkspaceWriteExecutor,
     WorkspaceEditExecutor,
@@ -386,6 +427,44 @@ export class LocalWorkspaceExecutor implements WorkspaceExecutor {
       throw error;
     }
   }
+
+  async read(input: WorkspaceReadInput): Promise<WorkspaceReadResult> {
+    const { path } = await this.resolveExistingPath({ cwd: input.cwd, path: input.path, label: 'Read' });
+    return await this.readFile({
+      ...input,
+      path,
+    });
+  }
+
+  async write(input: WorkspaceWriteInput): Promise<WorkspaceWriteResult> {
+    const { path } = await this.resolveWritablePath({ cwd: input.cwd, path: input.path, label: 'Write' });
+    return await this.writeFile({ ...input, path });
+  }
+
+  async edit(input: WorkspaceEditInput): Promise<WorkspaceEditResult> {
+    const { path } = await this.resolveExistingPath({ cwd: input.cwd, path: input.path, label: 'Edit' });
+    const { content } = await this.readFile({ cwd: input.cwd, path });
+    const result = computeEditedSource(content, input.oldString, input.newString, input.path);
+    await this.writeFile({ cwd: input.cwd, path, content: result.content });
+    return {
+      ok: true,
+      path,
+      replacements: 1,
+      matchedVia: result.matchedVia,
+      startLine: result.startLine,
+      endLine: result.endLine,
+    };
+  }
+
+  async glob(input: WorkspaceGlobOperationInput): Promise<WorkspaceGlobResult> {
+    const { path } = await this.resolveExistingPath({ cwd: input.cwd, path: input.path, label: 'Glob cwd' });
+    return await this.globFiles({ cwd: path, pattern: input.pattern, limit: input.limit });
+  }
+
+  async grep(input: WorkspaceGrepOperationInput): Promise<WorkspaceGrepResult> {
+    const { path } = await this.resolveExistingPath({ cwd: input.cwd, path: input.path, label: 'Grep' });
+    return await this.grepFiles({ ...input, path });
+  }
 }
 
 export class SandboxedCommandWorkspaceExecutor implements WorkspaceExecutor {
@@ -489,6 +568,26 @@ export class SandboxedCommandWorkspaceExecutor implements WorkspaceExecutor {
   grepFiles(input: WorkspaceGrepInput): Promise<WorkspaceGrepResult> {
     return this.inner.grepFiles(input);
   }
+
+  read(input: WorkspaceReadInput): Promise<WorkspaceReadResult> {
+    return this.inner.read(input);
+  }
+
+  write(input: WorkspaceWriteInput): Promise<WorkspaceWriteResult> {
+    return this.inner.write(input);
+  }
+
+  edit(input: WorkspaceEditInput): Promise<WorkspaceEditResult> {
+    return this.inner.edit(input);
+  }
+
+  glob(input: WorkspaceGlobOperationInput): Promise<WorkspaceGlobResult> {
+    return this.inner.glob(input);
+  }
+
+  grep(input: WorkspaceGrepOperationInput): Promise<WorkspaceGrepResult> {
+    return this.inner.grep(input);
+  }
 }
 
 export class ProfileEnforcedWorkspaceExecutor implements WorkspaceExecutor {
@@ -540,6 +639,41 @@ export class ProfileEnforcedWorkspaceExecutor implements WorkspaceExecutor {
   async grepFiles(input: WorkspaceGrepInput): Promise<WorkspaceGrepResult> {
     this.assertCanRead(input.path, 'search');
     return await this.inner.grepFiles(input);
+  }
+
+  async read(input: WorkspaceReadInput): Promise<WorkspaceReadResult> {
+    const resolved = await this.resolveExistingPath({ cwd: input.cwd, path: input.path, label: 'Read' });
+    return await this.readFile({ ...input, path: resolved.path });
+  }
+
+  async write(input: WorkspaceWriteInput): Promise<WorkspaceWriteResult> {
+    const resolved = await this.resolveWritablePath({ cwd: input.cwd, path: input.path, label: 'Write' });
+    return await this.writeFile({ ...input, path: resolved.path });
+  }
+
+  async edit(input: WorkspaceEditInput): Promise<WorkspaceEditResult> {
+    const resolved = await this.resolveExistingPath({ cwd: input.cwd, path: input.path, label: 'Edit' });
+    const { content } = await this.readFile({ cwd: input.cwd, path: resolved.path });
+    const result = computeEditedSource(content, input.oldString, input.newString, input.path);
+    await this.writeFile({ cwd: input.cwd, path: resolved.path, content: result.content });
+    return {
+      ok: true,
+      path: resolved.path,
+      replacements: 1,
+      matchedVia: result.matchedVia,
+      startLine: result.startLine,
+      endLine: result.endLine,
+    };
+  }
+
+  async glob(input: WorkspaceGlobOperationInput): Promise<WorkspaceGlobResult> {
+    const resolved = await this.resolveExistingPath({ cwd: input.cwd, path: input.path, label: 'Glob cwd' });
+    return await this.globFiles({ cwd: resolved.path, pattern: input.pattern, limit: input.limit });
+  }
+
+  async grep(input: WorkspaceGrepOperationInput): Promise<WorkspaceGrepResult> {
+    const resolved = await this.resolveExistingPath({ cwd: input.cwd, path: input.path, label: 'Grep' });
+    return await this.grepFiles({ ...input, path: resolved.path });
   }
 
   private assertCanRead(path: string, operation: 'read' | 'search'): void {

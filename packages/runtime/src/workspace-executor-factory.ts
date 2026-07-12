@@ -12,7 +12,9 @@ import {
   SandboxedCommandWorkspaceExecutor,
   type WorkspaceCommandRunner,
   type WorkspaceCommandSandboxManager,
+  type WorkspaceBashExecutor,
   type WorkspaceExecutor,
+  type WorkspaceFileOperations,
 } from './workspace-executor.js';
 
 export interface CreatePermissionAwareWorkspaceExecutorInput {
@@ -28,6 +30,9 @@ export interface CreatePermissionAwareWorkspaceExecutorInput {
 }
 
 export interface PermissionAwareWorkspaceExecutorAssembly {
+  commandExecutor: WorkspaceBashExecutor;
+  fileOperations: WorkspaceFileOperations;
+  /** Compatibility composite; new code should use commandExecutor/fileOperations. */
   executor: WorkspaceExecutor;
   compiledProfile: CompiledPermissionProfile;
   sandboxManager: WorkspaceCommandSandboxManager;
@@ -80,6 +85,8 @@ export function createPermissionAwareWorkspaceExecutor(
   });
 
   return {
+    commandExecutor: sandboxedCommands,
+    fileOperations: executor,
     executor,
     compiledProfile,
     sandboxManager,
@@ -94,7 +101,8 @@ export function buildPermissionAwareBuiltinTools(
     ...assembly,
     tools: buildBuiltinTools({
       ...(input.shellRuns ? { shellRuns: input.shellRuns } : {}),
-      executor: assembly.executor,
+      commandExecutor: assembly.commandExecutor,
+      fileOperations: assembly.fileOperations,
     }),
   };
 }
