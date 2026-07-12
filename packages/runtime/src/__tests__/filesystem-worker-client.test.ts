@@ -24,6 +24,7 @@ import type { PermissionAwareSandboxContext } from '../sandbox/permission-aware-
 import { createPermissionAwareSandboxContext } from '../sandbox/permission-aware-context.js';
 import { createDefaultSandboxManager } from '../sandbox/default-sandbox-manager.js';
 import type { SandboxTransformRequest, SandboxTransformResult } from '../sandbox/types.js';
+import { buildPermissionAwareBuiltinTools } from '../workspace-executor-factory.js';
 
 describe('FilesystemWorkerClient', () => {
   test('narrows read operations, transforms the trusted worker argv, and validates the response', async () => {
@@ -304,7 +305,7 @@ describe('runFilesystemWorkerProcess', () => {
 
 if (process.platform === 'darwin') {
   describe('macOS sandboxed filesystem worker smoke', () => {
-    test('writes normal workspace files and denies protected metadata writes', async () => {
+    test('runs all default file tools and independently denies protected metadata writes', async () => {
       const cwd = await realpath(await mkdtemp(join(tmpdir(), 'maka-fs-worker-seatbelt-')));
       await mkdir(join(cwd, '.git'));
       await writeFile(join(cwd, '.git', 'config'), 'protected', 'utf8');
@@ -323,12 +324,39 @@ if (process.platform === 'darwin') {
       const client = new FilesystemWorkerClient({
         getLaunchSpec,
       });
-
-      await client.execute({
-        context,
-        operation: { kind: 'write', path: 'allowed.txt', content: 'allowed' },
+      const built = buildPermissionAwareBuiltinTools({
+        mode: 'execute',
+        cwd,
+        workspaceRoots: [cwd],
+        sandboxManager,
+        platform: 'darwin',
+        filesystemWorkerClient: client,
       });
+      const toolContext = {
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        cwd,
+        toolCallId: 'tool-1',
+        abortSignal: new AbortController().signal,
+        emitOutput: () => {},
+      };
+      const fileTool = (name: string) => {
+        const found = built.tools.find((tool) => tool.name === name);
+        if (!found) throw new Error(`${name} tool missing`);
+        return found;
+      };
+
+      await fileTool('Write').impl({ path: 'allowed.txt', content: 'before' }, toolContext);
+      const read = await fileTool('Read').impl({ path: 'allowed.txt' }, toolContext) as { content: string };
+      assert.equal(read.content, 'before');
+      await fileTool('Edit').impl({
+        path: 'allowed.txt',
+        old_string: 'before',
+        new_string: 'allowed',
+      }, toolContext);
       assert.equal(await readFile(join(cwd, 'allowed.txt'), 'utf8'), 'allowed');
+      const glob = await fileTool('Glob').impl({ pattern: '*.txt' }, toolContext) as { files: string[] };
+      assert.equal(glob.files.includes('allowed.txt'), true);
 
       await assert.rejects(
         client.execute({
@@ -346,19 +374,11 @@ if (process.platform === 'darwin') {
       assert.equal(launch.ok, true);
       if (!launch.ok) return;
       if (launch.spec.grepExecutable) {
-        const grep = await client.execute({
-          context,
-          operation: {
-            kind: 'grep',
-            path: '.',
-            pattern: 'sandbox-search-token',
-            maxCountPerFile: 50,
-            limit: 200,
-            timeoutMs: 5_000,
-          },
-        });
-        assert.equal(grep.kind, 'grep');
-        if (grep.kind === 'grep') assert.equal(grep.matches.some((line) => line.includes('search.txt')), true);
+        const grep = await fileTool('Grep').impl({
+          path: '.',
+          pattern: 'sandbox-search-token',
+        }, toolContext) as { matches: string[] };
+        assert.equal(grep.matches.some((line) => line.includes('search.txt')), true);
       } else {
         await assert.rejects(
           client.execute({

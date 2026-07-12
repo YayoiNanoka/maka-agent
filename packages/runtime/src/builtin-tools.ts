@@ -15,7 +15,6 @@ import {
 import type { ShellRunToolController } from './shell-tools.js';
 import { isShellRunResourceRef } from './shell-run-manager.js';
 import {
-  createLocalWorkspaceExecutor,
   type WorkspaceExecResult,
   type WorkspaceBashExecutor,
   type WorkspaceExecutor,
@@ -42,11 +41,9 @@ export interface BuildBuiltinToolsOptions {
   executor?: WorkspaceExecutor;
 }
 
-export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaTool[] {
-  const needsLocal = !options.executor && (!options.commandExecutor || !options.fileOperations);
-  const local = needsLocal ? createLocalWorkspaceExecutor() : undefined;
-  const commandExecutor = options.commandExecutor ?? options.executor ?? local;
-  const fileOperations = options.fileOperations ?? options.executor ?? local;
+export function buildBuiltinTools(options: BuildBuiltinToolsOptions): MakaTool[] {
+  const commandExecutor = options.commandExecutor ?? options.executor;
+  const fileOperations = options.fileOperations ?? options.executor;
   if (!commandExecutor || !fileOperations) {
     throw new Error('buildBuiltinTools requires explicit commandExecutor and fileOperations');
   }

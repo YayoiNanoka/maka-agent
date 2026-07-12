@@ -9,6 +9,7 @@ import {
   buildPermissionAwareBuiltinTools,
 } from '../workspace-executor-factory.js';
 import {
+  createLocalWorkspaceExecutor,
   WorkspaceProfilePermissionError,
   type WorkspaceExecutor,
 } from '../workspace-executor.js';
@@ -16,8 +17,25 @@ import type { BoundedProcessOptions, BoundedProcessResult } from '../shell-exec.
 import type { MakaTool, MakaToolContext } from '../tool-runtime.js';
 import type { SandboxTransformRequest, SandboxTransformResult } from '../sandbox/index.js';
 import type { ShellRunToolController } from '../shell-tools.js';
+import { FilesystemWorkerClient } from '../filesystem-worker/client.js';
 
 describe('createPermissionAwareWorkspaceExecutor', () => {
+  test('fails closed when no filesystem worker or explicit file operations are provided', async () => {
+    const cwd = await normalizedTempDir('maka-permission-aware-executor-');
+    let failure: unknown;
+    try {
+      createPermissionAwareWorkspaceExecutor({
+        mode: 'ask',
+        cwd,
+        sandboxManager: new RecordingSandboxManager(),
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure instanceof Error ? failure.message : failure)
+      .toMatch(/require sandboxed filesystemWorkerClient or explicit fileOperations/);
+  });
+
   test('compiles ask mode to workspace-write and routes foreground Bash through sandbox transform', async () => {
     const cwd = await normalizedTempDir('maka-permission-aware-executor-');
     const sandboxManager = new RecordingSandboxManager();
@@ -28,9 +46,10 @@ describe('createPermissionAwareWorkspaceExecutor', () => {
       sandboxManager,
       platform: 'darwin',
       runProcess: runner.run,
+      fileOperations: createLocalWorkspaceExecutor(),
     });
 
-    const result = await built.executor.exec({
+    const result = await built.commandExecutor.exec({
       command: 'echo ok',
       cwd,
       timeoutMs: 1_000,
@@ -55,17 +74,18 @@ describe('createPermissionAwareWorkspaceExecutor', () => {
 
   test('enforces read-only profile for file writes', async () => {
     const cwd = await normalizedTempDir('maka-permission-aware-executor-');
-    const { executor, compiledProfile } = createPermissionAwareWorkspaceExecutor({
+    const { fileOperations, compiledProfile } = createPermissionAwareWorkspaceExecutor({
       mode: 'explore',
       cwd,
       sandboxManager: new RecordingSandboxManager(),
       platform: 'darwin',
       runProcess: new RecordingProcessRunner().run,
+      fileOperations: createLocalWorkspaceExecutor(),
     });
 
     expect(compiledProfile.profileName).toBe('read-only');
     await expectRejectsWith(
-      executor.writeFile({ cwd, path: join(cwd, 'notes.txt'), content: 'nope' }),
+      fileOperations.write({ cwd, path: 'notes.txt', content: 'nope' }),
       WorkspaceProfilePermissionError,
       'write_denied',
     );
@@ -74,18 +94,19 @@ describe('createPermissionAwareWorkspaceExecutor', () => {
   test('enforces workspace-write protected metadata for file writes', async () => {
     const cwd = await normalizedTempDir('maka-permission-aware-executor-');
     await mkdir(join(cwd, '.git'), { recursive: true });
-    const { executor } = createPermissionAwareWorkspaceExecutor({
+    const { fileOperations } = createPermissionAwareWorkspaceExecutor({
       mode: 'execute',
       cwd,
       sandboxManager: new RecordingSandboxManager(),
       platform: 'darwin',
       runProcess: new RecordingProcessRunner().run,
+      fileOperations: createLocalWorkspaceExecutor(),
     });
 
-    await executor.writeFile({ cwd, path: join(cwd, 'notes.txt'), content: 'ok' });
+    await fileOperations.write({ cwd, path: 'notes.txt', content: 'ok' });
     expect((await readFile(join(cwd, 'notes.txt'), 'utf8'))).toBe('ok');
     await expectRejectsWith(
-      executor.writeFile({ cwd, path: join(cwd, '.git', 'config'), content: 'nope' }),
+      fileOperations.write({ cwd, path: '.git/config', content: 'nope' }),
       WorkspaceProfilePermissionError,
       'write_denied',
     );
@@ -95,15 +116,16 @@ describe('createPermissionAwareWorkspaceExecutor', () => {
     const cwd = await normalizedTempDir('maka-permission-aware-executor-');
     await mkdir(join(cwd, '.git'), { recursive: true });
     const runner = new RecordingProcessRunner();
-    const { executor, compiledProfile } = createPermissionAwareWorkspaceExecutor({
+    const { commandExecutor, fileOperations, compiledProfile } = createPermissionAwareWorkspaceExecutor({
       mode: 'bypass',
       cwd,
       platform: 'linux',
       runProcess: runner.run,
+      fileOperations: createLocalWorkspaceExecutor(),
     });
 
-    await executor.writeFile({ cwd, path: join(cwd, '.git', 'config'), content: 'allowed' });
-    const result = await executor.exec({ command: 'echo unsafe', cwd, timeoutMs: 1_000 });
+    await fileOperations.write({ cwd, path: '.git/config', content: 'allowed' });
+    const result = await commandExecutor.exec({ command: 'echo unsafe', cwd, timeoutMs: 1_000 });
 
     expect(compiledProfile.profileName).toBe('danger-full-access');
     expect(await readFile(join(cwd, '.git', 'config'), 'utf8')).toBe('allowed');
@@ -113,6 +135,64 @@ describe('createPermissionAwareWorkspaceExecutor', () => {
 });
 
 describe('buildPermissionAwareBuiltinTools', () => {
+  test('routes default file tools through one worker request', async () => {
+    const cwd = await normalizedTempDir('maka-permission-aware-worker-tools-');
+    const operations: Array<{ kind: string; path: string }> = [];
+    const filesystemWorkerClient = new FilesystemWorkerClient({
+      getLaunchSpec: async () => ({
+        ok: true,
+        spec: {
+          program: '/runtime/node',
+          args: ['/runtime/filesystem-worker.js'],
+          env: { TMPDIR: '/tmp' },
+          runtimeReadableRoots: ['/runtime/filesystem-worker.js'],
+          executableRoots: ['/runtime/node'],
+        },
+      }),
+      newId: () => 'worker-request-1',
+      runProcess: async (input) => {
+        const request = JSON.parse(input.stdin) as {
+          requestId: string;
+          operation: { kind: string; path: string; content?: string };
+        };
+        operations.push(request.operation);
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            version: 1,
+            requestId: request.requestId,
+            ok: true,
+            result: {
+              kind: 'write',
+              ok: true,
+              path: join(cwd, request.operation.path),
+              bytes: Buffer.byteLength(request.operation.content ?? '', 'utf8'),
+            },
+          }),
+          stderrTail: '',
+          timedOut: false,
+          aborted: false,
+          responseOverflow: false,
+        };
+      },
+    });
+    const built = buildPermissionAwareBuiltinTools({
+      mode: 'execute',
+      cwd,
+      sandboxManager: new RecordingSandboxManager(),
+      platform: 'darwin',
+      runProcess: new RecordingProcessRunner().run,
+      filesystemWorkerClient,
+    });
+
+    const write = requireTool(built.tools, 'Write');
+    const result = await write.impl({ path: 'notes.txt', content: 'ok' }, toolContext(cwd));
+
+    expect(operations).toEqual([{ kind: 'write', path: 'notes.txt', content: 'ok', cwd }]);
+    expect(result).toMatchObject({ ok: true, path: join(cwd, 'notes.txt'), bytes: 2 });
+    expect(write.executionFacts?.isolation).toBe('platform_sandbox');
+  });
+
   test('uses the permission-aware executor for foreground Bash and file tools', async () => {
     const cwd = await normalizedTempDir('maka-permission-aware-tools-');
     const runner = new RecordingProcessRunner();
@@ -122,6 +202,7 @@ describe('buildPermissionAwareBuiltinTools', () => {
       sandboxManager: new RecordingSandboxManager(),
       platform: 'darwin',
       runProcess: runner.run,
+      fileOperations: createLocalWorkspaceExecutor(),
     });
     const bash = requireTool(built.tools, 'Bash');
     const write = requireTool(built.tools, 'Write');
@@ -150,6 +231,7 @@ describe('buildPermissionAwareBuiltinTools', () => {
       sandboxManager: new RecordingSandboxManager(),
       platform: 'darwin',
       runProcess: runner.run,
+      fileOperations: createLocalWorkspaceExecutor(),
     });
     const bash = requireTool(built.tools, 'Bash');
     const write = requireTool(built.tools, 'Write');

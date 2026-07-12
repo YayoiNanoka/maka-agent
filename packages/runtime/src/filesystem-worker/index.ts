@@ -4,3 +4,4 @@ export * from './operations.js';
 export * from './process-runner.js';
 export * from './protocol.js';
 export * from './resource-resolver.js';
+export * from './workspace-file-operations.js';

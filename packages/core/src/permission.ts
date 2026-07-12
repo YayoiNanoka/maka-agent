@@ -59,7 +59,7 @@ export function isToolCategory(value: unknown): value is ToolCategory {
 // Tool execution environment facts
 // ============================================================================
 
-export type ToolExecutionIsolation = 'none' | 'worktree' | 'container' | 'remote';
+export type ToolExecutionIsolation = 'none' | 'platform_sandbox' | 'worktree' | 'container' | 'remote';
 export type ToolExecutionWriteBack = 'direct' | 'diff_review';
 export type ToolExecutionNetwork = 'host' | 'sandbox' | 'disabled';
 export type ToolExecutionSecrets = 'host_env' | 'brokered' | 'none';

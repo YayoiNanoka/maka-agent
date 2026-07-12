@@ -20,6 +20,10 @@ import {
   persistHistoryCompactBlocksToArtifacts,
 } from '@maka/runtime';
 import {
+  FilesystemWorkerClient,
+  createFilesystemWorkerLaunchSpecProvider,
+} from '@maka/runtime/filesystem-worker';
+import {
   createAgentRunStore,
   createArtifactStore,
   createConnectionStore,
@@ -77,6 +81,12 @@ export async function createMakaCliRuntimeContext(
   const permissionEngine = new PermissionEngine({ newId: randomUUID, now: Date.now });
   const backends = new BackendRegistry();
   const sandboxManager = createDefaultSandboxManager();
+  const filesystemWorkerClient = new FilesystemWorkerClient({
+    getLaunchSpec: createFilesystemWorkerLaunchSpecProvider({
+      runtime: 'node',
+      resourceLocation: { kind: 'runtime' },
+    }),
+  });
   const shellRuns = new ShellRunProcessManager({
     store: shellRunStore,
     newId: randomUUID,
@@ -93,6 +103,7 @@ export async function createMakaCliRuntimeContext(
     cwd: initialCwd,
     workspaceRoots: [initialCwd],
     sandboxManager,
+    filesystemWorkerClient,
     shellRuns,
   }).tools;
 
@@ -120,6 +131,7 @@ export async function createMakaCliRuntimeContext(
       cwd,
       workspaceRoots: [cwd],
       sandboxManager,
+      filesystemWorkerClient,
       shellRuns,
     }).tools;
     return new AiSdkBackend({

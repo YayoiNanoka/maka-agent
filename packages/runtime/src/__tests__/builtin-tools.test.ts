@@ -11,6 +11,7 @@ import { buildBuiltinTools } from '../builtin-tools.js';
 import type { ShellRunToolController } from '../shell-tools.js';
 import {
   LOCAL_WORKSPACE_EXECUTOR_FACTS,
+  createLocalWorkspaceExecutor,
   ProfileEnforcedWorkspaceExecutor,
   SandboxedCommandWorkspaceExecutor,
   WorkspaceProfilePermissionError,
@@ -67,7 +68,7 @@ describe('builtin Bash streaming output', () => {
         throw new Error('not used');
       },
     } satisfies ShellRunToolController;
-    const tools = buildBuiltinTools({ shellRuns });
+    const tools = buildLocalBuiltinTools(shellRuns);
     const names = tools.map((tool) => tool.name);
 
     expect(names.filter((name) => name === 'Bash')).toHaveLength(1);
@@ -108,7 +109,7 @@ describe('builtin Bash streaming output', () => {
         throw new Error('not used');
       },
     } satisfies ShellRunToolController;
-    const read = buildBuiltinTools({ shellRuns }).find((tool) => tool.name === 'Read');
+    const read = buildLocalBuiltinTools(shellRuns).find((tool) => tool.name === 'Read');
     if (!read) throw new Error('Read tool missing');
 
     const result = await read.impl(
@@ -161,7 +162,7 @@ describe('builtin Bash streaming output', () => {
         };
       },
     } satisfies ShellRunToolController;
-    const stop = buildBuiltinTools({ shellRuns }).find((tool) => tool.name === 'StopBackgroundTask');
+    const stop = buildLocalBuiltinTools(shellRuns).find((tool) => tool.name === 'StopBackgroundTask');
     if (!stop) throw new Error('StopBackgroundTask tool missing');
 
     const result = await stop.impl(
@@ -343,7 +344,7 @@ describe('builtin Bash streaming output', () => {
   test('emits stdout/stderr chunks before returning terminal result', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'maka-bash-'));
     const events: Array<{ stream: 'stdout' | 'stderr'; chunk: string }> = [];
-    const bash = buildBuiltinTools().find((tool) => tool.name === 'Bash');
+    const bash = buildLocalBuiltinTools().find((tool) => tool.name === 'Bash');
     if (!bash) throw new Error('Bash tool missing');
 
     const result = await bash.impl(
@@ -377,7 +378,7 @@ describe('builtin Bash streaming output', () => {
     const cwd = await mkdtemp(join(tmpdir(), 'maka-bash-'));
     const events: Array<{ stream: 'stdout' | 'stderr'; chunk: string }> = [];
     const abort = new AbortController();
-    const bash = buildBuiltinTools().find((tool) => tool.name === 'Bash');
+    const bash = buildLocalBuiltinTools().find((tool) => tool.name === 'Bash');
     if (!bash) throw new Error('Bash tool missing');
 
     const run = bash.impl(
@@ -403,7 +404,7 @@ describe('builtin Bash streaming output', () => {
 
   test('large output is bounded to a tail instead of being discarded', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'maka-bash-'));
-    const bash = buildBuiltinTools().find((tool) => tool.name === 'Bash');
+    const bash = buildLocalBuiltinTools().find((tool) => tool.name === 'Bash');
     if (!bash) throw new Error('Bash tool missing');
 
     const result = await bash.impl(
@@ -427,7 +428,7 @@ describe('builtin Bash streaming output', () => {
 
   test('foreground Bash marks retained-tail truncation even when model shaping does not truncate again', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'maka-bash-'));
-    const bash = buildBuiltinTools().find((tool) => tool.name === 'Bash');
+    const bash = buildLocalBuiltinTools().find((tool) => tool.name === 'Bash');
     if (!bash) throw new Error('Bash tool missing');
 
     const result = await bash.impl(
@@ -448,7 +449,7 @@ describe('builtin Bash streaming output', () => {
 
   test('a failing command surfaces stdout/stderr on the rejection error', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'maka-bash-'));
-    const bash = buildBuiltinTools().find((tool) => tool.name === 'Bash');
+    const bash = buildLocalBuiltinTools().find((tool) => tool.name === 'Bash');
     if (!bash) throw new Error('Bash tool missing');
 
     let err: { code?: number; stdout?: string; stderr?: string } | null = null;
@@ -475,7 +476,7 @@ describe('builtin Bash streaming output', () => {
 
   test('a timed-out command still surfaces the stdout/stderr captured before the timeout', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'maka-bash-'));
-    const bash = buildBuiltinTools().find((tool) => tool.name === 'Bash');
+    const bash = buildLocalBuiltinTools().find((tool) => tool.name === 'Bash');
     if (!bash) throw new Error('Bash tool missing');
 
     let err: { code?: number; stdout?: string; stderr?: string } | null = null;
@@ -906,9 +907,16 @@ async function expectRejects(promise: Promise<unknown>, pattern: RegExp): Promis
 }
 
 function tool(name: string) {
-  const found = buildBuiltinTools().find((candidate) => candidate.name === name);
+  const found = buildLocalBuiltinTools().find((candidate) => candidate.name === name);
   if (!found) throw new Error(`${name} tool missing`);
   return found;
+}
+
+function buildLocalBuiltinTools(shellRuns?: ShellRunToolController) {
+  return buildBuiltinTools({
+    executor: createLocalWorkspaceExecutor(),
+    ...(shellRuns ? { shellRuns } : {}),
+  });
 }
 
 function runTool(tool: ReturnType<typeof buildBuiltinTools>[number], args: unknown, cwd: string): Promise<unknown> {

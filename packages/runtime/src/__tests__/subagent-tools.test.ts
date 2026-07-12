@@ -5,6 +5,7 @@ import { describe, test } from 'node:test';
 import type { LlmConnection, SessionHeader } from '@maka/core';
 import type { SessionEvent } from '@maka/core/events';
 import { buildBuiltinTools } from '../builtin-tools.js';
+import { createLocalWorkspaceExecutor } from '../workspace-executor.js';
 import { PermissionEngine } from '../permission-engine.js';
 import {
   AGENT_CONTEXT_ISOLATED,
@@ -297,7 +298,7 @@ describe('subagent tools', () => {
 
   test('child agent toolset keeps only built-in profile allowlisted tools', () => {
     const tools = buildChildAgentTools([
-      ...buildBuiltinTools(),
+      ...buildBuiltinTools({ executor: createLocalWorkspaceExecutor() }),
       {
         name: AGENT_SPAWN_TOOL_NAME,
         description: 'spawn',
@@ -334,7 +335,9 @@ describe('subagent tools', () => {
       await writeFile(join(cwd, 'notes.txt'), 'SUBAGENT_CHILD_TOOL_MARKER\n', 'utf8');
       const events: SessionEvent[] = [];
       const runtime = makeChildToolRuntime(cwd);
-      const tools = new Map(buildChildAgentTools(buildBuiltinTools()).map((tool) => [tool.name, tool]));
+      const tools = new Map(buildChildAgentTools(
+        buildBuiltinTools({ executor: createLocalWorkspaceExecutor() }),
+      ).map((tool) => [tool.name, tool]));
 
       await runTool(runtime, tools, 'Read', { path: 'notes.txt' }, events);
       await runTool(runtime, tools, 'Glob', { pattern: '*.txt' }, events);

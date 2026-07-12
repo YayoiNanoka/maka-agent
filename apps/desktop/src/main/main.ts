@@ -73,6 +73,7 @@ import {
   SessionManager,
   buildBuiltinTools,
   buildPermissionAwareBuiltinTools,
+  createLocalWorkspaceExecutor,
   createDefaultSandboxManager,
   createSessionSandboxContextProvider,
   buildChildAgentTools,
@@ -90,6 +91,10 @@ import {
   setActiveProxy,
   ShellRunProcessManager,
 } from '@maka/runtime';
+import {
+  FilesystemWorkerClient,
+  createFilesystemWorkerLaunchSpecProvider,
+} from '@maka/runtime/filesystem-worker';
 import type {
   BotIncomingMessage,
   BotStatus,
@@ -404,6 +409,15 @@ const openGateway = new OpenGatewayService({
 const backends = new BackendRegistry();
 const permissionEngine = new PermissionEngine({ newId: randomUUID, now: Date.now });
 const sandboxManager = createDefaultSandboxManager();
+const filesystemWorkerClient = new FilesystemWorkerClient({
+  getLaunchSpec: createFilesystemWorkerLaunchSpecProvider({
+    runtime: 'electron',
+    executable: process.execPath,
+    resourceLocation: app.isPackaged
+      ? { kind: 'desktop-packaged', resourcesPath: process.resourcesPath }
+      : { kind: 'desktop-development' },
+  }),
+});
 const shellRuns = new ShellRunProcessManager({
   store: shellRunStore,
   newId: randomUUID,
@@ -470,17 +484,19 @@ async function buildSessionBuiltinTools(header: SessionHeader): Promise<MakaTool
     cwd,
     workspaceRoots: [cwd],
     sandboxManager,
+    filesystemWorkerClient,
     shellRuns,
   });
   return [
-    ...permissionAware.tools.filter((tool: MakaTool) => tool.name !== 'Edit'),
+    ...permissionAware.tools,
     ...sharedRuntimeTools,
   ];
 }
 // Child agents stay file-only for local reads; parent runtime refs such as
 // maka://runtime/background-tasks/<id> are not part of their tool surface.
 const childAgentTools = buildChildAgentTools([
-  ...buildBuiltinTools().filter((tool: MakaTool) => tool.name !== 'Edit'),
+  ...buildBuiltinTools({ executor: createLocalWorkspaceExecutor() })
+    .filter((tool: MakaTool) => tool.name !== 'Edit'),
   webSearchTool,
 ]);
 let lookupPricing = buildPricingLookup();

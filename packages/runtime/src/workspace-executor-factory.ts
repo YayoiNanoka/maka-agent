@@ -3,9 +3,13 @@ import type { CompiledPermissionProfile } from '@maka/core/permission-profile-co
 import { buildBuiltinTools, type BuildBuiltinToolsOptions } from './builtin-tools.js';
 import type { SandboxPathContext, SandboxPlatform, SandboxablePreference } from './sandbox/index.js';
 import { createPermissionAwareSandboxContext } from './sandbox/permission-aware-context.js';
+import { FilesystemWorkerClient } from './filesystem-worker/client.js';
+import {
+  ProfileEnforcedFileOperations,
+  WorkerBackedWorkspaceFileOperations,
+} from './filesystem-worker/workspace-file-operations.js';
 import {
   createLocalWorkspaceExecutor,
-  ProfileEnforcedWorkspaceExecutor,
   SandboxedCommandWorkspaceExecutor,
   type WorkspaceCommandRunner,
   type WorkspaceCommandSandboxManager,
@@ -24,20 +28,20 @@ export interface CreatePermissionAwareWorkspaceExecutorInput {
   platform?: SandboxPlatform;
   pathContext?: Partial<Omit<SandboxPathContext, 'workspaceRoots'>>;
   runProcess?: WorkspaceCommandRunner;
+  filesystemWorkerClient?: FilesystemWorkerClient;
+  fileOperations?: WorkspaceFileOperations;
 }
 
 export interface PermissionAwareWorkspaceExecutorAssembly {
   commandExecutor: WorkspaceBashExecutor;
   fileOperations: WorkspaceFileOperations;
-  /** Compatibility composite; new code should use commandExecutor/fileOperations. */
-  executor: WorkspaceExecutor;
   compiledProfile: CompiledPermissionProfile;
   sandboxManager: WorkspaceCommandSandboxManager;
 }
 
 export interface BuildPermissionAwareBuiltinToolsInput
   extends CreatePermissionAwareWorkspaceExecutorInput,
-    Omit<BuildBuiltinToolsOptions, 'executor'> {}
+    Omit<BuildBuiltinToolsOptions, 'executor' | 'commandExecutor' | 'fileOperations'> {}
 
 export interface PermissionAwareBuiltinToolsAssembly extends PermissionAwareWorkspaceExecutorAssembly {
   tools: ReturnType<typeof buildBuiltinTools>;
@@ -73,8 +77,17 @@ export function createPermissionAwareWorkspaceExecutor(
     }),
     ...(input.runProcess ? { runProcess: input.runProcess } : {}),
   });
-  const executor = new ProfileEnforcedWorkspaceExecutor({
-    inner: sandboxedCommands,
+  if (input.filesystemWorkerClient && input.fileOperations) {
+    throw new Error('Provide filesystemWorkerClient or fileOperations, not both.');
+  }
+  const workerOperations = input.filesystemWorkerClient
+    ? new WorkerBackedWorkspaceFileOperations({ client: input.filesystemWorkerClient, context })
+    : input.fileOperations;
+  if (!workerOperations) {
+    throw new Error('Permission-aware tools require sandboxed filesystemWorkerClient or explicit fileOperations.');
+  }
+  const fileOperations = new ProfileEnforcedFileOperations({
+    inner: workerOperations,
     getProfileContext: () => ({
       profile: compiledProfile.profile,
       workspaceRoots,
@@ -84,8 +97,7 @@ export function createPermissionAwareWorkspaceExecutor(
 
   return {
     commandExecutor: sandboxedCommands,
-    fileOperations: executor,
-    executor,
+    fileOperations,
     compiledProfile,
     sandboxManager,
   };
