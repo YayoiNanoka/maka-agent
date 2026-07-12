@@ -1,11 +1,8 @@
-import { tmpdir as osTmpdir } from 'node:os';
 import type { PermissionMode } from '@maka/core/permission';
-import {
-  compilePermissionProfile,
-  type CompiledPermissionProfile,
-} from '@maka/core/permission-profile-compiler';
+import type { CompiledPermissionProfile } from '@maka/core/permission-profile-compiler';
 import { buildBuiltinTools, type BuildBuiltinToolsOptions } from './builtin-tools.js';
-import { createDefaultSandboxManager, type SandboxPathContext, type SandboxPlatform, type SandboxablePreference } from './sandbox/index.js';
+import type { SandboxPathContext, SandboxPlatform, SandboxablePreference } from './sandbox/index.js';
+import { createPermissionAwareSandboxContext } from './sandbox/permission-aware-context.js';
 import {
   createLocalWorkspaceExecutor,
   ProfileEnforcedWorkspaceExecutor,
@@ -49,28 +46,29 @@ export interface PermissionAwareBuiltinToolsAssembly extends PermissionAwareWork
 export function createPermissionAwareWorkspaceExecutor(
   input: CreatePermissionAwareWorkspaceExecutorInput,
 ): PermissionAwareWorkspaceExecutorAssembly {
-  const compiledProfile = compilePermissionProfile({
+  const builtContext = createPermissionAwareSandboxContext({
     mode: input.mode,
     cwd: input.cwd,
     ...(input.workspaceRoots ? { workspaceRoots: input.workspaceRoots } : {}),
+    ...(input.sandboxManager ? { sandboxManager: input.sandboxManager } : {}),
+    ...(input.sandboxPreference ? { preference: input.sandboxPreference } : {}),
+    ...(input.platform ? { platform: input.platform } : {}),
+    ...(input.pathContext ? { pathContext: input.pathContext } : {}),
   });
+  const { compiledProfile, context } = builtContext;
   const workspaceRoots = compiledProfile.workspaceRoots;
-  const sandboxManager = input.sandboxManager ?? createDefaultSandboxManager();
-  const pathContext = {
-    tmpdir: osTmpdir(),
-    slashTmp: '/tmp',
-    ...input.pathContext,
-  };
+  const sandboxManager = context.sandboxManager;
+  const pathContext = context.pathContext;
 
   const local = input.inner ?? createLocalWorkspaceExecutor();
   const sandboxedCommands = new SandboxedCommandWorkspaceExecutor({
     inner: local,
     getSandboxContext: () => ({
-      profile: compiledProfile.profile,
+      profile: context.profile,
       workspaceRoots,
       sandboxManager,
-      ...(input.sandboxPreference ? { preference: input.sandboxPreference } : {}),
-      ...(input.platform ? { platform: input.platform } : {}),
+      ...(context.preference ? { preference: context.preference } : {}),
+      ...(context.platform ? { platform: context.platform } : {}),
       pathContext,
     }),
     ...(input.runProcess ? { runProcess: input.runProcess } : {}),

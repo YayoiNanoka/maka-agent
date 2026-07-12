@@ -1,6 +1,26 @@
 export { SandboxManager } from './sandbox-manager.js';
 export { createDefaultSandboxManager } from './default-sandbox-manager.js';
 export {
+  createPermissionAwareSandboxContext,
+  deriveFilesystemWorkerProfile,
+} from './permission-aware-context.js';
+export {
+  sandboxErrorMetadata,
+  serializeSandboxError,
+} from './errors.js';
+export type {
+  CreatePermissionAwareSandboxContextInput,
+  FilesystemWorkerProfileOperation,
+  PermissionAwareSandboxContext,
+  PermissionAwareSandboxContextAssembly,
+} from './permission-aware-context.js';
+export type {
+  SandboxErrorDomain,
+  SandboxErrorMetadata,
+  SandboxErrorStage,
+  SandboxErrorWithMetadata,
+} from './errors.js';
+export {
   MACOS_SEATBELT_BASE_POLICY,
   MACOS_SEATBELT_EXECUTABLE,
   MACOS_SEATBELT_PLATFORM_DEFAULTS_POLICY,

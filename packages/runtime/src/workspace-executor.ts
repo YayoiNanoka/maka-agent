@@ -27,6 +27,7 @@ import type {
   SandboxablePreference,
 } from './sandbox/index.js';
 import { computeEditedSource, type EditMatchStrategy } from './edit-replace.js';
+import type { SandboxErrorDomain, SandboxErrorStage } from './sandbox/errors.js';
 
 const execAsync = promisify(exec);
 
@@ -281,15 +282,21 @@ export interface WorkspaceCommandSandboxErrorDetails {
 
 export class WorkspaceCommandSandboxError extends Error {
   readonly code = 'SANDBOX_COMMAND_BLOCKED';
+  readonly domain: SandboxErrorDomain = 'command';
+  readonly stage: SandboxErrorStage;
   readonly reason: WorkspaceCommandSandboxErrorReason;
   readonly sandboxType?: SandboxType;
+  readonly backend?: SandboxType;
   readonly requiresSandbox?: boolean;
+  readonly recoverable = false;
 
   constructor(details: WorkspaceCommandSandboxErrorDetails) {
     super(details.message ?? defaultSandboxErrorMessage(details.reason));
     this.name = 'WorkspaceCommandSandboxError';
+    this.stage = sandboxErrorStage(details.reason);
     this.reason = details.reason;
     this.sandboxType = details.sandboxType;
+    this.backend = details.sandboxType;
     this.requiresSandbox = details.requiresSandbox;
   }
 }
@@ -738,6 +745,12 @@ function defaultSandboxErrorMessage(reason: WorkspaceCommandSandboxErrorReason):
   if (reason === 'missing_context') return 'Sandbox context is required for command execution but was unavailable.';
   if (reason === 'missing_workspace_roots') return 'Sandbox workspace roots are required for command execution but were unavailable.';
   return `Sandbox command transform failed: ${reason}.`;
+}
+
+function sandboxErrorStage(reason: WorkspaceCommandSandboxErrorReason): SandboxErrorStage {
+  if (reason === 'missing_context') return 'context';
+  if (reason === 'missing_workspace_roots') return 'validation';
+  return 'transform';
 }
 
 function defaultProfilePermissionErrorMessage(details: WorkspaceProfilePermissionErrorDetails): string {
