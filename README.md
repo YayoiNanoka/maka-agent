@@ -21,7 +21,7 @@ Maka does more than answer questions. With controlled permissions, it can inspec
 - **A task may outlive a Turn**: Headless uses TaskRun, Task Event Log, budgets, and continuation to advance interruptible and inspectable durable work.
 - **Feedback is not fact authority**: Self-check may produce evidence and one bounded repair opportunity, but “I checked it” does not become a system fact.
 
-Read [Maka Backend Architecture](./ARCHITECTURE.en.md) for the complete design.
+Read [Maka Backend Architecture](./ARCHITECTURE.md) for the complete design.
 
 ## Surfaces
 
@@ -127,7 +127,7 @@ Runtime Event Log → Context / Session / UI projections
 Task Event Log → TaskRun → Self-check / AHE evidence
 ```
 
-Start with [ARCHITECTURE.en.md](./ARCHITECTURE.en.md). It provides the system map, code boundaries, problem-oriented reading paths, and six bilingual deep dives.
+Start with [ARCHITECTURE.md](./ARCHITECTURE.md). It provides the system map, code boundaries, problem-oriented reading paths, and six bilingual deep dives.
 
 ## Repository layout
 
@@ -199,10 +199,7 @@ Before submitting code, run typecheck, build, and focused tests proportionate to
 
 ## Documentation
 
-- [Backend architecture](./ARCHITECTURE.en.md)
-- [Headless usage and isolation](./packages/headless/README.md)
-- [Design system](./docs/design-system.md)
-- [Full product test plan](./docs/full-product-test-plan.md)
-- [Workspace privacy context](./docs/workspace-privacy-context.md)
-- [Capability maturity audit](./docs/maka-capability-audit-v1.md)
+- [Documentation index and authority map](./docs/README.md)
+- [Backend architecture](./ARCHITECTURE.md)
+- [Product design](./DESIGN.md)
 - [Security policy](./SECURITY.md)

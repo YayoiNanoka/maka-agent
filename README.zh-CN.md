@@ -21,7 +21,7 @@ Maka 不只回答问题。它可以在受控权限下阅读项目、执行工具
 - **任务可以长于一个 Turn**：Headless 使用 TaskRun、Task Event Log、预算和 continuation 机制推进可中断、可检查的长程任务。
 - **反馈不等于事实 authority**：Self-check 可以产生证据和一次受限修复机会，但不能把“我检查过了”变成系统事实。
 
-完整设计见 [Maka Backend Architecture](./ARCHITECTURE.md)。
+完整设计见 [Maka Backend Architecture](./ARCHITECTURE.zh-CN.md)。
 
 ## 运行形态
 
@@ -127,7 +127,7 @@ Runtime Event Log → Context / Session / UI projections
 Task Event Log → TaskRun → Self-check / AHE evidence
 ```
 
-从 [ARCHITECTURE.md](./ARCHITECTURE.md) 开始阅读。它提供总体架构图、代码边界、按问题组织的阅读路径，以及六篇中英双语深度文章。
+从 [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md) 开始阅读。它提供总体架构图、代码边界、按问题组织的阅读路径，以及六篇中英双语深度文章。
 
 ## 仓库结构
 
@@ -199,10 +199,7 @@ npm --workspace @maka/desktop run smoke:real-window
 
 ## 文档入口
 
-- [后端架构总览](./ARCHITECTURE.md)
-- [Headless 使用与隔离边界](./packages/headless/README.md)
-- [设计系统](./docs/design-system.md)
-- [产品测试计划](./docs/full-product-test-plan.md)
-- [Workspace 隐私上下文](./docs/workspace-privacy-context.md)
-- [能力成熟度审计](./docs/maka-capability-audit-v1.md)
+- [文档索引与权威来源说明](./docs/README.md)
+- [后端架构总览](./ARCHITECTURE.zh-CN.md)
+- [产品设计](./DESIGN.md)
 - [安全政策](./SECURITY.md)
