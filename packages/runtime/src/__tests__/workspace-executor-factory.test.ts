@@ -16,7 +16,7 @@ import {
 import type { BoundedProcessOptions, BoundedProcessResult } from '../shell-exec.js';
 import type { MakaTool, MakaToolContext } from '../tool-runtime.js';
 import type { SandboxTransformRequest, SandboxTransformResult } from '../sandbox/index.js';
-import type { ShellRunToolController } from '../shell-tools.js';
+import type { ShellRunLauncher } from '../shell-tools.js';
 import { FilesystemWorkerClient } from '../filesystem-worker/client.js';
 
 describe('createPermissionAwareWorkspaceExecutor', () => {
@@ -253,6 +253,10 @@ describe('buildPermissionAwareBuiltinTools', () => {
 class RecordingSandboxManager {
   readonly calls: SandboxTransformRequest[] = [];
 
+  canEnforce(): boolean {
+    return true;
+  }
+
   transform(request: SandboxTransformRequest): SandboxTransformResult {
     this.calls.push(request);
     const { command } = request;
@@ -292,10 +296,10 @@ class RecordingProcessRunner {
   };
 }
 
-class RecordingShellRuns implements ShellRunToolController {
+class RecordingShellRuns implements ShellRunLauncher {
   readonly commands: string[] = [];
 
-  async runBash(input: { command: string }) {
+  async runForegroundBash(input: { command: string }) {
     this.commands.push(input.command);
     return {
       kind: 'terminal' as const,
@@ -303,30 +307,37 @@ class RecordingShellRuns implements ShellRunToolController {
       cmd: input.command,
       status: 'completed' as const,
       exitCode: 0,
-      stdout: '',
-      stderr: '',
-      stdoutTruncated: false,
-      stderrTruncated: false,
+      output: {
+        mode: 'pipes' as const,
+        stdout: '',
+        stderr: '',
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        redacted: false,
+      },
     };
   }
 
-  async readResource() {
-    return { content: '' };
-  }
-
-  async stopResource() {
+  async runBackgroundBash(input: { command: string }) {
+    this.commands.push(input.command);
     return {
       kind: 'shell_run' as const,
       ref: 'maka://runtime/background-tasks/test',
-      status: 'cancelled' as const,
+      mode: 'pipes' as const,
+      status: 'running' as const,
       cwd: '',
-      cmd: '',
+      cmd: input.command,
       startedAt: 1,
       updatedAt: 2,
-      stdout: '',
-      stderr: '',
-      stdoutTruncated: false,
-      stderrTruncated: false,
+      revision: 1,
+      output: {
+        mode: 'pipes' as const,
+        stdout: '',
+        stderr: '',
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        redacted: false,
+      },
     };
   }
 }

@@ -4,8 +4,6 @@
  * Runtime backends normalize their provider-native streams to
  * this `SessionEvent` union. The UI never imports SDK types directly.
  *
- * Source: V0.1_TECH_SPEC.md §4.1
- *
  * Connection-setup events live in ./connections.ts (separate channel).
  */
 
@@ -16,7 +14,14 @@ import type {
   ToolCategory,
   ToolPermissionRequest,
 } from './permission.js';
-import type { ShellRunStatus, ShellRunTerminalStatus } from './shell-run.js';
+import type {
+  PipeShellOutput,
+  PtyShellOutput,
+  ShellOutput,
+  ShellRunOperation,
+  ShellRunStatus,
+  ShellRunTerminalStatus,
+} from './shell-run.js';
 import type {
   CacheMissInputSource,
   ContextBudgetDiagnostic,
@@ -26,6 +31,18 @@ import type {
 
 export const TOOL_OUTPUT_STREAMS = ['stdout', 'stderr'] as const;
 export const TOOL_OUTPUT_DELTA_MAX_CHARS = 8192;
+export const TOOL_ACTIVITY_KINDS = [
+  'read',
+  'search',
+  'websearch',
+  'webfetch',
+  'edit',
+  'command',
+  'explore',
+  'browser',
+  'tool',
+] as const;
+export type ToolActivityKind = typeof TOOL_ACTIVITY_KINDS[number];
 type TerminalToolResultStatus = Exclude<ShellRunTerminalStatus, 'orphaned'>;
 
 // ============================================================================
@@ -105,9 +122,19 @@ export interface ToolStartEvent extends BaseEvent {
   type: 'tool_start';
   toolUseId: string;
   toolName: string;
+  /** Stable semantic category for presentation; absent on legacy events. */
+  activityKind?: ToolActivityKind;
   args: unknown;
   displayName?: string;
   intent?: string;
+  /**
+   * Id of the assistant step this tool call belongs to (equals the step's
+   * AssistantMessage id / the step's text+thinking messageId). Lets model
+   * replay group a step's reasoning + text + tool calls into one provider
+   * assistant message. Absent on legacy events; consumers treat a missing
+   * stepId as un-pairable (degraded, per-turn) history.
+   */
+  stepId?: string;
 }
 
 export type ToolOutputStream = typeof TOOL_OUTPUT_STREAMS[number];
@@ -147,6 +174,50 @@ export interface ToolResultEvent extends BaseEvent {
   durationMs?: number;
 }
 
+type ShellRunResultMetadata = {
+  kind: 'shell_run';
+  ref: string;
+  status: ShellRunStatus;
+  cwd: string;
+  cmd: string;
+  startedAt: number;
+  updatedAt: number;
+  completedAt?: number;
+  exitCode?: number;
+  failureMessage?: string;
+  revision: number;
+  timeoutMs?: number;
+  sandboxDenial?: SandboxDenialMetadata;
+};
+
+type SandboxDenialMetadata = {
+  likely: true;
+  backend?: 'macos-seatbelt' | 'linux';
+  recovery: 'require_escalated';
+};
+
+export type ShellRunCompactResult = ShellRunResultMetadata & (
+  | { mode: 'pipes'; output?: never }
+  | { mode: 'pty'; output?: never }
+);
+
+export type ShellRunSnapshotResult = ShellRunResultMetadata & (
+  | { mode: 'pipes'; output: PipeShellOutput }
+  | { mode: 'pty'; output: PtyShellOutput }
+);
+
+export type ShellRunStateResult = ShellRunCompactResult | ShellRunSnapshotResult;
+
+type ShellRunStopOperation = Extract<ShellRunOperation, { kind: 'stop' }>;
+type ShellRunPtyControlOperation = Extract<ShellRunOperation, { kind: 'pty_control' }>;
+type ShellRunToolResultContent =
+  | (ShellRunCompactResult & { operation?: never })
+  | (ShellRunSnapshotResult & (
+      | { operation?: never }
+      | { operation: ShellRunStopOperation }
+      | { mode: 'pty'; output: PtyShellOutput; operation: ShellRunPtyControlOperation }
+    ));
+
 export type ToolResultContent =
   | { kind: 'text'; text: string }
   | { kind: 'json'; value: unknown }
@@ -170,42 +241,12 @@ export type ToolResultContent =
       cwd: string;
       cmd: string;
       status: TerminalToolResultStatus;
-      exitCode: number;
-      stdout: string;
-      stderr: string;
-      stdoutTruncated: boolean;
-      stderrTruncated: boolean;
-      sandboxDenial?: {
-        likely: true;
-        backend?: 'macos-seatbelt' | 'linux';
-        recovery: 'require_escalated';
-      };
-    }
-  | {
-      kind: 'shell_run';
-      ref: string;
-      status: ShellRunStatus;
-      cwd: string;
-      cmd: string;
-      startedAt: number;
-      updatedAt: number;
-      completedAt?: number;
       exitCode?: number;
       failureMessage?: string;
-      stdout: string;
-      stderr: string;
-      stdoutTruncated: boolean;
-      stderrTruncated: boolean;
-      timeoutMs?: number;
-      observedAt?: number;
-      orphanedReason?: string;
-      cancelled?: boolean;
-      sandboxDenial?: {
-        likely: true;
-        backend?: 'macos-seatbelt' | 'linux';
-        recovery: 'require_escalated';
-      };
+      output: ShellOutput;
+      sandboxDenial?: SandboxDenialMetadata;
     }
+  | ShellRunToolResultContent
   | { kind: 'image'; mimeType: string; ref: StorageRef }
   | { kind: 'summary'; original: string; summarized: string; reason: 'too_large' }
   /**
@@ -345,6 +386,22 @@ export type ToolResultContent =
       };
     };
 
+/** Durable ShellRun state updates use a separate observer channel from model turns. */
+export type ShellRunUpdateOwnership =
+  | { kind: 'local' }
+  | { kind: 'source_owned'; sourceSessionId: string; ownerSessionId: string }
+  | { kind: 'source_unavailable'; sourceSessionId: string };
+
+export interface ShellRunUpdate {
+  /** Session whose conversation view should consume this projection. */
+  sessionId: string;
+  /** Whether the process is local or inherited, and whether its real owner is still resolvable. */
+  ownership: ShellRunUpdateOwnership;
+  sourceTurnId: string;
+  sourceToolCallId: string;
+  result: ShellRunStateResult;
+}
+
 export interface PermissionRequestEvent extends BaseEvent {
   type: 'permission_request';
   kind?: 'tool_permission' | 'additional_permissions' | 'sandbox_escalation';
@@ -447,7 +504,19 @@ export interface CompleteEvent extends BaseEvent {
     | 'error'
     | 'plan_handoff'
     | 'permission_handoff'
+    | 'step_limit'
     | 'max_tokens';
+}
+
+export type CompleteStopReason = CompleteEvent['stopReason'];
+
+/** Stable failure taxonomy for complete events that did not finish the turn. */
+export function failureClassFromCompleteStopReason(
+  reason: CompleteStopReason,
+): 'runtime_error' | 'tool_step_cap_reached' | undefined {
+  if (reason === 'error') return 'runtime_error';
+  if (reason === 'step_limit') return 'tool_step_cap_reached';
+  return undefined;
 }
 
 export interface AbortEvent extends BaseEvent {

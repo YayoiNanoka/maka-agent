@@ -10,11 +10,30 @@
      - All other colors are derived: alpha overlays (foreground/N) or solid mixes (foreground-N).
      - Borders / dividers / hovers / muted text never use a "gray" — they're foreground at low alpha.
 
-   Why this looks "premium":
-     - Sharp 0px radius corners + 1px subtle border rings (--shadow-minimal-flat).
+   Visual foundation:
+     - Small tokenized radii + subtle border rings (--shadow-minimal-flat).
      - Multi-layer soft shadows with very low opacity (0.06) instead of one heavy shadow.
      - System UI fonts with optical antialiasing.
-      - 15px base font, 4px spacing unit → dense but readable.
+     - 13px base font, 4px spacing unit → dense but readable.
+
+   ── Token authority (Round C consolidation) ────────────────────────────────
+   This file is the single source of truth for design tokens. Authority order
+   when two token names describe the same thing:
+     1. AUTHORITATIVE — the --background / --foreground family (+ --accent, the
+        status colors, and the derived --foreground-N / alpha / border / state
+        / spacing / radius / typography / elevation scales). New code consumes
+        these.
+     2. COMPATIBILITY ALIASES — the --color-bg-* / --color-text-* /
+        --color-border-* names (see "color-system compatibility aliases" in
+        :root). Kept only for existing consumers. Do NOT add new --color-*
+        aliases and do NOT point new components at them; use the --background
+        family instead.
+   Alias policy: an alias is defined as `var(--<authoritative-token>)` (or a
+   thin color-mix of one) and never holds an independent value, so themes and
+   palettes only ever retune the authoritative token. reference-shell.css and
+   styles/theme-glass.css now hold LAYOUT and GLASS-MATERIAL rules only — no
+   token definitions live there anymore (the darwin glass token overrides were
+   relocated here; see "DARWIN GLASS" below).
 ============================================================================ */
 
 /* =============================================================================
@@ -27,38 +46,14 @@
      oklch() gives perceptually uniform lightness, keeping subtle surface and
      status colors calibrated.
 
-     History: started as cool blue-gray (hue 265), then briefly moved
-     to warm cream (hue 80) to mirror a single-canvas reference design
-     where sidebar + main area share the same background and
-     separation comes from hairline borders + radius rather than a
-     darker shell behind lighter cards.
-
-     PR-DEFAULT-CANVAS-DEYELLOW-0 (@yuejing 2026-05-30, WAWQAQ msg
-     `bfee559d`): de-yellowed by shifting hue 80 → 250 (cool neutral).
-     The warm-cream tone read as visibly yellow against the chrome
-     accents and felt odd as a default. Same hue family as the azure
-     palette but with lower chroma so the default stays subtler.
-
-     PR-PARCHMENT-DEFAULT-0 (@yuejing 2026-06-20, WAWQAQ msg `00dcaf3a`
-     "/goal 像素级模仿 reference implementation"): nudged back toward reference implementation's
-     `light-parchment` baseline (warm off-white).
-
-     PR-GRAY-CARD-LIFT-0 (@yuejing 2026-06-20, WAWQAQ msg `a49dbd1e`
-     "整个的底板应该是灰色的, content surface 应该是白色的"):
-     WAWQAQ pivoted off the warm-parchment family to reference implementation's plain
-     `light` theme. There:
-       --color-bg-layout (shell canvas)  : #fdfdfd ≈ near-white
-       --color-bg-container (card)       : #ffffff pure white
-       --color-fill-tertiary (chip)      : #f9f9f9 light gray
-       --color-border-tertiary           : #e6e6e6
-       --color-text                      : #141414 near-black
-     The user's intent now reads as: the shell behind everything is a
-     near-white glass plate, the cards lift off it as pure white. We
-     translate to oklch with a tiny warm chroma so the sidebar reads
-     more like 参考实现's translucent macOS surface than a flat gray slab.
-
-     `--surface-canvas` is the shell-level background (what `.appFrame`
-     paints behind everything); `--background` is what cards paint. */
+     Current model (owner decision 2026-06-20, WAWQAQ msg `a49dbd1e`
+     "整个的底板应该是灰色的, content surface 应该是白色的"): a near-white glass
+     shell plate (--surface-canvas) with pure-white content cards (--background)
+     lifting off it — separation comes from the plate + radius + hairlines, not
+     a darker shell. Earlier warm-parchment / hue-80 "cream" experiments were
+     superseded (de-yellowed to a cool-neutral hue, then flattened to plain
+     white). --surface-canvas is what `.appFrame` paints behind everything;
+     --background is what cards paint. */
   --background: oklch(1.000 0 0);
   /* PR-UI-FRAME-4 (2026-06-22): pull back from the heavy gray plate.
      参考实现's sidebar is a light glass-like near-white gradient, with
@@ -136,8 +131,12 @@
   --success-text: color-mix(in oklab, var(--success) 50%, var(--foreground));
   --destructive-text: color-mix(in oklab, var(--destructive) 50%, var(--foreground));
   --info-text: color-mix(in oklab, var(--info) 50%, var(--foreground));
-  --warning: var(--info);
-  --warning-text: var(--info-text);
+  /* 警告 must be visually distinct from 提示 — they were literally the same
+     token, so the health page's info/warning tiers were indistinguishable.
+     Warning steps deeper + more orange than info's amber (l .75→.66,
+     h 70→55); still derived nowhere else, safe across palettes. */
+  --warning: oklch(0.66 0.18 55);
+  --warning-text: color-mix(in oklab, var(--warning) 50%, var(--foreground));
 
   /* === foreground solid mix scale ===
      foreground-N = N% of foreground interpolated INTO background.
@@ -149,7 +148,7 @@
   --foreground-5:  color-mix(in oklch, var(--foreground) 5%,  var(--background));
   --foreground-8:  color-mix(in oklch, var(--foreground) 8%,  var(--background));
   --foreground-10: color-mix(in oklch, var(--foreground) 10%, var(--background));
-   /* P-TEXT (roadmap §1.6): the -20/-30 text tiers were orphans (8 call
+   /* The retired -20/-30 text tiers were orphans (8 call
       sites total) sitting between the surface washes (2..10) and the
       real text ladder. Text uses moved to -40 (also a contrast fix:
       30% ink fails 4.5:1); decorative uses inlined their color-mix.
@@ -188,6 +187,16 @@
   --ring:          oklch(from var(--foreground) l c h / 0.25);
   --state-hover-bg:    oklch(from var(--foreground) l c h / 0.04);
   --state-selected-bg: oklch(from var(--foreground) l c h / 0.065);
+  /* PR5 FOREGROUND-ALPHA-TOKEN-0: raw foreground-alpha tiers for component
+     washes that need a semi-transparent foreground over their backdrop
+     (NOT the solid --foreground-N tints, which mix with --background and
+     would change rendering — the ring would thicken, the wash would stop
+     tracking the backdrop). The file-attachment card uses these for its bg
+     (0.06), icon-tile (0.10), and inset ring (0.12); other components at
+     the same density can reuse the tier instead of a fresh alpha. */
+  --foreground-alpha-6:  oklch(from var(--foreground) l c h / 0.06);
+  --foreground-alpha-10: oklch(from var(--foreground) l c h / 0.10);
+  --foreground-alpha-12: oklch(from var(--foreground) l c h / 0.12);
   /* User bubble color is intentionally distinct from `--accent` so users can
      re-tint the accent without ruining chat legibility.
      PR-GRAY-CARD-LIFT-0: bubble shifts to neutral gray (hue 0)
@@ -198,6 +207,22 @@
   --user-message-bubble: var(--chat-user-bg);
   --selection:     oklch(from var(--accent) l c h / 0.2);
 
+  /* === color-system compatibility aliases ===
+     Legacy `--color-*` names that predate the --background family, relocated
+     here from reference-shell.css (Round C). Kept as thin aliases for the few
+     consumers still on them: `--color-bg-container` backs the agents content
+     surface (reference-shell.css) + darwin glass card; `--color-border-tertiary`
+     the composer border (composer.css); `--color-text-quaternary` the darwin
+     sidebar label text (theme-glass.css). Authoritative source is the token
+     each aliases — see the token README at the top of this file. Do NOT add
+     new --color-* names.
+     `--color-bg-container` is the one shipped exception where the alias name is
+     the canonical handle for the content-card surface (resolves to
+     --background); it carries its darwin overrides in "DARWIN GLASS" below. */
+  --color-bg-container: var(--background);
+  --color-border-tertiary: color-mix(in srgb, var(--border) 92%, transparent);
+  --color-text-quaternary: var(--muted-foreground);
+
   /* === shadow opacity (subtle in light, stronger in dark) === */
   --shadow-border-opacity: 0.08;
   --shadow-blur-opacity:   0.06;
@@ -205,7 +230,7 @@
   /* === shadow recipes ===
      Always include the 1px border ring as the FIRST inset-like layer.
      Subsequent layers are very low-opacity blurs that stack into a soft glow. */
-  /* P-SHADOW (design-refinement-roadmap-2026-07 §1.2): blur layers were
+  /* Blur layers were
      pure-black rgba — on a light warm-gray shell a pure black shadow
      reads as a dirty smudge (taste-skill ban). Every layer now derives
      from the warm foreground so shadow, border ring, and ink share one
@@ -278,15 +303,20 @@
   --font-default: var(--font-sans);
 
   /* === typography ===
-     PR-TYPOGRAPHY-CONVERGE-0 (issue #430 PR2, 2026-07-03):
-     three-tier scale. Body 15 is the root (html font-size); UI 13 is the
-     chrome/control tier (sidebar rows, labels, buttons, form fields);
-     caption 11 is dense meta (timestamps, badges, kbd, overlines).
-     9/10/10.5/11/11.5px and sub-0.8rem collapse to caption;
-     12/12.5/13/13.5/14px and 0.8-0.95rem collapse to ui.
-     Bubble h1-h4 scale in em off body 15 so they track the root automatically. */
-  --font-size-base: 15px;
-  --font-size-ui: 13px;
+     PR-TYPOGRAPHY-CONVERGE-0 (issue #430 PR2, 2026-07-03), re-tiered for
+     #546 density: heading 15 / body 13 / caption 11. Body 13 is the root
+     (html font-size) and also the chrome/control tier — ui aliases base
+     (macOS/VS Code shape: body == chrome == 13, hierarchy by weight/color).
+     Heading 15 is the old body value, demoted to section/card/modal
+     titles only — those sites keep their exact pixels, renamed honestly.
+     Caption 11 is dense meta (timestamps, badges, kbd, overlines).
+     Bubble h1-h4 scale in em off body 13 so they track the root automatically. */
+  --font-size-heading: 15px;
+  /* Display tier for stat-tile values (convergence R4) — the summary tiles
+     used ad-hoc 1.5em/1.4em; one ladder step ends that. */
+  --font-size-stat: 20px;
+  --font-size-base: 13px;
+  --font-size-ui: var(--font-size-base);
   --font-size-caption: 11px;
 
   /* === line-height ===
@@ -321,10 +351,10 @@
   /* === letter-spacing ===
      PR-TRACKING-CONVERGE-0 (issue #520 PR1):
      four-tier scale aligned to a Tailwind tracking-scale subset. No
-     --tracking-tight: maka is a CJK-first app and roadmap §1.6 bans
+     --tracking-tight: Maka is a CJK-first app, so avoid
      tightening CJK letter-spacing, so all negative values snap to
-     normal (0). ALL-CAPS short labels use wider/widest (roadmap §4.1
-     +5-12% tracking). 1px absolute → widest (0.1em ≈ 1.3px @ 13px). */
+     normal (0). ALL-CAPS short labels use wider/widest (+5–10%
+     tracking). 1px absolute → widest (0.1em ≈ 1.3px @ 13px). */
   --tracking-normal: 0;
   --tracking-wide: 0.025em;
   --tracking-wider: 0.05em;
@@ -337,7 +367,7 @@
   --font-serif: Georgia, "Times New Roman", Times, serif;
 
   /* === layout ===
-     P-RADIUS concentric nesting (#520 PR4 item 12, roadmap §1.3):
+     Concentric nesting:
      when a rounded surface sits inside another rounded surface with padding
      between them, the inner radius = outer radius − padding so the two
      curves share a center and read as one machined shell. Two forms:
@@ -361,7 +391,7 @@
      so it holds under any root font-size — the previous 0.25rem was
      3.75px under the 15px root, silently mis-aligning Tailwind's spacing
      scale (p-2 = 7.5px) with hand-written px (padding: 8px). The
-     @theme inline bridge below exports this same 4px to Tailwind so
+     the `@theme inline` bridge in styles.css exports this same 4px to Tailwind so
      p-2/gap-2/m-4 and var(--space-*) share one ruler.
 
      Scale: 16-and-below keeps every even number (0/2/4/6/8/10/12) because
@@ -462,17 +492,12 @@
    --lift-hover: -1px;         /* hover 上浮 (snap -0.5/-1) */
 
    /* === page-card recipe ===
-      Single source of truth for the lifted "page card" chrome used by every
-      top-level module page (Skills, Plan/Reminder, future Settings). Atlas
-      §4: the reference layout's signature recipe is `1px tertiary border +
-      6px radius + 0 1px 2px @ 4% lift` — every workbench-card, aux-panel,
-      and agents-chat-panel uses these three values. See
-      notes/reference-atlas.md §9 for the per-surface gap analysis. */
+     Single source of truth for lifted page-card chrome: a subtle border,
+     compact radius, and low-opacity lift shared by top-level module pages. */
   --card-border-color: oklch(from var(--foreground) l c h / 0.08);
   --card-bg: var(--background);
   --card-shadow: 0 1px 2px oklch(from var(--foreground) l c h / 0.04);
-  /* Inner top highlight — high-end-visual-design §4A Doppelrand: cards
-     read as physical hardware via a 1px inner top sheen. */
+  /* A 1px inner top sheen gives lifted cards a physical edge. */
   --card-highlight: inset 0 1px 0 oklch(1 0 0 / 0.04);
 
   /* sidebar / pane widths (use as max-inline-size on resizable panels) */
@@ -480,7 +505,7 @@
   --w-rail: 240px;
   --h-titlebar: 36px;
   --h-toolbar: 40px;
-  --h-composer-min: 56px;
+  --h-composer-min: 44px;
 
   /* titlebar control baseline (macOS traffic-light center) */
   --maka-titlebar-control-safe-left: 94px;
@@ -490,7 +515,7 @@
      (sidebar.css) and the in-flow chat status row (module-pages.css).
      The status row only shares the toolbar's right edge; it no longer
      anchors off the toolbar bottom. */
-  --maka-workspace-top-actions-top: calc(var(--maka-titlebar-control-safe-top) - 17px);
+  --maka-workspace-top-actions-top: calc(var(--maka-titlebar-control-safe-top) - 16px); /* pixel-measured lockstep with sidebar rail — lights' optical center is 20.75 */
   --maka-workspace-top-actions-right: 24px;
   /* Horizontal footprint the absolutely-positioned .maka-workspace-top-actions
      toolbar occupies in the top-right corner: its right offset + four 24px icon
@@ -558,6 +583,8 @@
 ============================================================================= */
 
 .dark {
+  /* Designer audit P1-6: composer edge ring — see styles/composer.css. */
+  --composer-ring-alpha: 0.12;
   /* PR-GRAY-CARD-LIFT-0: dark mode follows the same neutral gray
    * (hue 0, no chroma) hierarchy. Lightness anchors keep existing
    * contrast tuning. */
@@ -597,7 +624,7 @@
   --shadow-blur-opacity:   0.12;
   --opacity-overlay: 0.06;
 
-  /* P-SHADOW dark collapse (roadmap D2): blur shadows are nearly
+  /* Dark-mode shadow collapse: blur shadows are nearly
      invisible on a dark shell but still cost compositing and, worse,
      the foreground-derived layers turn WHITE-ish in dark mode and read
      as a glow. Elevation in dark mode is carried by border rings
@@ -634,6 +661,26 @@
 }
 
 /* =============================================================================
+   DARWIN GLASS — color-alias overrides for the macOS vibrancy shell
+   (relocated from styles/theme-glass.css, Round C). Unlayered + the
+   html[data-os="darwin"] selector on purpose: the override must outrank the
+   :root aliases above (0,1,1 > 0,1,0) and beat any @layer declaration. The
+   glass MATERIAL rules (backdrop-filter, transparency) stay in theme-glass.css.
+
+   Re-anchored on --background (not a warm/zinc literal) so hue/chroma follow
+   the active palette; card↔canvas separation is the canvas/vibrancy's job, so
+   the content card == the palette background.
+============================================================================= */
+html[data-os="darwin"] {
+  --color-bg-container: var(--background);
+  --color-text-quaternary: oklch(from var(--foreground) l c h / 0.45);
+}
+html[data-os="darwin"].dark {
+  /* Dark glass lifts the card one lightness step off the darker shell. */
+  --color-bg-container: oklch(from var(--background) calc(l + 0.035) c h);
+}
+
+/* =============================================================================
    PR-UI-2 (@yuejing 2026-05-22): base46-inspired palette catalog
    ---------------------------------------------------------------
    4 alternative palettes a user can pick in Settings · 主题.
@@ -650,7 +697,7 @@
 [data-maka-theme="onedark"] {
   --background: oklch(0.95 0.005 250);
   --foreground: oklch(0.30 0.02 250);
-  --accent: oklch(0.60 0.14 250);              /* blue */
+  --accent: oklch(0.62 0.13 237);              /* One Dark blue (#61AFEF family) */
   --info: oklch(0.72 0.14 60);                 /* warm amber */
   --success: oklch(0.62 0.16 145);
   --destructive: oklch(0.62 0.20 22);
@@ -660,7 +707,7 @@
 [data-maka-theme="onedark"].dark {
   --background: oklch(0.21 0.010 250);
   --foreground: oklch(0.90 0.010 250);
-  --accent: oklch(0.68 0.15 250);
+  --accent: oklch(0.70 0.13 237);
   --info: oklch(0.74 0.15 70);
   --success: oklch(0.65 0.16 145);
   --destructive: oklch(0.70 0.18 22);
@@ -760,7 +807,7 @@
 [data-maka-theme="azure"] {
   --background: oklch(0.98 0.005 250);
   --foreground: oklch(0.20 0.015 250);
-  --accent: oklch(0.58 0.18 252);               /* product blue */
+  --accent: oklch(0.55 0.12 195);               /* lake cyan */
   --info: oklch(0.68 0.13 240);
   --success: oklch(0.66 0.15 150);
   --destructive: oklch(0.62 0.18 22);
@@ -770,7 +817,7 @@
 [data-maka-theme="azure"].dark {
   --background: oklch(0.20 0.015 250);
   --foreground: oklch(0.93 0.010 250);
-  --accent: oklch(0.70 0.18 252);
+  --accent: oklch(0.72 0.13 195);
   --info: oklch(0.74 0.13 240);
   --success: oklch(0.72 0.14 150);
   --destructive: oklch(0.72 0.18 22);
@@ -864,55 +911,6 @@
   --destructive: oklch(0.65 0.18 22);
   --user-message-bubble: oklch(0.28 0 0);
   --chat-user-bg: var(--user-message-bubble);
-}
-
-/* =============================================================================
-   TAILWIND v4 THEME INTEGRATION
-   Make tokens addressable as Tailwind utilities:
-      bg-foreground-5       → background of subtle hover surface
-      text-muted-foreground → muted text (50% ink)
-      text-foreground-secondary → secondary text (80% ink)
-      bg-accent             → accent garnish fill
-      bg-action             → primary action fill
-      bg-control            → checked/on/progress fill
-      text-link             → link emphasis
-      border-border         → 1px subtle divider
-   See https://tailwindcss.com/docs/v4-beta for @theme inline semantics.
-============================================================================= */
-
-@theme inline {
-  --color-background: var(--background);
-  --color-background-elevated: var(--background-elevated);
-  --color-foreground: var(--foreground);
-  --color-foreground-dimmed: var(--foreground-dimmed);
-  --color-accent: var(--accent);
-  --color-action: var(--action);
-  --color-action-foreground: var(--action-foreground);
-  --color-control: var(--control);
-  --color-control-foreground: var(--control-foreground);
-  --color-link: var(--link);
-  --color-focus-ring: var(--focus-ring);
-  --color-status-running: var(--status-running);
-  --color-nav-active: var(--nav-active);
-  --color-toast-accent: var(--toast-accent);
-  --color-info: var(--info);
-  --color-success: var(--success);
-  --color-destructive: var(--destructive);
-
-  --color-foreground-2:  var(--foreground-2);
-  --color-foreground-3:  var(--foreground-3);
-  --color-foreground-5:  var(--foreground-5);
-  --color-foreground-8:  var(--foreground-8);
-  --color-foreground-10: var(--foreground-10);
-  --color-foreground-secondary: var(--foreground-secondary);
-
-  --color-border: var(--border);
-  --color-border-strong: var(--border-strong);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-hover: var(--state-hover-bg);
-  --color-active: var(--state-selected-bg);
-  --color-user-message-bubble: var(--user-message-bubble);
 }
 
 /* =============================================================================
@@ -1167,23 +1165,22 @@
     padding: var(--space-6) 0 var(--space-4) 0;
     display: flex;
     flex-direction: column;
-    /* PR-CHAT-CHROME-FOLLOWUP-0: looser separation BETWEEN turns so each
-       Q+A unit reads as its own block (the within-turn gap stays tight). */
-    gap: var(--space-6);
+    /* PR5 CHAT-TURN-SPACING-0: uniform 12px turn gap (between turns =
+       within turn) — the chat reads as a continuous coding-agent stream
+       instead of stacked Q+A blocks. */
+    gap: var(--space-3);
   }
 
   /* Turn grouping (per kenji UI-04): user msg + tools + assistant answer
-   * cluster into one visual unit. The section is just a flex container —
-   * the spacing between turns is established by the outer chat gap; spacing
-   * inside a turn is tighter so the unit reads as one work block. */
+   * cluster into one visual unit. The section is a flex container; both the
+   * between-turn and within-turn gaps are uniform (CHAT-TURN-SPACING-0), so
+   * a turn reads as one unit by grouping, not by tighter internal spacing. */
   .maka-turn {
     display: flex;
     flex-direction: column;
-    /* PR-CHAT-CHROME-FOLLOWUP-0: 4px → 8px. The parts of one turn (user
-       block, summary, tools, answer) were cramped; 8px gives a calmer
-       internal rhythm while still reading as one unit against the 24px
-       between-turn gap. */
-    gap: var(--space-2);
+    /* PR5 CHAT-TURN-SPACING-0: uniform 12px within-turn gap, matching the
+       between-turn gap (.maka-chat) — one density, no between/within split. */
+    gap: var(--space-3);
     max-width: var(--maka-chat-measure);
     margin: 0 auto;
     width: 100%;
@@ -1191,109 +1188,33 @@
     /* Long-conversation first render: skip layout/paint for off-screen
        turns (vercel react-best-practices rendering-content-visibility —
        ~10x initial-render win on long sessions, keeps native Cmd+F and
-       text selection, no virtualization library). `auto 250px` keeps a
-       placeholder estimate until first render, then the remembered
-       actual size prevents scrollbar jumps. */
+       text selection, no virtualization library). `auto 250px` is only a
+       placeholder until a turn is first rendered; the remembered actual
+       size then keeps scroll geometry exact. Never-rendered history would
+       otherwise inflate turn by turn while scrolling up ("endless scroll"),
+       so chat-view runs an idle-time bottom-up warm-up after session load —
+       see packages/ui/src/turn-size-warmup.ts. */
     content-visibility: auto;
     contain-intrinsic-size: auto 250px;
   }
 
-  /* The streaming turn must never be skipped: it grows every frame and
-     anchors the auto-scroll-to-bottom behavior. */
-  .maka-turn-streaming {
+  /* #642 single render path: the streaming answer now rides the tail turn's
+     own `.maka-turn` node (not a separate `.maka-turn-streaming` section), so
+     the content-visibility override keys off the `data-live-streaming` hook
+     the tail turn carries. It must never be skipped: it grows every frame and
+     anchors the auto-scroll-to-bottom behavior. The old `.maka-turn-streaming`
+     box + `margin-top` position-parity rule is gone: the tail turn is already
+     spaced by its parent `.maka-turn` gap, so there is no out-of-band section
+     to re-align. */
+  .maka-turn[data-live-streaming="true"] {
     content-visibility: visible;
   }
 
-  .maka-turn-tools {
-    padding: 0 var(--space-2) 0 0;
-  }
-
-  /* Optional reasoning block — collapsed by default, expandable to inspect
-   * the model's chain of thought without cluttering the answer.
-   *
-   * PR-REASONING-PANEL-SMOOTH-EXPAND-0 (WAWQAQ msg `145f15d5`,
-   * skills round task #116): native `<details>` had no toggle
-   * feedback — clicking flicked content in/out without any handle.
-   * Polishes the summary into a real affordance:
-   *   - Replace browser-default disclosure triangle (varies per UA)
-   *     with a custom chevron that rotates 90deg on `[open]` using
-   *     a spring-ish cubic-bezier from design-taste-frontend §5
-   *     (var(--duration-emphasized) `cubic-bezier(0.16, 1, 0.3, 1)`).
-   * `cursor: pointer` deliberately NOT applied to the summary —
-   * macOS reserves the hand for links; details summaries use the
-   * default arrow. Enforced by `cursor-convention-contract.test.ts`.
-   * Native height animation requires `interpolate-size` + per-
-   * element JS state and isn't a single-element CSS fix; deferred
-   * until we route reasoning through Base UI's Accordion. */
-  .maka-turn-thinking {
-    margin: 0 0 var(--space-2);
-    padding: var(--space-2) var(--space-2-5);
-    border: var(--border-width-hairline) dashed oklch(from var(--focus-ring) l c h / 0.25);
-    border-radius: var(--radius-surface);
-    background: oklch(from var(--focus-ring) l c h / 0.03);
-    font-size: var(--font-size-ui);
-    color: var(--foreground-secondary);
-  }
-
-  .maka-turn-thinking [data-slot="collapsible-trigger"] {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-weight: var(--font-weight-semibold);
-    color: var(--focus-ring);
-    letter-spacing: var(--tracking-wide);
-    /* `cursor: pointer` intentionally omitted — native macOS reserves
-       the hand cursor for links; the Collapsible trigger is a button-like
-       control and uses the default arrow. Enforced by
-       `cursor-convention-contract.test.ts`. */
-  }
-
-  /* Replace the default disclosure triangle with a custom chevron
-     that rotates smoothly on toggle. */
-  .maka-turn-thinking [data-slot="collapsible-trigger"]::before {
-    content: '';
-    flex-shrink: 0;
-    width: 0;
-    height: 0;
-    border-style: solid;
-    border-width: 4px 0 4px 5px;
-    border-color: transparent transparent transparent currentColor;
-    transition: transform var(--duration-emphasized) var(--ease-out-strong);
-  }
-  .maka-turn-thinking [data-slot="collapsible-trigger"][data-panel-open]::before {
-    transform: rotate(90deg);
-  }
-
-  .maka-turn-thinking-note {
-    font-size: var(--font-size-caption);
-    font-weight: var(--font-weight-medium);
-    letter-spacing: var(--tracking-wider);
-    color: var(--muted-foreground);
-    text-transform: uppercase;
-  }
-
-  .maka-turn-thinking-body {
-    margin-top: var(--space-1-5);
-    line-height: var(--leading-normal);
-    font-style: italic;
-    opacity: var(--opacity-pending);
-  }
-
-  .maka-turn-thinking-actions {
-    display: flex;
-    justify-content: flex-end;
-    margin-top: var(--space-1-5);
-  }
-
-  /* The streaming bubble (out-of-band, before the in-progress turn is
-   * fully persisted) sits at the bottom of the chat surface; give it the
-   * same horizontal frame as a real turn message. */
-  .maka-turn-streaming {
-    /* maka-message-row already handles padding; this just keeps the
-       in-progress assistant streaming-row visually separated from any
-       previous turn while it lands. */
-    box-sizing: border-box;
-  }
+  /* The streaming UI rework retired `.maka-turn-tools` (the tools-section
+     wrapper) and the `.maka-turn-thinking` reasoning `<details>` chrome. Tools
+     now render inline via the flat `ToolTrow` and reasoning via the
+     `DeepThinking` disclosure, both Tailwind-literal + the `TextShimmer`
+     primitive — see packages/ui/src/tool-activity.tsx and chat-view.tsx. */
 
   /* ---- Tool activity ---------------------------------------------- */
 
@@ -1321,30 +1242,8 @@
     50%      { box-shadow: 0 0 0 5px oklch(from var(--status-running) l c h / 0.06); }
   }
 
-  /* Canonical "live" pulse for the @maka/ui LiveIndicator primitive (issue
-     #332, PR3). One governed opacity+scale breath so the chat live-output dot —
-     and, in a follow-up motion pass, the reasoning / composer / onboarding live
-     dots that adopt LiveIndicator — share a single keyframe instead of
-     per-feature duplicates. Values mirror the retired
-     `maka-tool-output-stream-pulse` exactly (rest opacity 0.55, scale 1→1.1).
-     Reduced-motion suppression rides on the primitive's `motion-reduce:`
-     utilities. */
-  @keyframes maka-pulse {
-    0%, 100% { opacity: 0.55; transform: scale(1); }
-    50%      { opacity: 1;    transform: scale(1.1); }
-  }
-
   /* ---- Composer --------------------------------------------------- */
 
-  .maka-composer {
-    /* PR-UI-LAYOUT-8: remove the visible 1px divider between chat
-     * surface and composer — on the warm canvas the divider read as
-     * a strong horizontal line slicing the panel. The composer's
-     * own border + rounded chrome below is sufficient visual
-     * separation; no extra line needed. */
-    padding: var(--space-4) var(--space-6);
-    background: var(--background);
-  }
   .maka-composer[data-drag-active="true"] .maka-composer-inner {
     border-color: oklch(from var(--focus-ring) l c h / 0.46);
     background: oklch(from var(--focus-ring) 0.98 calc(c * 0.20) h / 0.35);
@@ -1451,7 +1350,7 @@
     border-bottom: var(--border-width-hairline) solid var(--border);
   }
   .maka-modal-title {
-    font-size: var(--font-size-base);
+    font-size: var(--font-size-heading);
     font-weight: var(--font-weight-semibold);
     color: var(--foreground);
     letter-spacing: var(--tracking-normal);
@@ -1486,6 +1385,10 @@
 
   .maka-code {
     font-family: var(--font-mono);
+    /* Geist Mono ships programming ligatures on by default, which collapse a
+       run like `=== 目录 ===` into a strikethrough-looking rule. Code and
+       command surfaces read literally, so ligatures stay off. */
+    font-variant-ligatures: none;
     font-size: var(--font-size-ui);
     background: var(--foreground-3);
     border: var(--border-width-hairline) solid var(--border);
@@ -1506,6 +1409,47 @@
   0%   { background-position: -200% 0; }
   100% { background-position:  200% 0; }
 }
+
+/* Governance-level keyframe for the `TextShimmer` primitive (streaming UI
+   rework). A named `@keyframes` is a global rule, not an element property, so
+   it can't be a Tailwind leaf-literal — it lives here (the shared motion home)
+   like `maka-tool-pulse`, with the shimmer's other declarations
+   as literal utilities in the primitive. Sweeps a clipped light band left→right
+   across the glyph shape by translating `background-position`; the two-layer
+   primitive keeps an opaque base underneath so the text stays readable. Frozen
+   by the global reduced-motion / visual-smoke rules in base.css and the
+   primitive's own `motion-reduce:` guards. */
+@keyframes maka-text-shimmer {
+  from { background-position: 150% 0; }
+  to   { background-position: -150% 0; }
+}
+
+/* Governance-level keyframe for the streaming per-word fade-in (streaming UI
+   rework) — the replacement for the retired ▎ blink caret. markdown-body's
+   rehype pass wraps each freshly streamed word/char (after the stable
+   boundary) in `.maka-stream-fade` with a negative `animation-delay` (= -age)
+   so the entrance resumes mid-flight across React re-renders instead of
+   re-flashing. Only opacity animates (no layout). The wrapping is skipped
+   entirely under reduced-motion / visual-smoke (the smoother's snap path), so
+   this never freezes text at opacity 0 in a deterministic capture. */
+@keyframes maka-stream-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.maka-stream-fade {
+  /* --duration-large (280ms) is the fade window; FADE_MS in stream-fade.ts is
+     pinned to the same 280 so the negative animation-delay (= -age) lands at
+     the right point in the curve. Motion durations must come from a
+     var(--duration-*) token (motion-token-converge contract), so the window is
+     retuned there, not with a bare ms here. */
+  animation: maka-stream-fade-in var(--duration-large) var(--ease-out-strong) both;
+}
+
+/* #642: the footer settle-entrance keyframe (`maka-footer-fade-in`) is gone.
+   The footer no longer "appears" on settle — it is hidden by default and
+   revealed on hover / focus-within of the answer block (see the `footer`
+   marker variant in packages/ui/src/primitives/chat.tsx), so there is no live
+   mount transition to animate. */
 .maka-shimmer {
   background-image: linear-gradient(
     90deg,
@@ -1556,7 +1500,7 @@
 }
 
 /* =============================================================================
-   Icon stroke governance (decision D5, roadmap §4.1): call sites had
+   Icon stroke governance: call sites had
    accumulated EIGHT different strokeWidth values (1.5 → 2) across 143
    usages, plus the lucide default of 2 wherever unspecified — the
    classic "can't say why it looks unpolished" tell. One CSS rule beats

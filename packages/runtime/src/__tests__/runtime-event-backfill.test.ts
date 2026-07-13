@@ -65,9 +65,11 @@ describe('runtime event backfill', () => {
         turnId: 'turn-1',
         ts: 120,
         toolName: 'Read',
+        activityKind: 'read',
         displayName: 'Read file',
         intent: 'inspect',
         args: { path: 'README.md' },
+        stepId: 'step-1',
       },
       {
         type: 'tool_result',
@@ -143,7 +145,9 @@ describe('runtime event backfill', () => {
     expect(result.events[2]?.content).toEqual({ kind: 'thinking', text: 'reasoning', signature: 'sig-1' });
     expect(result.events[3]?.content).toEqual({ kind: 'function_call', id: 'tool-1', name: 'Read', args: { path: 'README.md' } });
     expect(result.events[3]?.actions?.stateDelta?.displayName).toBe('Read file');
+    expect(result.events[3]?.actions?.stateDelta?.activityKind).toBe('read');
     expect(result.events[3]?.actions?.stateDelta?.intent).toBe('inspect');
+    expect(result.events[3]?.refs).toEqual({ storedMessageId: 'tool-1', toolCallId: 'tool-1', stepId: 'step-1' });
     expect(result.events[4]?.content).toEqual({ kind: 'function_response', id: 'tool-1', name: 'Read', result: { kind: 'text', text: 'file body' }, isError: false });
     expect(result.events[4]?.actions?.stateDelta?.durationMs).toBe(42);
     expect(result.events[5]?.actions?.permissionDecision).toEqual({ requestId: 'perm-1', decision: 'allow', rememberForTurn: true });

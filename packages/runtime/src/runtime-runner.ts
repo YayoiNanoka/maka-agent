@@ -1,8 +1,7 @@
 /**
  * RuntimeRunner — Runtime v2 invocation shell.
  *
- * Source: docs/runtime-v2-architecture-evolution.md §Target Architecture and
- * Phase 2 (RuntimeRunner Shell).
+ * Architecture: docs/architecture/runtime-core-architecture-draft.md
  *
  * RuntimeRunner is the invocation shell. It remains decoupled from
  * SessionManager / SessionStore so it can be exercised with fake services,
@@ -255,7 +254,15 @@ export class RuntimeRunner {
       };
     }
 
-    const status: InvocationResultStatus = failure ? 'failed' : 'completed';
+    let status: InvocationResultStatus = failure ? 'failed' : 'completed';
+    const finalOutput = status === 'completed' ? finalOutputFromEvents(events) : undefined;
+    if (status === 'completed' && finalOutput === undefined) {
+      status = 'failed';
+      failure = {
+        class: 'missing_final_output',
+        message: 'completed invocation produced no non-empty final model text',
+      };
+    }
     return this.buildResult({
       request,
       invocationId,
@@ -264,6 +271,7 @@ export class RuntimeRunner {
       finishedAt: this.providers.now(),
       status,
       events,
+      ...(finalOutput !== undefined ? { finalOutput } : {}),
       ...(failure ? { failure } : {}),
     });
   }
@@ -276,6 +284,7 @@ export class RuntimeRunner {
     finishedAt: number;
     status: InvocationResultStatus;
     events: RuntimeEvent[];
+    finalOutput?: string;
     failure?: InvocationFailure;
   }): InvocationResult {
     return {
@@ -284,12 +293,28 @@ export class RuntimeRunner {
       sessionId: args.request.sessionId,
       turnId: args.request.turnId,
       status: args.status,
+      ...(args.finalOutput !== undefined ? { finalOutput: args.finalOutput } : {}),
       events: args.events,
       ...(args.failure ? { failure: args.failure } : {}),
       startedAt: args.startedAt,
       finishedAt: args.finishedAt,
     };
   }
+}
+
+function finalOutputFromEvents(events: readonly RuntimeEvent[]): string | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (
+      event.role === 'model'
+      && event.partial !== true
+      && event.content?.kind === 'text'
+      && event.content.text.trim().length > 0
+    ) {
+      return event.content.text;
+    }
+  }
+  return undefined;
 }
 
 // ============================================================================
@@ -393,8 +418,9 @@ function failureFromTerminalEvent(event: RuntimeEvent): InvocationFailure | unde
   if (status === 'failed') {
     const message = content?.kind === 'error' ? content.message : undefined;
     const classFromContent = content?.kind === 'error' ? (content.reason ?? content.code) : undefined;
+    const classFromState = event.actions?.stateDelta?.failureClass;
     return {
-      class: classFromContent ?? 'runtime_error',
+      class: classFromContent ?? (typeof classFromState === 'string' ? classFromState : 'runtime_error'),
       ...(message ? { message } : {}),
       terminalStatus: status,
     };

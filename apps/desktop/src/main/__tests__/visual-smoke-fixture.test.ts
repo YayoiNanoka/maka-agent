@@ -292,9 +292,8 @@ describe('visual smoke fixture mode', () => {
     assert.equal(state?.scenario, 'first-run');
     assert.equal(state?.now, Date.UTC(2026, 4, 22, 3, 0, 0));
     assert.equal(state?.activeSessionId, undefined);
-    assert.equal(state?.streamingBySession, undefined);
+    assert.equal(state?.liveTurnBySession, undefined);
     assert.equal(state?.permissionBySession, undefined);
-    assert.equal(state?.liveToolsBySession, undefined);
   });
 
   it('all fixture exposes transient streaming and permission state without persistence', () => {
@@ -303,10 +302,12 @@ describe('visual smoke fixture mode', () => {
     assert.equal(state?.enabled, true);
     assert.equal(state?.scenario, 'all');
     assert.equal(state?.activeSessionId, 'visual-smoke-turn');
-    assert.ok(state?.streamingBySession?.['visual-smoke-streaming']);
+    const liveTurns = state?.liveTurnBySession;
+    assert.equal(liveTurns?.['visual-smoke-streaming']?.turnId, 'turn-streaming');
+    assert.equal(liveTurns?.['visual-smoke-streaming']?.steps[0]?.tools[0]?.status, 'running');
+    assert.equal(liveTurns?.['visual-smoke-permission']?.turnId, 'turn-permission');
+    assert.equal(liveTurns?.['visual-smoke-permission']?.steps[0]?.tools[0]?.status, 'waiting_permission');
     assert.ok(state?.permissionBySession?.['visual-smoke-permission']);
-    assert.equal(state?.liveToolsBySession?.['visual-smoke-streaming']?.[0]?.status, 'running');
-    assert.equal(state?.liveToolsBySession?.['visual-smoke-permission']?.[0]?.status, 'waiting_permission');
   });
 
   it('fixture source does not seed visible placeholder chat copy', async () => {
@@ -513,6 +514,44 @@ describe('visual smoke fixture mode', () => {
     }
   });
 
+  it('model-processing arms a running session with no live stream so the "正在处理…" indicator + Stop show (#646)', async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'maka-visual-smoke-processing-'));
+    try {
+      const fixture = resolveVisualSmokeFixture('model-processing', false);
+      assert.ok(fixture);
+      const state = getVisualSmokeState(fixture);
+      // The turn is armed on a running session — the derivation's inputs.
+      assert.equal(state?.activeSessionId, 'visual-smoke-processing');
+      assert.deepEqual(state?.liveTurnBySession?.['visual-smoke-processing'], {
+        turnId: 'turn-processing-1',
+        phase: 'waiting',
+        steps: [],
+      });
+      // Nothing may be streaming / thinking / running as a tool, or the
+      // derivation would hide the indicator (it fires only in the zero-content
+      // wait). This scenario deliberately seeds none of them.
+      assert.equal(state?.liveTurnBySession?.['visual-smoke-processing']?.steps.length, 0);
+
+      await seedVisualSmokeFixture({
+        workspaceRoot,
+        fixture,
+        credentialStore: fakeCredentialStore(),
+        now: 1_700_000_000_000,
+      });
+      // The on-disk status is `running` so the status gate self-heals like the
+      // real backgrounded-session path; the lone user message is the tail turn
+      // the indicator anchors to.
+      const file = await readFile(join(workspaceRoot, 'sessions', 'visual-smoke-processing', 'session.jsonl'), 'utf8');
+      const lines = file.split('\n').filter(Boolean);
+      const header = JSON.parse(lines[0]!) as { status: string };
+      assert.equal(header.status, 'running');
+      const userMessages = lines.slice(1).map((l) => JSON.parse(l) as { type: string }).filter((m) => m.type === 'user');
+      assert.equal(userMessages.length, 1, 'a lone user prompt anchors the tail turn');
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it('plan-reminders opens the Automations module and seeds scheduled / paused / completed reminders', async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'maka-visual-smoke-plan-reminders-'));
     try {
@@ -575,7 +614,52 @@ describe('visual smoke fixture mode', () => {
     assert.equal(getVisualSmokeState(dailyReview)?.activeSessionId, 'visual-smoke-turn');
   });
 
-  it('sidebar-row-actions-visible shares the 60-session seed and sets focusActiveRow so the action overlay shows (PR-SIDEBAR-IA-0 Phase 3 P0 fixup v4)', async () => {
+  it('module-skills seeds a managed-source market catalog (>=6 entries with categories) plus workspace skills', async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'maka-visual-smoke-skills-'));
+    const previousSourcesRoot = process.env.MAKA_SKILL_SOURCES_ROOT;
+    try {
+      const fixture = resolveVisualSmokeFixture('module-skills', false);
+      assert.ok(fixture);
+      await seedVisualSmokeFixture({
+        workspaceRoot,
+        fixture,
+        credentialStore: fakeCredentialStore(),
+        now: 1_700_000_000_000,
+      });
+
+      const sourcesRoot = join(workspaceRoot, '.maka', 'skill-sources');
+      assert.equal(process.env.MAKA_SKILL_SOURCES_ROOT, sourcesRoot, 'seeder points the sources-root override at the fixture workspace');
+
+      const expectedSources: ReadonlyArray<{ id: string; category: string }> = [
+        { id: 'research-brief', category: '研究与分析' },
+        { id: 'doc-review', category: '文档与写作' },
+        { id: 'meeting-followup', category: '效率工具' },
+        { id: 'release-checklist', category: 'DevOps与部署' },
+        { id: 'data-analyst', category: '数据与AI' },
+        { id: 'ui-audit', category: '设计与UI' },
+        { id: 'blog-outline', category: '内容创作' },
+      ];
+      assert.ok(expectedSources.length >= 6, 'market grid needs >=6 entries to render meaningfully');
+      const categories = new Set<string>();
+      for (const source of expectedSources) {
+        const content = await readFile(join(sourcesRoot, source.id, 'SKILL.md'), 'utf8');
+        assert.match(content, new RegExp(`category: ${source.category}`), `${source.id} carries its category front-matter`);
+        categories.add(source.category);
+      }
+      assert.ok(categories.size >= 5, 'sources span several taxonomy buckets so the filter is exercised');
+
+      // meeting-followup is also a workspace skill so the grid shows an
+      // installed state; daily-standup fills 已安装 with a second row.
+      await readFile(join(workspaceRoot, 'skills', 'meeting-followup', 'SKILL.md'), 'utf8');
+      await readFile(join(workspaceRoot, 'skills', 'daily-standup', 'SKILL.md'), 'utf8');
+    } finally {
+      if (previousSourcesRoot === undefined) delete process.env.MAKA_SKILL_SOURCES_ROOT;
+      else process.env.MAKA_SKILL_SOURCES_ROOT = previousSourcesRoot;
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('sidebar-row-actions-visible shares the 60-session seed and sets focusActiveRow so the action trigger shows (PR-SIDEBAR-IA-0 Phase 3 P0 fixup v4)', async () => {
     // PR-SIDEBAR-IA-0 Phase 3 P0 fixup v4 (WAWQAQ msg `5dd1c348`,
     // kenji `b3d156e9`): the sidebar-row-actions-visible scenario
     // reuses the 60-session seed so the sidebar is identical to
@@ -583,7 +667,7 @@ describe('visual smoke fixture mode', () => {
     // `VisualSmokeState.focusActiveRow=true`, which the renderer
     // reads to focus the active row's button after mount. That
     // triggers `:focus-within` and reveals the
-    // `.maka-list-row-actions` overlay — the screenshot then proves
+    // `.maka-list-row-menu-trigger` — the screenshot then proves
     // the time meta / unread dot are correctly hidden underneath.
     const workspaceRoot = await mkdtemp(join(tmpdir(), 'maka-visual-smoke-row-actions-'));
     try {
@@ -938,7 +1022,7 @@ describe('visual smoke fixture mode', () => {
     }
   });
 
-  describe('turn-control-history seed (PR109f g, smoke Path 15)', () => {
+  describe('turn-control-history seed', () => {
     it('seeds primary + visible-parent branch + orphan branch sharing one on-disk state', async () => {
       const workspaceRoot = await mkdtemp(join(tmpdir(), 'maka-visual-smoke-turn-control-'));
       try {
@@ -1048,7 +1132,7 @@ describe('visual smoke fixture mode', () => {
       // Locks the @kenji review note: the three scenarios are a single
       // state family that only differs in active-session selection. A
       // future change that diverges their on-disk seed must update
-      // both this gate and the documentation in smoke.md Path 15.
+      // this gate and the corresponding screenshot scenario.
       const expected = new Set([
         'visual-smoke-turn-control-primary',
         'visual-smoke-turn-control-branch-visible',
@@ -1121,6 +1205,47 @@ describe('visual smoke fixture mode', () => {
         readFile(join(workspaceRoot, 'artifacts', 'visual-smoke-artifact', 'artifact-missing-missing.md'), 'utf8'),
         /ENOENT/,
       );
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('browser-empty chrome fixture (#819)', () => {
+  it('seeds a live browser session id so BrowserPanel mounts over the turn chat in empty state', () => {
+    const fixture = resolveVisualSmokeFixture('browser-empty', false);
+    assert.ok(fixture, 'browser-empty should resolve');
+    const state = getVisualSmokeState(fixture);
+    assert.equal(state?.scenario, 'browser-empty');
+    // Active session is the standard turn session so the chat surface
+    // behind the browser panel renders meaningful context.
+    assert.equal(state?.activeSessionId, 'visual-smoke-turn');
+    // liveBrowserSessionIds is the contract the renderer reads to mount
+    // BrowserPanel (app-shell gates on activeId && liveBrowserSessionIds
+    // .includes(activeId)). Seeding the active session makes the panel
+    // mount; with no real WebContentsView in visual-smoke mode,
+    // browser.getState returns null → BrowserPanel renders EMPTY_STATE →
+    // the empty-state chrome (#818 defect surface) is what screenshots.
+    assert.deepEqual(state?.liveBrowserSessionIds, ['visual-smoke-turn']);
+  });
+
+  it('reuses the always-seeded turn session so no browser-specific on-disk seed is needed', async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), 'maka-visual-smoke-browser-empty-'));
+    try {
+      const fixture = resolveVisualSmokeFixture('browser-empty', false);
+      assert.ok(fixture);
+      await seedVisualSmokeFixture({
+        workspaceRoot,
+        fixture,
+        credentialStore: fakeCredentialStore(),
+        now: 1_700_000_000_000,
+      });
+      // The turn session is part of the standard seed (always written),
+      // so the active browser session has a real on-disk chat behind the
+      // panel without a browser-specific seed branch.
+      const file = await readFile(join(workspaceRoot, 'sessions', 'visual-smoke-turn', 'session.jsonl'), 'utf8');
+      const header = JSON.parse(file.split('\n')[0]!) as { id: string };
+      assert.equal(header.id, 'visual-smoke-turn');
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }

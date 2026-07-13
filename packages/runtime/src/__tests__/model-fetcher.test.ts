@@ -53,6 +53,42 @@ describe('fetchProviderModels', () => {
     assert.deepEqual(models, [{ id: 'glm-live' }]);
   });
 
+  test('provider model capability fields are preserved when present', async () => {
+    const server = await startJsonServer((_request, response) => {
+      respondJson(response, 200, {
+        data: [
+          {
+            id: 'kimi-k2.7',
+            supports_image_in: true,
+            supports_reasoning: true,
+            context_length: 262_144,
+          },
+          { id: 'moonshot-v1-8k', supports_image_in: false },
+        ],
+      });
+    });
+
+    const models = await fetchProviderModels({
+      slug: 'moonshot',
+      name: 'Moonshot',
+      providerType: 'moonshot',
+      baseUrl: server.url,
+      defaultModel: 'kimi-k2.7',
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1,
+    }, 'moonshot-secret');
+
+    assert.deepEqual(models, [
+      {
+        id: 'kimi-k2.7',
+        contextWindow: 262_144,
+        capabilities: { vision: true, reasoning: true },
+      },
+      { id: 'moonshot-v1-8k', capabilities: { vision: false } },
+    ]);
+  });
+
   test('provider fetch failures throw generalized errors instead of returning fallback models', async () => {
     const server = await startJsonServer((_request, response) => {
       respondJson(response, 401, {
@@ -181,6 +217,38 @@ describe('fetchProviderModels', () => {
 
     assert.equal(observedPath, '/v1/models');
     assert.deepEqual(models, [{ id: 'claude-haiku-4-5-20251001' }]);
+  });
+
+  test('MiniMax Coding Plan discovers exact model ids with Anthropic API-key authentication', async () => {
+    let observedAuthorization = '';
+    let observedApiKey = '';
+    const server = await startJsonServer((request, response) => {
+      observedAuthorization = request.headers.authorization ?? '';
+      observedApiKey = (request.headers['x-api-key'] as string | undefined) ?? '';
+      assert.equal(request.method, 'GET');
+      assert.equal(request.url, '/anthropic/v1/models');
+      respondJson(response, 200, {
+        data: [
+          { id: 'MiniMax-M3' },
+          { id: 'MiniMax-M2.7-highspeed' },
+        ],
+      });
+    });
+
+    const models = await fetchProviderModels({
+      slug: 'minimax-plan',
+      name: 'MiniMax Coding Plan',
+      providerType: 'minimax-coding-plan',
+      baseUrl: `${server.url}/anthropic`,
+      defaultModel: 'MiniMax-M3',
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1,
+    }, 'minimax-plan-secret');
+
+    assert.equal(observedAuthorization, '');
+    assert.equal(observedApiKey, 'minimax-plan-secret');
+    assert.deepEqual(models, [{ id: 'MiniMax-M3' }, { id: 'MiniMax-M2.7-highspeed' }]);
   });
 
   test('Codex subscription model fetch uses the pinned subscription model list', async () => {

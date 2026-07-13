@@ -11,6 +11,9 @@ describe('createPermissionAwareChildToolFactory', () => {
     const transforms: SandboxTransformRequest[] = [];
     const requests: Array<{ kind: string; cwd: string; path: string }> = [];
     const sandboxManager = {
+      canEnforce(): boolean {
+        return true;
+      },
       transform(request: SandboxTransformRequest): SandboxTransformResult {
         transforms.push(request);
         return {

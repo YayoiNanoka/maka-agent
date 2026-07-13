@@ -2,328 +2,407 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { SessionEvent, StoredMessage } from '@maka/core';
-import { ChatView, type AssistantStreamSlot, type PermissionQueues, type ToolActivityItem } from '@maka/ui';
+import type { SessionEvent } from '@maka/core';
 import {
-  applyAssistantComplete,
-  clearSettledAssistantStreamSlot,
-  drainAssistantStreamSlot,
-  markAssistantStreamSlotDraining,
-  type AssistantStreamSlots,
-} from '@maka/ui/assistant-stream';
-import { createAppShellChatActions } from '../../renderer/app-shell-chat-actions.js';
+  armLiveTurn,
+  ChatView,
+  type LiveTurnProjection,
+  type PermissionQueues,
+} from '@maka/ui';
 import { createAppShellSessionEventHandlers } from '../../renderer/app-shell-session-events.js';
 
-describe('assistant streaming handoff', () => {
-  it('keeps a draining assistant answer as the single visible owner before committed handoff', () => {
-    const finalText = '12345678';
+function createStateSetter<T>(initial: T): {
+  get(): T;
+  set(updater: (current: T) => T): void;
+} {
+  let value = initial;
+  return {
+    get: () => value,
+    set: (updater) => {
+      value = updater(value);
+    },
+  };
+}
+
+function renderLiveTurn(liveTurn: LiveTurnProjection): string {
+  return renderToStaticMarkup(createElement(ChatView, {
+    activeSession: {
+      id: 'session-1',
+      name: 'streaming',
+      lastMessageAt: 1,
+      status: 'active',
+      backend: 'ai-sdk',
+      labels: [],
+      isFlagged: false,
+      isArchived: false,
+      hasUnread: false,
+      llmConnectionSlug: 'conn',
+      model: 'model',
+      permissionMode: 'ask',
+    },
+    messages: [{ type: 'user', id: 'user-1', turnId: liveTurn.turnId, ts: 1, text: 'go' }],
+    liveTurn,
+    onNew() {},
+  } satisfies Parameters<typeof ChatView>[0]));
+}
+
+describe('single live-turn handoff', () => {
+  it('renders one ordered timeline: thinking before its tool and answer', () => {
+    const markup = renderLiveTurn({
+      turnId: 'turn-1',
+      phase: 'streamed',
+      steps: [{
+        stepId: 'assistant-1',
+        thinking: { text: '先检查', truncated: false, complete: true },
+        text: { text: '最终答案', truncated: false, complete: false },
+        tools: [{
+          toolUseId: 'tool-1',
+          toolName: 'Bash',
+          stepId: 'assistant-1',
+          status: 'completed',
+          args: {},
+          result: { kind: 'text', text: 'ok' },
+        }],
+      }],
+    });
+
+    assert.ok(markup.indexOf('先检查') < markup.indexOf('data-trow="group"'));
+    assert.match(markup, /最终答案/);
+    assert.equal((markup.match(/data-turn-id=/g) ?? []).length, 1);
+  });
+
+  it('keeps a completed live answer as the only visible owner until settle', () => {
+    const finalText = 'one visible answer';
     const markup = renderToStaticMarkup(createElement(ChatView, {
       activeSession: {
-        id: 'session-1',
-        name: 'handoff',
-        lastMessageAt: 1,
-        status: 'active',
-        backend: 'ai-sdk',
-        labels: [],
-        isFlagged: false,
-        isArchived: false,
-        hasUnread: false,
-        llmConnectionSlug: 'conn',
-        model: 'model',
-        permissionMode: 'ask',
+        id: 'session-1', name: 'streaming', lastMessageAt: 1, status: 'active', backend: 'ai-sdk',
+        labels: [], isFlagged: false, isArchived: false, hasUnread: false,
+        llmConnectionSlug: 'conn', model: 'model', permissionMode: 'ask',
       },
       messages: [
         { type: 'user', id: 'user-1', turnId: 'turn-1', ts: 1, text: 'go' },
         { type: 'assistant', id: 'assistant-1', turnId: 'turn-1', ts: 2, text: finalText, modelId: 'model' },
       ],
-      streamingText: finalText,
-      streamingComplete: true,
-      streamingMessageId: 'assistant-1',
-      tools: [],
-      mode: 'sessions',
+      liveTurn: {
+        turnId: 'turn-1',
+        phase: 'streamed',
+        terminal: true,
+        steps: [{
+          stepId: 'assistant-1',
+          text: { text: finalText, truncated: false, complete: true },
+          tools: [],
+        }],
+      },
       onNew() {},
     } satisfies Parameters<typeof ChatView>[0]));
 
-    assert.match(markup, /maka-bubble-streaming/, 'draining output should remain in the streaming bubble');
-    assert.equal(
-      countOccurrences(markup, finalText),
-      1,
-      'draining output must not render both the committed message and the streaming bubble',
-    );
+    assert.match(markup, /maka-bubble-streaming/);
+    assert.equal(markup.split(finalText).length - 1, 1);
   });
 
-  it('text_complete replaces the live slot with the final draining text', () => {
-    const current: AssistantStreamSlots = {
-      'session-1': { text: 'part', truncated: true, phase: 'streaming', messageId: 'assistant-1' },
-    };
+  it('keeps an incomplete live answer as the only owner after early persistence', () => {
+    const text = 'persisted before a slow tool finishes';
+    const markup = renderToStaticMarkup(createElement(ChatView, {
+      activeSession: {
+        id: 'session-1', name: 'streaming', lastMessageAt: 1, status: 'running', backend: 'pi-agent',
+        labels: [], isFlagged: false, isArchived: false, hasUnread: false,
+        llmConnectionSlug: 'conn', model: 'model', permissionMode: 'ask',
+      },
+      messages: [
+        { type: 'user', id: 'user-1', turnId: 'turn-1', ts: 1, text: 'go' },
+        { type: 'assistant', id: 'assistant-1', turnId: 'turn-1', ts: 2, text, modelId: 'model' },
+      ],
+      liveTurn: {
+        turnId: 'turn-1',
+        phase: 'streamed',
+        steps: [{
+          stepId: 'assistant-1',
+          text: { text, truncated: false, complete: false },
+          tools: [{ toolUseId: 'tool-1', toolName: 'Bash', stepId: 'assistant-1', status: 'running', args: {} }],
+        }],
+      },
+      onNew() {},
+    } satisfies Parameters<typeof ChatView>[0]));
 
-    const next = drainAssistantStreamSlot(current, 'session-1', applyAssistantComplete('final answer'), 'assistant-1');
-
-    assert.equal(next['session-1']?.text, 'final answer');
-    assert.equal(next['session-1']?.truncated, false);
-    assert.equal(next['session-1']?.phase, 'draining');
-    assert.equal(next['session-1']?.messageId, 'assistant-1');
+    assert.equal(markup.split(text).length - 1, 1);
   });
 
-  it('complete marks the current streamed text as draining without replacing it', () => {
-    const current: AssistantStreamSlots = {
-      'session-1': { text: 'delta accumulated text', truncated: false, phase: 'streaming', messageId: 'assistant-1' },
-    };
-
-    const next = markAssistantStreamSlotDraining(current, 'session-1');
-
-    assert.equal(next['session-1']?.text, 'delta accumulated text');
-    assert.equal(next['session-1']?.phase, 'draining');
-    assert.equal(next['session-1']?.messageId, 'assistant-1');
-  });
-
-  it('renderer treats draining assistant text as settled for live-only chrome', async () => {
-    const { readRendererShellSource } = await import('./renderer-shell-source-helpers.js');
-    const shell = await readRendererShellSource('app-shell.tsx');
-
-    assert.match(
-      shell,
-      /const activeStreamingLive = activeStreaming\.length > 0 && activeStreamingSlot\?\.phase === 'streaming';/,
-    );
-    assert.match(
-      shell,
-      /slot\.text && slot\.phase === 'streaming'/,
-      'sidebar streaming pulse should ignore final text that is only draining into history',
-    );
-    assert.match(shell, /streaming=\{activeStreamingLive\}/);
-    assert.doesNotMatch(shell, /streaming=\{activeStreaming\.length > 0/);
-  });
-
-  it('complete refreshes committed messages even while the streaming bubble drains', async () => {
-    const { readRendererShellSource } = await import('./renderer-shell-source-helpers.js');
-    const events = await readRendererShellSource('app-shell-session-events.ts');
-    const completeCase = events.match(/case 'complete':[\s\S]*?break;/)?.[0] ?? '';
-
-    assert.match(completeCase, /markAssistantStreamSlotDraining\(current, sessionId\)/);
-    assert.doesNotMatch(completeCase, /if \(!deferMessageRefresh\) \{[\s\S]*refreshMessages\(sessionId\)/);
-    assert.match(
-      completeCase,
-      /refreshMessagesOptions = \{ requiredAssistantMessageId: slot\.messageId \};[\s\S]*void refreshSessions\(\);\s*void refreshMessages\(sessionId, refreshMessagesOptions\);/,
-      'complete must refresh committed history for the draining assistant message without making every refresh use settle delays',
-    );
-  });
-
-  it('committed assistant history clears a matching draining slot on the active session', async () => {
-    const { readRendererShellSource } = await import('./renderer-shell-source-helpers.js');
-    const shell = await readRendererShellSource('app-shell.tsx');
-
-    assert.match(
-      shell,
-      /messages\.some\(\(message\) => message\.type === 'assistant' && message\.id === activeStreamingMessageId\)/,
-      'active shell should detect when the committed assistant message has arrived',
-    );
-    assert.match(
-      shell,
-      /settleAssistantStreaming\(activeId, activeStreamingMessageId\)/,
-      'matching committed history should clear the draining streaming slot without requiring a session switch',
-    );
-  });
-
-  it('settled slot reducer clears after refresh failure because the clear no longer depends on refresh success', () => {
-    const settledSlot = { text: 'final answer', truncated: false, phase: 'draining' as const, messageId: 'assistant-1' };
-    const slots: AssistantStreamSlots = {
-      'session-1': settledSlot,
-    };
-
-    const next = clearSettledAssistantStreamSlot(slots, 'session-1', settledSlot, 'assistant-1');
-
-    assert.deepEqual(next['session-1'], { text: '', truncated: false, phase: 'streaming' });
-  });
-
-  it('waits for the committed assistant message when complete fires before storage settles', async () => {
-    const staleMessages: StoredMessage[] = [
-      { type: 'user', id: 'user-1', turnId: 'turn-1', ts: 1, text: 'go' },
-    ];
-    const committedMessages: StoredMessage[] = [
-      ...staleMessages,
-      { type: 'assistant', id: 'assistant-1', turnId: 'turn-1', ts: 2, text: 'final answer', modelId: 'model' },
-    ];
-    const windowFixture = installReadMessagesWindow([staleMessages, committedMessages, committedMessages]);
-    try {
-      const activeIdRef = { current: 'session-1' as string | undefined };
-      let messages: StoredMessage[] = [];
-      let streamingBySession: Record<string, AssistantStreamSlot> = {
-        'session-1': { text: 'final answer', truncated: false, phase: 'streaming', messageId: 'assistant-1' },
-      };
-      const streamingBySessionRef = { current: streamingBySession };
-
-      const chatActions = createAppShellChatActions({
-        activeIdRef,
-        addPendingSessionAction: () => true,
-        captureComposerImportOwner: () => ({ sessionId: 'session-1', navSection: 'sessions' }),
-        clearPendingSessionAction: () => {},
-        isNewChatSendSurfaceActive: () => false,
-        markSessionReadLocally: () => {},
-        messageRetryPendingRef: { current: new Set<string>() },
-        refreshSessions: async () => [],
-        setActiveId: (sessionId) => {
-          activeIdRef.current = sessionId;
-        },
-        setMessageLoadErrorBySession: () => {},
-        setMessageRetryPendingBySession: () => {},
-        setMessages: (next) => {
-          messages = typeof next === 'function' ? next(messages) : next;
-        },
-        setNavSelection: () => {},
-        showModelSetupToast: () => {},
-        toastApi: { error: () => {} },
-        upsertSessionSummary: () => {},
-        validPendingNewChatModel: null,
-        pendingNewChatThinkingLevel: null,
-      });
-
-      const handlers = createAppShellSessionEventHandlers({
-        activeIdRef,
-        refreshMessages: chatActions.refreshMessages,
-        refreshSessions: async () => [],
-        setLiveToolsBySession: createStateSetter<Record<string, ToolActivityItem[]>>({}),
-        setPermissionBySession: createStateSetter<PermissionQueues>({}),
-        setStreamingBySession: (updater) => {
-          streamingBySession = updater(streamingBySession);
-          streamingBySessionRef.current = streamingBySession;
-        },
-        setThinkingBySession: createStateSetter<Record<string, string>>({}),
-        setThinkingTruncatedBySession: createStateSetter<Record<string, boolean>>({}),
-        showModelSetupToast: () => {},
-        streamingBySessionRef,
-        toastApi: { error: () => {} },
-      });
-
-      handlers.handleEvent('session-1', completeEvent());
-      await flushAsyncWork();
-
-      assert.ok(
-        messages.some((message) => message.type === 'assistant' && message.id === 'assistant-1'),
-        'complete refresh should wait for the committed assistant message, not keep the stale read',
-      );
-      assert.equal(windowFixture.readCount(), 2);
-
-      await handlers.settleAssistantStreaming('session-1', 'assistant-1');
-
-      assert.deepEqual(streamingBySession['session-1'], { text: '', truncated: false, phase: 'streaming' });
-    } finally {
-      windowFixture.restore();
-    }
-  });
-
-  it('settled slot reducer keeps refresh-before-clear callers race-safe for a newer stream slot', () => {
-    const settledSlot = { text: 'old final', truncated: false, phase: 'draining' as const, messageId: 'assistant-old' };
-    const slots: AssistantStreamSlots = {
-      'session-1': { text: 'new answer', truncated: false, phase: 'streaming', messageId: 'assistant-new' },
-    };
-
-    const next = clearSettledAssistantStreamSlot(slots, 'session-1', settledSlot, 'assistant-old');
-
-    assert.equal(next, slots);
-  });
-
-  it('settled slot reducer clears a replayed equivalent draining slot after refresh', () => {
-    const settledSlot = { text: 'final answer', truncated: false, phase: 'draining' as const, messageId: 'assistant-1' };
-    const slots: AssistantStreamSlots = {
-      'session-1': { text: 'final answer', truncated: false, phase: 'draining', messageId: 'assistant-1' },
-    };
-
-    const next = clearSettledAssistantStreamSlot(slots, 'session-1', settledSlot, 'assistant-1');
-
-    assert.deepEqual(next['session-1'], { text: '', truncated: false, phase: 'streaming' });
-  });
-
-  it('settled slot reducer does not clear a newer stream slot that replaces the settled one during refresh', () => {
-    const settledSlot = { text: 'old final', truncated: false, phase: 'draining' as const, messageId: 'assistant-old' };
-    const slots: AssistantStreamSlots = {
-      'session-1': { text: 'new answer', truncated: false, phase: 'streaming', messageId: 'assistant-new' },
-    };
-
-    const next = clearSettledAssistantStreamSlot(slots, 'session-1', settledSlot, 'assistant-old');
-
-    assert.deepEqual(next['session-1'], {
-      text: 'new answer',
-      truncated: false,
-      phase: 'streaming',
-      messageId: 'assistant-new',
+  it('reduces events into the projection and settles only after committed history refreshes', async () => {
+    const liveTurns = createStateSetter<Record<string, LiveTurnProjection>>({
+      'session-1': armLiveTurn('turn-1'),
     });
+    const liveTurnBySessionRef = { current: liveTurns.get() };
+    const permissions = createStateSetter<PermissionQueues>({});
+    const refreshes: Array<{ sessionId: string; required?: string }> = [];
+    const setLiveTurnBySession = (updater: (current: Record<string, LiveTurnProjection>) => Record<string, LiveTurnProjection>) => {
+      liveTurns.set(updater);
+      liveTurnBySessionRef.current = liveTurns.get();
+    };
+    const handlers = createAppShellSessionEventHandlers({
+      activeIdRef: { current: 'session-1' },
+      liveTurnBySessionRef,
+      refreshMessages: async (sessionId, options) => {
+        refreshes.push({ sessionId, required: options?.requiredAssistantMessageId });
+        return true;
+      },
+      refreshSessions: async () => [],
+      setLiveTurnBySession,
+      setPermissionBySession: permissions.set,
+      showModelSetupToast: () => {},
+      toastApi: { error: () => {} },
+    });
+
+    const emit = (event: SessionEvent) => handlers.handleEvent('session-1', event);
+    emit({
+      type: 'thinking_delta', id: 'e1', turnId: 'turn-1', messageId: 'assistant-1', ts: 1, text: '思考',
+    });
+    emit({
+      type: 'tool_start', id: 'e2', turnId: 'turn-1', stepId: 'assistant-1', ts: 2,
+      toolUseId: 'tool-1', toolName: 'Bash', args: {},
+    });
+    emit({
+      type: 'text_complete', id: 'e3', turnId: 'turn-1', messageId: 'assistant-1', ts: 3, text: '答案',
+    });
+    emit({ type: 'complete', id: 'e4', turnId: 'turn-1', ts: 4, stopReason: 'end_turn' });
+
+    const terminal = liveTurns.get()['session-1'];
+    assert.equal(terminal?.terminal, true);
+    assert.deepEqual(terminal?.steps[0]?.thinking?.text, '思考');
+    assert.equal(terminal?.steps[0]?.tools[0]?.toolUseId, 'tool-1');
+    assert.equal(terminal?.steps[0]?.text?.text, '答案');
+
+    await handlers.settleAssistantStreaming('session-1', 'assistant-1');
+    assert.equal(liveTurns.get()['session-1'], undefined);
+    assert.ok(refreshes.some((call) => call.required === 'assistant-1'));
   });
 
-  it('settled slot reducer does not clear a replaced draining slot only because the message id still matches', () => {
-    const settledSlot = { text: 'old final', truncated: false, phase: 'draining' as const, messageId: 'assistant-1' };
-    const slots: AssistantStreamSlots = {
-      'session-1': { text: 'replacement final', truncated: false, phase: 'draining', messageId: 'assistant-1' },
-    };
-
-    const next = clearSettledAssistantStreamSlot(slots, 'session-1', settledSlot, 'assistant-1');
-
-    assert.deepEqual(next['session-1'], {
-      text: 'replacement final',
-      truncated: false,
-      phase: 'draining',
-      messageId: 'assistant-1',
+  it('keeps permission handoff in the same live tool and does not end the turn', () => {
+    const liveTurns = createStateSetter<Record<string, LiveTurnProjection>>({
+      'session-1': armLiveTurn('turn-1'),
     });
+    const ref = { current: liveTurns.get() };
+    const permissions = createStateSetter<PermissionQueues>({});
+    const setLiveTurnBySession = (updater: (current: Record<string, LiveTurnProjection>) => Record<string, LiveTurnProjection>) => {
+      liveTurns.set(updater);
+      ref.current = liveTurns.get();
+    };
+    const handlers = createAppShellSessionEventHandlers({
+      activeIdRef: { current: 'session-1' },
+      liveTurnBySessionRef: ref,
+      refreshMessages: async () => true,
+      refreshSessions: async () => [],
+      setLiveTurnBySession,
+      setPermissionBySession: permissions.set,
+      showModelSetupToast: () => {},
+      toastApi: { error: () => {} },
+    });
+
+    handlers.handleEvent('session-1', {
+      type: 'permission_request', id: 'e1', turnId: 'turn-1', ts: 1,
+      requestId: 'request-1', toolUseId: 'tool-1', toolName: 'Bash',
+      category: 'shell_unsafe', reason: 'shell_dangerous', args: {},
+    });
+    handlers.handleEvent('session-1', {
+      type: 'complete', id: 'e2', turnId: 'turn-1', ts: 2, stopReason: 'permission_handoff',
+    });
+
+    assert.equal(liveTurns.get()['session-1']?.terminal, undefined);
+    assert.equal(liveTurns.get()['session-1']?.steps[0]?.tools[0]?.status, 'waiting_permission');
+    assert.equal(permissions.get()['session-1']?.[0]?.requestId, 'request-1');
+  });
+
+  it('hands an aborted projection over only after persisted messages cover it', async () => {
+    const liveTurns = createStateSetter<Record<string, LiveTurnProjection>>({
+      'session-1': {
+        turnId: 'turn-1',
+        phase: 'streamed',
+        steps: [{
+          stepId: 'step-1',
+          tools: [{
+            toolUseId: 'tool-1',
+            toolName: 'Bash',
+            status: 'running',
+            args: {},
+          }],
+        }],
+      },
+    });
+    const ref = { current: liveTurns.get() };
+    const permissions = createStateSetter<PermissionQueues>({});
+    const setLiveTurnBySession = (updater: (current: Record<string, LiveTurnProjection>) => Record<string, LiveTurnProjection>) => {
+      liveTurns.set(updater);
+      ref.current = liveTurns.get();
+    };
+    let resolveRefresh!: (value: boolean) => void;
+    const refresh = new Promise<boolean>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const handlers = createAppShellSessionEventHandlers({
+      activeIdRef: { current: 'session-1' },
+      liveTurnBySessionRef: ref,
+      refreshMessages: async () => refresh,
+      refreshSessions: async () => [],
+      setLiveTurnBySession,
+      setPermissionBySession: permissions.set,
+      showModelSetupToast: () => {},
+      toastApi: { error: () => {} },
+    });
+
+    handlers.handleEvent('session-1', {
+      type: 'abort', id: 'event-1', turnId: 'turn-1', ts: 1, reason: 'user_stop',
+    });
+
+    assert.equal(liveTurns.get()['session-1']?.terminal, true);
+    assert.equal(liveTurns.get()['session-1']?.steps[0]?.tools[0]?.status, 'interrupted');
+
+    resolveRefresh(true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(liveTurns.get()['session-1']?.terminal, true);
+    handlers.reconcilePersistedMessages('session-1', [
+      { type: 'tool_call', id: 'tool-1', turnId: 'turn-1', stepId: 'step-1', ts: 2, toolName: 'Bash', args: {} },
+    ]);
+    assert.equal(liveTurns.get()['session-1'], undefined);
+  });
+
+  it('retains errored live evidence when persistence cannot be confirmed', async () => {
+    const projection: LiveTurnProjection = {
+      turnId: 'turn-1',
+      phase: 'streamed',
+      steps: [{
+        stepId: 'step-1',
+        tools: [{
+          toolUseId: 'tool-1', toolName: 'Bash', status: 'running', args: {},
+          outputChunks: [{
+            seq: 0, stream: 'stdout', text: 'partial output', redacted: false, createdAt: 1,
+          }],
+        }],
+      }],
+    };
+    const liveTurns = createStateSetter<Record<string, LiveTurnProjection>>({ 'session-1': projection });
+    const ref = { current: liveTurns.get() };
+    const permissions = createStateSetter<PermissionQueues>({});
+    const handlers = createAppShellSessionEventHandlers({
+      activeIdRef: { current: 'session-1' },
+      liveTurnBySessionRef: ref,
+      refreshMessages: async () => false,
+      refreshSessions: async () => [],
+      setLiveTurnBySession: (updater) => {
+        liveTurns.set(updater);
+        ref.current = liveTurns.get();
+      },
+      setPermissionBySession: permissions.set,
+      showModelSetupToast: () => {},
+      toastApi: { error: () => {} },
+    });
+
+    handlers.handleEvent('session-1', {
+      type: 'error', id: 'event-1', turnId: 'turn-1', ts: 2,
+      code: 'TOOL_FAILED', reason: 'tool_failed', message: 'failed', recoverable: false,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.equal(liveTurns.get()['session-1']?.terminal, true);
+    assert.equal(liveTurns.get()['session-1']?.steps[0]?.tools[0]?.status, 'interrupted');
+    assert.equal(liveTurns.get()['session-1']?.steps[0]?.tools[0]?.outputChunks?.[0]?.text, 'partial output');
+
+    handlers.reconcilePersistedMessages('session-1', [
+      { type: 'tool_call', id: 'tool-1', turnId: 'turn-1', stepId: 'step-1', ts: 3, toolName: 'Bash', args: {} },
+    ]);
+    assert.equal(liveTurns.get()['session-1']?.steps[0]?.tools[0]?.outputChunks?.[0]?.text, 'partial output');
+    handlers.reconcilePersistedMessages('session-1', [
+      { type: 'tool_call', id: 'tool-1', turnId: 'turn-1', stepId: 'step-1', ts: 3, toolName: 'Bash', args: {} },
+      { type: 'tool_result', id: 'result-1', turnId: 'turn-1', ts: 4, toolUseId: 'tool-1', isError: true, content: { kind: 'text', text: 'partial output' } },
+    ]);
+    assert.equal(liveTurns.get()['session-1'], undefined);
+  });
+
+  it('reconciles persisted stream evidence while the next tool batch is running', () => {
+    const projection: LiveTurnProjection = {
+      turnId: 'turn-1',
+      phase: 'streamed',
+      steps: [
+        {
+          stepId: 'step-1',
+          tools: [{
+            toolUseId: 'old-tool', toolName: 'Bash', status: 'completed', args: {},
+            outputChunks: [{ seq: 0, stream: 'stdout', text: 'old\n', redacted: false, createdAt: 1 }],
+          }],
+          contentOrder: ['tools'],
+        },
+        {
+          stepId: 'step-2',
+          tools: [{ toolUseId: 'new-tool', toolName: 'Bash', status: 'running', args: {} }],
+          contentOrder: ['tools'],
+        },
+      ],
+    };
+    const liveTurns = createStateSetter<Record<string, LiveTurnProjection>>({ 'session-1': projection });
+    const ref = { current: liveTurns.get() };
+    const permissions = createStateSetter<PermissionQueues>({});
+    const handlers = createAppShellSessionEventHandlers({
+      activeIdRef: { current: 'session-1' },
+      liveTurnBySessionRef: ref,
+      refreshMessages: async () => true,
+      refreshSessions: async () => [],
+      setLiveTurnBySession: (updater) => {
+        liveTurns.set(updater);
+        ref.current = liveTurns.get();
+      },
+      setPermissionBySession: permissions.set,
+      showModelSetupToast: () => {},
+      toastApi: { error: () => {} },
+    });
+
+    handlers.reconcilePersistedMessages('session-1', [
+      { type: 'tool_call', id: 'old-tool', turnId: 'turn-1', stepId: 'step-1', ts: 1, toolName: 'Bash', args: {} },
+      { type: 'tool_result', id: 'old-result', turnId: 'turn-1', ts: 2, toolUseId: 'old-tool', isError: false, content: { kind: 'text', text: 'old\n' } },
+    ]);
+
+    assert.deepEqual(liveTurns.get()['session-1']?.steps, [projection.steps[1]]);
+  });
+
+  it('settles a tool-only terminal projection after persisted history refreshes', async () => {
+    const liveTurns = createStateSetter<Record<string, LiveTurnProjection>>({
+      'session-1': {
+        turnId: 'turn-1',
+        phase: 'streamed',
+        steps: [{
+          stepId: 'tool:tool-1',
+          tools: [{ toolUseId: 'tool-1', toolName: 'Bash', status: 'completed', args: {} }],
+        }],
+      },
+    });
+    const ref = { current: liveTurns.get() };
+    const permissions = createStateSetter<PermissionQueues>({});
+    let resolveRefresh!: (value: boolean) => void;
+    const refresh = new Promise<boolean>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const handlers = createAppShellSessionEventHandlers({
+      activeIdRef: { current: 'session-1' },
+      liveTurnBySessionRef: ref,
+      refreshMessages: async () => refresh,
+      refreshSessions: async () => [],
+      setLiveTurnBySession: (updater) => {
+        liveTurns.set(updater);
+        ref.current = liveTurns.get();
+      },
+      setPermissionBySession: permissions.set,
+      showModelSetupToast: () => {},
+      toastApi: { error: () => {} },
+    });
+
+    handlers.handleEvent('session-1', {
+      type: 'complete', id: 'event-1', turnId: 'turn-1', ts: 2, stopReason: 'end_turn',
+    });
+    assert.equal(liveTurns.get()['session-1']?.terminal, true);
+
+    resolveRefresh(true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    handlers.reconcilePersistedMessages('session-1', [
+      { type: 'tool_call', id: 'tool-1', turnId: 'turn-1', stepId: 'tool:tool-1', ts: 2, toolName: 'Bash', args: {} },
+      { type: 'tool_result', id: 'result-1', turnId: 'turn-1', ts: 3, toolUseId: 'tool-1', isError: false, content: { kind: 'text', text: 'ok' } },
+    ]);
+    assert.equal(liveTurns.get()['session-1'], undefined);
   });
 });
-
-function countOccurrences(haystack: string, needle: string): number {
-  return haystack.split(needle).length - 1;
-}
-
-function completeEvent(): SessionEvent {
-  return {
-    type: 'complete',
-    id: 'event-1',
-    turnId: 'turn-1',
-    ts: 3,
-    stopReason: 'end_turn',
-  };
-}
-
-function createStateSetter<T>(initial: T): (updater: (current: T) => T) => void {
-  let current = initial;
-  return (updater) => {
-    current = updater(current);
-  };
-}
-
-function installReadMessagesWindow(reads: StoredMessage[][]): {
-  readCount(): number;
-  restore(): void;
-} {
-  const globalObject = globalThis as unknown as { window?: unknown };
-  const previousWindow = globalObject.window;
-  let readIndex = 0;
-  globalObject.window = {
-    maka: {
-      sessions: {
-        readMessages: async () => {
-          const messages = reads[Math.min(readIndex, reads.length - 1)] ?? [];
-          readIndex += 1;
-          return messages;
-        },
-      },
-    },
-    setTimeout: (callback: () => void) => {
-      queueMicrotask(callback);
-      return 0;
-    },
-  };
-
-  return {
-    readCount: () => readIndex,
-    restore: () => {
-      if (previousWindow === undefined) {
-        delete globalObject.window;
-      } else {
-        globalObject.window = previousWindow;
-      }
-    },
-  };
-}
-
-async function flushAsyncWork(): Promise<void> {
-  for (let index = 0; index < 8; index += 1) {
-    await Promise.resolve();
-  }
-}

@@ -17,16 +17,22 @@ describe('tool and permission args redaction', () => {
     assert.match(rendered, /command/);
   });
 
-  it('routes ToolActivity and PermissionDialog args through formatRedactedJson', async () => {
-    const [toolSource, permissionSource] = await Promise.all([
+  it('routes ToolActivity args through quiet formatters and PermissionDialog through formatRedactedJson', async () => {
+    const [toolSource, permissionSource, quietSource] = await Promise.all([
       readFile(join(process.cwd(), '../../packages/ui/src/tool-activity.tsx'), 'utf8'),
       readFile(join(process.cwd(), '../../packages/ui/src/permission-dialog.tsx'), 'utf8'),
+      readFile(join(process.cwd(), '../../packages/ui/src/tool-activity/builtin-preview.ts'), 'utf8'),
     ]);
     const toolActivity = toolSource.match(/export function ToolActivity[\s\S]*?function ToolOutputStream/)?.[0] ?? '';
     const permissionDialog = permissionSource.match(/export function PermissionDialog[\s\S]*?function renderPermissionSummary/)?.[0] ?? '';
 
-    assert.match(toolActivity, /\{formatRedactedJson\(item\.args\)\}/);
+    // Quiet panel: never stringify args; use formatToolInvocationLine / formatQuietJsonValue.
+    assert.match(toolActivity, /formatToolInvocationLine\(item\)/);
+    assert.match(toolActivity, /formatQuietJsonValue/);
     assert.doesNotMatch(toolActivity, /JSON\.stringify\(item\.args/);
+    assert.doesNotMatch(toolActivity, /formatRedactedJson\(item\.args\)/);
+    assert.match(quietSource, /redactSecrets\(key\)/);
+    assert.match(quietSource, /push\(redactSecrets\(line\)\)|lines\.push\(redactSecrets\(line\)\)/);
     assert.match(permissionDialog, /\{formatRedactedJson\([\s\S]*?props\.request\.additionalPermissions[\s\S]*?props\.request\.args,[\s\S]*?\)\}/);
     assert.doesNotMatch(permissionDialog, /JSON\.stringify\(props\.request\.(?:args|additionalPermissions)/);
   });

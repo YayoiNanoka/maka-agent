@@ -3,8 +3,6 @@
  * shape the UI renders. Lives in `runtime` (not `storage`) because correlation
  * is a semantic operation, not a disk concern.
  *
- * Source of truth: V0.1_TECH_SPEC.md §5.2 orphan policy + §7 view models.
- *
  * Runtime/UI materializer for rebuilding chat and tool activity state from
  * append-only stored messages.
  */
@@ -18,8 +16,11 @@ import type {
   PermissionDecisionMessage,
   TokenUsageMessage,
   SystemNoteMessage,
+  ToolActivityKind,
   ToolResultContent,
 } from '@maka/core';
+import { projectToolActivityArgs } from '@maka/core';
+import { toolResultActivityStatus } from '@maka/core';
 
 // ============================================================================
 // View-model types (mirror packages/ui/src exports, lifted here for reuse)
@@ -28,6 +29,7 @@ import type {
 export interface ToolActivityItem {
   toolUseId: string;
   toolName: string;
+  activityKind?: ToolActivityKind;
   displayName?: string;
   intent?: string;
   status:
@@ -63,8 +65,8 @@ export interface SessionViewModel {
  * Convert StoredMessage[] (raw JSONL) into a ChatItem[] for rendering.
  *
  * Orphan ToolCallMessage (no matching ToolResultMessage by toolUseId) is
- * rendered as ToolActivityItem.status === 'interrupted' (V0.1_TECH_SPEC §5.2,
- * §7). Storage layer never synthesizes a fake ToolResultMessage — that's our
+ * rendered as ToolActivityItem.status === 'interrupted'. Storage never
+ * synthesizes a fake ToolResultMessage — that's our
  * job here.
  */
 export function materializeSession(messages: readonly StoredMessage[]): SessionViewModel {
@@ -138,7 +140,8 @@ export function materializeSession(messages: readonly StoredMessage[]): SessionV
 /**
  * Build a ToolActivityItem from a (ToolCallMessage, ToolResultMessage?) pair.
  *
- * - Missing result + isError-false-not-applicable → status 'interrupted' (orphan from crash)
+ * - Missing result → status 'interrupted' (orphan from crash)
+ * - Cancelled shell / aborted explore → 'interrupted' (not failure)
  * - Result with isError === true → 'errored' (includes permission deny/block)
  * - Result with isError === false → 'completed'
  */
@@ -150,20 +153,22 @@ function toolActivityFromPair(
     return {
       toolUseId: call.id,
       toolName: call.toolName,
+      ...(call.activityKind !== undefined ? { activityKind: call.activityKind } : {}),
       ...(call.displayName !== undefined ? { displayName: call.displayName } : {}),
       ...(call.intent !== undefined ? { intent: call.intent } : {}),
       status: 'interrupted',
-      args: call.args,
+      args: projectToolActivityArgs(call.toolName, call.args),
       ts: call.ts,
     };
   }
   return {
     toolUseId: call.id,
     toolName: call.toolName,
+    ...(call.activityKind !== undefined ? { activityKind: call.activityKind } : {}),
     ...(call.displayName !== undefined ? { displayName: call.displayName } : {}),
     ...(call.intent !== undefined ? { intent: call.intent } : {}),
-    status: result.isError ? 'errored' : 'completed',
-    args: call.args,
+    status: toolResultActivityStatus(result.isError, result.content),
+    args: projectToolActivityArgs(call.toolName, call.args),
     result: result.content,
     isError: result.isError,
     ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
@@ -198,10 +203,11 @@ export function applyAppendedMessage(
       const item: ToolActivityItem = {
         toolUseId: message.id,
         toolName: message.toolName,
+        ...(message.activityKind !== undefined ? { activityKind: message.activityKind } : {}),
         ...(message.displayName !== undefined ? { displayName: message.displayName } : {}),
         ...(message.intent !== undefined ? { intent: message.intent } : {}),
         status: 'pending',
-        args: message.args,
+        args: projectToolActivityArgs(message.toolName, message.args),
         ts: message.ts,
       };
       return { items: [...items, { kind: 'tool', item }] };
@@ -215,7 +221,7 @@ export function applyAppendedMessage(
           ...it,
           item: {
             ...it.item,
-            status: message.isError ? 'errored' as const : 'completed' as const,
+            status: toolResultActivityStatus(message.isError, message.content),
             result: message.content,
             isError: message.isError,
             ...(message.durationMs !== undefined ? { durationMs: message.durationMs } : {}),

@@ -586,11 +586,11 @@ describe('OpenGatewayService', () => {
     const status = await service.sync(createGatewaySettings({ enabled: true, port: 0, token: 'dev-token' }).openGateway);
     assert.ok(status.baseUrl);
 
-    const controllers: AbortController[] = [];
+    const streams: Array<{ controller: AbortController; response: Response }> = [];
     try {
       for (let index = 0; index < 3; index += 1) {
         const opened = await openEventStream(status.baseUrl, 'same-session');
-        controllers.push(opened.controller);
+        streams.push(opened);
         assert.equal(opened.response.status, 200);
       }
       assert.equal(service.getStatus().activeEventStreams, 3);
@@ -603,7 +603,7 @@ describe('OpenGatewayService', () => {
 
       for (let index = 0; index < 7; index += 1) {
         const opened = await openEventStream(status.baseUrl, `other-${index}`);
-        controllers.push(opened.controller);
+        streams.push(opened);
         assert.equal(opened.response.status, 200);
       }
       assert.equal(service.getStatus().activeEventStreams, 10);
@@ -614,7 +614,7 @@ describe('OpenGatewayService', () => {
       assert.doesNotMatch(globalRejected.headers.get('content-type') ?? '', /^text\/event-stream/);
       assert.equal(service.getStatus().activeEventStreams, 10);
     } finally {
-      for (const controller of controllers) controller.abort();
+      for (const { controller } of streams) controller.abort();
       await waitFor(() => service.getStatus().activeEventStreams === 0);
     }
   });

@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import type { RuntimeEvent } from '@maka/core';
+import type { ThinkingLevel } from '@maka/core';
 import type { ContextBudgetPolicy, InvocationResult } from '@maka/runtime';
 
 export const HARBOR_CELL_OUTPUT_SCHEMA_VERSION = 1;
@@ -55,6 +57,14 @@ export interface HarborCellRuntimeRefs {
   turnId: string;
 }
 
+export interface HarborCellExecutionIdentity {
+  llmConnectionSlug: string;
+  model: string;
+  reasoningEffort?: ThinkingLevel;
+  systemPromptHash: string;
+  pricingProfile: string;
+}
+
 export interface HarborCellContinuationSummary {
   enabled: boolean;
   maxTurns: number;
@@ -91,6 +101,7 @@ export interface HarborCellOutput {
   errorClass?: string;
   runtimeEventsPath: string;
   promptHash?: string;
+  executionIdentity?: HarborCellExecutionIdentity;
   tokenSummary: HarborCellTokenSummary;
   contextBudgetPolicy?: HarborCellContextBudgetPolicySnapshot;
   contextBudgetSummary?: HarborCellContextBudgetSummary;
@@ -107,6 +118,7 @@ export interface HarborCellOutput {
 export function buildHarborCellOutput(input: {
   invocation: InvocationResult;
   runtimeEventsPath: string;
+  executionIdentity?: HarborCellExecutionIdentity;
   contextBudgetPolicy?: HarborCellContextBudgetPolicySnapshot;
   continuationSummary?: HarborCellContinuationSummary;
   taskToolSummaryEnabled?: boolean;
@@ -118,6 +130,7 @@ export function buildHarborCellOutput(input: {
     ...(invocation.failure?.class ? { errorClass: invocation.failure.class } : {}),
     runtimeEventsPath: input.runtimeEventsPath,
     ...promptHashField(invocation.events),
+    ...(input.executionIdentity ? { executionIdentity: input.executionIdentity } : {}),
     tokenSummary: summarizeCellTokens(invocation.events),
     ...(input.contextBudgetPolicy ? { contextBudgetPolicy: input.contextBudgetPolicy } : {}),
     ...contextBudgetSummaryField(invocation.events),
@@ -137,6 +150,10 @@ export function buildHarborCellOutput(input: {
   };
 }
 
+export function hashHarborSystemPrompt(systemPrompt: string): string {
+  return `sha256:${createHash('sha256').update(JSON.stringify(systemPrompt)).digest('hex')}`;
+}
+
 export function validateHarborCellOutput(value: unknown): HarborCellOutput {
   if (!isRecord(value)) {
     throw new Error('Harbor cell output must be a JSON object');
@@ -149,6 +166,9 @@ export function validateHarborCellOutput(value: unknown): HarborCellOutput {
   const errorClass = 'errorClass' in value ? requireOptionalString(value.errorClass, 'errorClass') : undefined;
   const runtimeEventsPath = requireString(value.runtimeEventsPath, 'runtimeEventsPath');
   const promptHash = 'promptHash' in value ? requireOptionalString(value.promptHash, 'promptHash') : undefined;
+  const executionIdentity = 'executionIdentity' in value
+    ? validateHarborCellExecutionIdentity(value.executionIdentity)
+    : undefined;
   const tokenSummary = validateTokenSummary(value.tokenSummary);
   const contextBudgetPolicy = 'contextBudgetPolicy' in value
     ? validateContextBudgetPolicySnapshot(value.contextBudgetPolicy)
@@ -174,6 +194,7 @@ export function validateHarborCellOutput(value: unknown): HarborCellOutput {
     ...(errorClass !== undefined ? { errorClass } : {}),
     runtimeEventsPath,
     ...(promptHash !== undefined ? { promptHash } : {}),
+    ...(executionIdentity !== undefined ? { executionIdentity } : {}),
     tokenSummary,
     ...(contextBudgetPolicy !== undefined ? { contextBudgetPolicy } : {}),
     ...(contextBudgetSummary !== undefined ? { contextBudgetSummary } : {}),
@@ -187,6 +208,26 @@ export function validateHarborCellOutput(value: unknown): HarborCellOutput {
     runtimeRefs,
   };
   return output;
+}
+
+export function validateHarborCellExecutionIdentity(value: unknown): HarborCellExecutionIdentity {
+  if (!isRecord(value)) throw new Error('executionIdentity must be a JSON object');
+  return {
+    llmConnectionSlug: requireString(value.llmConnectionSlug, 'executionIdentity.llmConnectionSlug'),
+    model: requireString(value.model, 'executionIdentity.model'),
+    ...('reasoningEffort' in value
+      ? { reasoningEffort: requireThinkingLevel(value.reasoningEffort, 'executionIdentity.reasoningEffort') }
+      : {}),
+    systemPromptHash: requireString(value.systemPromptHash, 'executionIdentity.systemPromptHash'),
+    pricingProfile: requireString(value.pricingProfile, 'executionIdentity.pricingProfile'),
+  };
+}
+
+function requireThinkingLevel(value: unknown, path: string): ThinkingLevel {
+  const levels: readonly string[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  const parsed = requireString(value, path);
+  if (!levels.includes(parsed)) throw new Error(`${path} must be a supported reasoning effort`);
+  return parsed as ThinkingLevel;
 }
 
 export function summarizeCellTaskTools(events: readonly RuntimeEvent[]): HarborCellTaskToolSummary {

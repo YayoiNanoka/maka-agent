@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { tokenSummary } from './helpers/cell-output-fixtures.js';
-import type { HarborCellOutput } from '../cell-output.js';
+import type { HarborCellExecutionIdentity, HarborCellOutput } from '../cell-output.js';
 import { FixedPromptBudgetExhaustedError, type HarborTaskRunInput } from '../fixed-prompt-controller.js';
 import {
   buildHarborJobConfig,
@@ -50,6 +50,7 @@ function runInput(overrides: Partial<HarborTaskRunInput> = {}): HarborTaskRunInp
 interface FakeOptions {
   reward?: string;
   cell?: HarborCellOutput | null;
+  executionIdentity?: HarborCellExecutionIdentity;
   exitCode?: number;
   events?: string;
   verifierStdout?: string;
@@ -77,6 +78,13 @@ function fakeRunner(opts: FakeOptions): HarborProcessRunner {
     }
     if (opts.cell !== null) {
       await writeFile(join(trialDir, 'agent', 'maka-cell-output.json'), JSON.stringify(opts.cell ?? cellOutput()), 'utf8');
+    }
+    if (opts.executionIdentity) {
+      await writeFile(
+        join(trialDir, 'agent', 'maka-cell-execution-identity.json'),
+        JSON.stringify(opts.executionIdentity),
+        'utf8',
+      );
     }
     if (opts.trialResult) {
       await writeFile(join(trialDir, 'result.json'), JSON.stringify(opts.trialResult), 'utf8');
@@ -216,6 +224,66 @@ describe('createHarborTaskRunner', () => {
     });
   });
 
+  test('gives OpenCode an ephemeral host proxy without exposing the provider key file', async () => {
+    await withRun(async ({ jobsDir, repo, keyFile }) => {
+      const captured: { config?: Record<string, unknown> } = {};
+      let harborEnv: Record<string, string> | undefined;
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        agent: 'opencode',
+        agentVersion: '1.17.18',
+        model: 'zai-coding-plan/glm-5.2',
+        provider: 'zai-coding-plan',
+        reasoningEffort: 'max',
+        apiKeyFile: keyFile,
+        agentEnv: { ZAI_BASE_URL: 'https://api.z.ai/api/coding/paas/v4' },
+        runHarbor: async (request) => {
+          harborEnv = request.env;
+          return fakeRunner({ reward: '1\n', captured })(request);
+        },
+      });
+
+      await runner(runInput());
+
+      assert.equal(harborEnv?.ZAI_API_KEY_FILE, undefined);
+      assert.match(harborEnv?.MAKA_OPENCODE_PROVIDER_PROXY_URL ?? '', /^http:\/\/host\.docker\.internal:\d+$/);
+      assert.match(harborEnv?.MAKA_OPENCODE_PROVIDER_PROXY_TOKEN ?? '', /^[a-f0-9]{64}$/);
+      assert.notEqual(harborEnv?.MAKA_OPENCODE_PROVIDER_PROXY_TOKEN, keyFile);
+      assert.doesNotMatch(JSON.stringify(harborEnv), /deepseek-key|sk-secret/);
+      assert.doesNotMatch(JSON.stringify(captured.config), /ZAI_API_KEY|deepseek-key|sk-secret/);
+      const closedProxyUrl = harborEnv?.MAKA_OPENCODE_PROVIDER_PROXY_URL?.replace('host.docker.internal', '127.0.0.1');
+      assert.ok(closedProxyUrl);
+      await assert.rejects(fetch(closedProxyUrl));
+    });
+  });
+
+  test('routes SiliconFlow key files and base URLs through the host-side cell', async () => {
+    await withRun(async ({ jobsDir, repo, keyFile }) => {
+      let harborEnv: Record<string, string> | undefined;
+      const captured: { config?: Record<string, unknown> } = {};
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        model: 'siliconflow/moonshotai/Kimi-K2.6',
+        provider: 'siliconflow',
+        apiKeyFile: keyFile,
+        agentEnv: { SILICONFLOW_BASE_URL: 'https://api.siliconflow.cn/v1' },
+        runHarbor: async (request) => {
+          harborEnv = request.env;
+          return fakeRunner({ reward: '1\n', captured })(request);
+        },
+      });
+
+      await runner(runInput());
+
+      assert.equal(harborEnv?.MAKA_HOST_API_KEY_ENV_NAME, 'SILICONFLOW_API_KEY');
+      assert.equal(harborEnv?.MAKA_HOST_BASE_URL, 'https://api.siliconflow.cn/v1');
+      const agent = (captured.config?.agents as Array<{ env: Record<string, string> }>)[0]!;
+      assert.equal(agent.env.SILICONFLOW_BASE_URL, undefined);
+    });
+  });
+
   test('rejects provider secrets in agentEnv even when host-side key file is configured', async () => {
     await withRun(async ({ jobsDir, repo, keyFile }) => {
       const runner = createHarborTaskRunner({
@@ -341,13 +409,21 @@ describe('createHarborTaskRunner', () => {
 
   test('treats Harbor agent timeout with verifier reward as budget exhausted', async () => {
     await withRun(async ({ jobsDir, repo }) => {
+      const timedCell = cellOutput({
+        executionIdentity: {
+          llmConnectionSlug: 'deepseek',
+          model: 'deepseek-v4-flash',
+          systemPromptHash: 'sha256:abc',
+          pricingProfile: 'test-profile',
+        },
+      });
       const runner = createHarborTaskRunner({
         makaRepoPath: repo,
         jobsDir,
         model: 'deepseek/deepseek-v4-flash',
         runHarbor: fakeRunner({
           reward: '0\n',
-          cell: cellOutput(),
+          cell: timedCell,
           trialResult: {
             exception_info: {
               exception_type: 'AgentTimeoutError',
@@ -356,7 +432,48 @@ describe('createHarborTaskRunner', () => {
           },
         }),
       });
-      await assert.rejects(runner(runInput()), FixedPromptBudgetExhaustedError);
+      await assert.rejects(runner(runInput()), (error: unknown) => {
+        assert.ok(error instanceof FixedPromptBudgetExhaustedError);
+        assert.deepEqual(error.artifactRefs?.tokenSummary, timedCell.tokenSummary);
+        assert.deepEqual(error.artifactRefs?.cellOutput?.executionIdentity, timedCell.executionIdentity);
+        return true;
+      });
+    });
+  });
+
+  test('recovers early identity from an agent-timeout trial without cell output', async () => {
+    await withRun(async ({ jobsDir, repo }) => {
+      const executionIdentity = {
+        llmConnectionSlug: 'deepseek',
+        model: 'deepseek-v4-flash',
+        systemPromptHash: 'sha256:abc',
+        pricingProfile: 'test-profile',
+      };
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        model: 'deepseek/deepseek-v4-flash',
+        runHarbor: fakeRunner({
+          reward: '0\n',
+          cell: null,
+          executionIdentity,
+          trialResult: {
+            exception_info: {
+              exception_type: 'AgentTimeoutError',
+              exception_message: 'Agent execution timed out after 60.0 seconds',
+            },
+          },
+        }),
+      });
+
+      await assert.rejects(runner(runInput()), (error: unknown) => {
+        assert.ok(error instanceof FixedPromptBudgetExhaustedError);
+        assert.deepEqual(
+          (error.artifactRefs as { executionIdentity?: HarborCellExecutionIdentity } | undefined)?.executionIdentity,
+          executionIdentity,
+        );
+        return true;
+      });
     });
   });
 
@@ -479,6 +596,50 @@ describe('createHarborTaskRunner', () => {
 });
 
 describe('buildHarborJobConfig', () => {
+  test('pins the OpenCode adapter and max model variant without serializing credentials', () => {
+    const config = buildHarborJobConfig(runInput(), {
+      makaRepoPath: '/repo',
+      jobsDir: '/jobs/x',
+      jobName: 'trial',
+      agent: 'opencode',
+      model: 'zai-coding-plan/glm-5.2',
+      provider: 'zai-coding-plan',
+      reasoningEffort: 'max',
+      agentVersion: '1.17.18',
+      pricing: { inputUsdPer1M: 1.4, cacheReadUsdPer1M: 0.26, outputUsdPer1M: 4.4 },
+    });
+    const agent = (config.agents as Array<Record<string, unknown>>)[0]!;
+    const env = agent.env as Record<string, string>;
+
+    assert.equal(agent.name, 'opencode');
+    assert.equal(agent.import_path, 'opencode_agent:MakaOpenCodeAgent');
+    assert.equal(agent.model_name, 'zai-coding-plan/glm-5.2');
+    assert.deepEqual(agent.kwargs, { version: '1.17.18' });
+    assert.equal(env.MAKA_OPENCODE_VARIANT, 'max');
+    assert.equal(env.MAKA_LLM_CONNECTION_SLUG, 'zai-coding-plan');
+    assert.equal(env.MAKA_REASONING_EFFORT, 'max');
+    assert.equal(env.ZAI_API_KEY, undefined);
+    assert.equal(env.ZAI_API_KEY_FILE, undefined);
+  });
+
+  test('rejects experiment identity overrides in extra agent env', () => {
+    assert.throws(
+      () => buildHarborJobConfig(runInput(), {
+        makaRepoPath: '/repo',
+        jobsDir: '/jobs/x',
+        jobName: 'trial',
+        model: 'deepseek/deepseek-v4-flash',
+        pricing: { inputUsdPer1M: 0.145, outputUsdPer1M: 0.29 },
+        agentEnv: {
+          MAKA_MODEL: 'deepseek-v4-pro',
+          MAKA_SYSTEM_PROMPT: 'wrong prompt',
+          MAKA_TRIAL_INPUT_USD_PER_1M: '9',
+        },
+      }),
+      /agentEnv must not override experiment identity: MAKA_MODEL, MAKA_SYSTEM_PROMPT, MAKA_TRIAL_INPUT_USD_PER_1M/,
+    );
+  });
+
   test('rejects provider secrets in extra agent env at config-build time', () => {
     assert.throws(
       () => buildHarborJobConfig(runInput(), {
@@ -514,6 +675,25 @@ describe('buildHarborJobConfig', () => {
     });
     const agent = (config.agents as Array<{ max_timeout_sec?: number }>)[0]!;
     assert.equal(agent.max_timeout_sec, 1800);
+  });
+
+  test('uses each Terminal-Bench task native agent timeout when no override is set', () => {
+    const config = buildHarborJobConfig(runInput({
+      task: {
+        id: 'task-1',
+        path: '/tasks/task-1',
+        metadata: { agentTimeoutSec: 1234 },
+      },
+    }), {
+      makaRepoPath: '/repo',
+      jobsDir: '/jobs/x',
+      jobName: 'trial',
+      model: 'zai-coding-plan/glm-5.2',
+      provider: 'zai-coding-plan',
+    });
+    const agent = (config.agents as Array<{ env: Record<string, string>; max_timeout_sec?: number }>)[0]!;
+    assert.equal(agent.env.MAKA_CELL_TIMEOUT_SEC, '1234');
+    assert.equal(agent.max_timeout_sec, 1234);
   });
 
   test('merges per-attempt agent env into the Harbor agent config', () => {
@@ -567,6 +747,30 @@ describe('createHarborTaskRunner timeout', () => {
     });
   });
 
+  test('derives the outer Harbor timeout from task-native agent and verifier limits', async () => {
+    await withRun(async ({ jobsDir, repo }) => {
+      let seenTimeout: number | undefined;
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        model: 'zai-coding-plan/glm-5.2',
+        provider: 'zai-coding-plan',
+        runHarbor: async (request) => {
+          seenTimeout = request.timeoutMs;
+          return fakeRunner({ reward: '1\n' })(request);
+        },
+      });
+      await runner(runInput({
+        task: {
+          id: 'task-1',
+          path: '/tasks/task-1',
+          metadata: { agentTimeoutSec: 7_200, verifierTimeoutSec: 600 },
+        },
+      }));
+      assert.equal(seenTimeout, (7_200 + 600 + 15 * 60) * 1_000);
+    });
+  });
+
   test('puts the adapter dir on PYTHONPATH so harbor can import maka_agent', async () => {
     await withRun(async ({ jobsDir, repo }) => {
       let seenEnv: Record<string, string> | undefined;
@@ -602,7 +806,7 @@ describe('createHarborTaskRunner timeout', () => {
     });
   });
 
-  test('throws a budget exhaustion error when the harbor process times out', async () => {
+  test('classifies the outer Harbor watchdog as infrastructure failure', async () => {
     await withRun(async ({ jobsDir, repo }) => {
       const runner = createHarborTaskRunner({
         makaRepoPath: repo,
@@ -617,7 +821,54 @@ describe('createHarborTaskRunner timeout', () => {
           signal: 'SIGKILL',
         }),
       });
-      await assert.rejects(runner(runInput()), FixedPromptBudgetExhaustedError);
+      await assert.rejects(runner(runInput()), HarborInfraError);
+    });
+  });
+
+  test('keeps an outer watchdog timeout infrastructural after cell output exists', async () => {
+    await withRun(async ({ jobsDir, repo }) => {
+      const writeArtifacts = fakeRunner({ cell: cellOutput({
+        executionIdentity: {
+          llmConnectionSlug: 'deepseek',
+          model: 'deepseek-v4-flash',
+          systemPromptHash: 'sha256:abc',
+          pricingProfile: 'test-profile',
+        },
+      }) });
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        model: 'deepseek/deepseek-v4-flash',
+        runHarbor: async (request) => {
+          await writeArtifacts(request);
+          return { exitCode: 1, stdout: '', stderr: 'timed out', timedOut: true, signal: 'SIGKILL' };
+        },
+      });
+
+      await assert.rejects(runner(runInput()), HarborInfraError);
+    });
+  });
+
+  test('keeps an outer watchdog timeout infrastructural after early identity exists', async () => {
+    await withRun(async ({ jobsDir, repo }) => {
+      const executionIdentity = {
+        llmConnectionSlug: 'deepseek',
+        model: 'deepseek-v4-flash',
+        systemPromptHash: 'sha256:abc',
+        pricingProfile: 'test-profile',
+      };
+      const writeArtifacts = fakeRunner({ cell: null, executionIdentity });
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        model: 'deepseek/deepseek-v4-flash',
+        runHarbor: async (request) => {
+          await writeArtifacts(request);
+          return { exitCode: 1, stdout: '', stderr: 'timed out', timedOut: true, signal: 'SIGKILL' };
+        },
+      });
+
+      await assert.rejects(runner(runInput()), HarborInfraError);
     });
   });
 });

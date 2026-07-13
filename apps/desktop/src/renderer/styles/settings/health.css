@@ -115,71 +115,6 @@
     gap: var(--space-2-5);
   }
 
-.settingsHealthSummaryTile {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--space-1);
-    padding: var(--space-3) var(--space-3);
-    border: var(--border-width-hairline) solid var(--border);
-    border-radius: var(--radius-surface);
-    background: var(--background);
-  }
-
-.settingsHealthSummaryTile strong {
-    font-variant-numeric: tabular-nums;
-    font-size: 1.4em;
-    font-weight: var(--font-weight-semibold);
-    line-height: var(--leading-tight);
-  }
-
-.settingsHealthSummaryTile small {
-    font-size: var(--font-size-caption);
-    letter-spacing: var(--tracking-wider);
-    text-transform: uppercase;
-    color: var(--muted-foreground);
-  }
-
-.settingsHealthSummaryTile[data-empty="true"] {
-    opacity: var(--opacity-disabled);
-  }
-
-.settingsHealthSummaryTile[data-tone="success"] {
-    border-color: oklch(from var(--success) l c h / 0.24);
-  }
-
-.settingsHealthSummaryTile[data-tone="success"] strong {
-    color: var(--success-text);
-  }
-
-.settingsHealthSummaryTile[data-tone="info"] {
-    border-color: oklch(from var(--info) l c h / 0.24);
-  }
-
-.settingsHealthSummaryTile[data-tone="info"] strong {
-    color: var(--info-text);
-  }
-
-.settingsHealthSummaryTile[data-tone="warning"] {
-    border-color: oklch(from var(--warning, var(--info)) l c h / 0.28);
-  }
-
-.settingsHealthSummaryTile[data-tone="warning"] strong {
-    color: var(--warning-text, var(--info-text));
-  }
-
-.settingsHealthSummaryTile[data-tone="destructive"] {
-    border-color: oklch(from var(--destructive) l c h / 0.30);
-  }
-
-.settingsHealthSummaryTile[data-tone="destructive"] strong {
-    color: var(--destructive-text);
-  }
-
-.settingsHealthSummaryTile[data-tone="neutral"] strong {
-    color: var(--foreground-secondary);
-  }
-
 .settingsHealthBlockers {
     display: flex;
     flex-wrap: wrap;
@@ -223,9 +158,7 @@
     transition: border-color var(--duration-base) var(--ease-out-strong);
   }
 
-.settingsHealthSignalRow[data-status="ok"] {
-    border-color: oklch(from var(--success) l c h / 0.24);
-  }
+/* data-status="ok" keeps the default hairline — ok is the expected state. */
 
 .settingsHealthSignalRow[data-status="warning"] {
     border-color: oklch(from var(--warning, var(--info)) l c h / 0.28);

@@ -24,7 +24,12 @@ describe('session row actions fail soft', () => {
     const main = await readRendererShellCombinedSource();
     const sessionListBlock = main.match(/<SessionListPanel[\s\S]*?\/>/)?.[0] ?? '';
 
-    assert.match(main, /const pendingSessionRowActionsRef = useRef<Set<string>>\(new Set\(\)\);/);
+    assert.match(main, /const sessionRowActionRegistry = useKeyedPendingRegistry\(\);/);
+    assert.match(
+      main,
+      /pendingSessionRowActionsRef: sessionRowActionRegistry\.keysRef/,
+      'the row-action dedup Set the sidebar handlers guard on must be backed by the shared keyed-pending registry',
+    );
     assert.match(main, /const sessionPrefix = `\$\{sessionId\}:`;/);
     assert.match(main, /Array\.from\(pendingSessionRowActionsRef\.current\)\.some\(\(key\) => key\.startsWith\(sessionPrefix\)\)/);
     assert.match(main, /pendingSessionRowActionsRef\.current\.add\(key\);[\s\S]*catch \(error\) \{[\s\S]*toastApi\.error\(errorTitle, generalizedErrorMessageChinese\(error, '会话操作失败，请稍后重试。'\)\)[\s\S]*finally \{[\s\S]*pendingSessionRowActionsRef\.current\.delete\(key\);/);
@@ -40,19 +45,18 @@ describe('session row actions fail soft', () => {
 
   it('cleans active session renderer state consistently after archive or delete', async () => {
     const main = await readRendererShellCombinedSource();
-    const cleanupBlock = main.slice(
-      main.indexOf('function clearSessionRendererState'),
-      main.indexOf('// PR109e: per-turn auxiliary view-model'),
-    );
+    const cleanupBlock = main.match(/function clearSessionRendererState\(sessionId: string\): void \{[\s\S]*?\n  \}/)?.[0] ?? '';
+    const ownedCleanupBlock = main.match(/function clearOwnedSessionState\(sessionId: string\): void \{[\s\S]*?\n  \}/)?.[0] ?? '';
 
-    assert.match(cleanupBlock, /messageRetryPendingRef\.current\.delete\(sessionId\);/);
-    assert.match(cleanupBlock, /stopPendingRef\.current\.delete\(sessionId\);/);
-    assert.match(cleanupBlock, /clearPendingTurnActionsForSession\(sessionId\);/);
-    assert.match(cleanupBlock, /pendingPermissionModeChangesRef\.current\.delete\(sessionId\);/);
-    assert.match(cleanupBlock, /pendingSessionModelChangesRef\.current\.delete\(sessionId\);/);
+    assert.match(cleanupBlock, /clearOwnedSessionState\(sessionId\);/);
+    assert.match(ownedCleanupBlock, /messageRetryPendingRef\.current\.delete\(sessionId\);/);
+    assert.match(ownedCleanupBlock, /stopPendingRef\.current\.delete\(sessionId\);/);
+    assert.match(cleanupBlock, /turnActionRegistry\.clearForSession\(sessionId\);/);
+    assert.match(cleanupBlock, /permissionModeChangeRegistry\.keysRef\.current\.delete\(sessionId\);/);
+    assert.match(cleanupBlock, /sessionModelChangeRegistry\.keysRef\.current\.delete\(sessionId\);/);
     assert.match(
-      cleanupBlock,
-      /clearSessionUiState\(sessionId\);/,
+      ownedCleanupBlock,
+      /sessionUi\.clearSessionUiState\(sessionId\);/,
       'archive/delete cleanup must use the centralized per-session UI state cleanup',
     );
 
@@ -73,7 +77,7 @@ describe('session row actions fail soft', () => {
     );
   });
 
-  it('renders visible busy state while a sidebar row action is pending', async () => {
+  it('keeps sidebar menu actions single-flight while a row action is pending', async () => {
     const ui = await readRenderedSessionHistorySource();
 
     assert.match(ui, /type SessionRowActionId = 'flag' \| 'archive' \| 'rename' \| 'delete';/);
@@ -96,16 +100,12 @@ describe('session row actions fail soft', () => {
       /pendingActionRef\.current = null;[\s\S]*if \(rowMountedRef\.current\) setPendingAction\(null\);/,
       'SessionRow action cleanup must not write pending state after the row unmounts',
     );
-    assert.match(ui, /disabled=\{actionBusy\}/);
-    assert.match(ui, /aria-busy=\{pendingAction === 'flag' \? 'true' : undefined\}/);
-    assert.match(ui, /data-pending=\{pendingAction === 'archive' \? 'true' : undefined\}/);
-    assert.match(ui, /aria-busy=\{pendingAction === 'delete' \? 'true' : undefined\}/);
-    const rowActionVariantCalls = [...ui.matchAll(/cn\('maka-list-row-action', rowActionVariants/g)];
-    assert.equal(rowActionVariantCalls.length, 4, 'all 4 row action buttons (flag, rename, archive, delete) must call rowActionVariants');
     assert.match(
       ui,
-      /data-\[pending=true\]:cursor-progress data-\[pending=true\]:bg-foreground\/5 data-\[pending=true\]:text-foreground data-\[pending=true\]:opacity-78/,
-      'rowActionVariants cva must carry a visible pending state (cursor + bg + opacity)',
+      /<MenuTrigger[\s\S]*?disabled=\{actionBusy\}[\s\S]*?<MenuPopup[\s\S]*?<MenuItem[\s\S]*?disabled=\{actionBusy\}/,
+      'the overflow trigger and its menu actions must be disabled while the row owns an action',
     );
+    assert.doesNotMatch(ui, /aria-busy=\{pendingAction ===/);
+    assert.doesNotMatch(ui, /data-pending=\{pendingAction ===/);
   });
 });

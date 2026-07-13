@@ -140,11 +140,19 @@ export function backfillRuntimeEventsFromStoredMessages(
           actions: {
             stateDelta: {
               ...recoveryState(now, message),
+              ...(message.activityKind !== undefined ? { activityKind: message.activityKind } : {}),
               ...(message.displayName !== undefined ? { displayName: message.displayName } : {}),
               ...(message.intent !== undefined ? { intent: message.intent } : {}),
             },
           },
-          refs: { storedMessageId: message.id, toolCallId: message.id },
+          // Carry the persisted step id into refs.stepId so post-restart model
+          // replay can re-pair this call with its assistant step, matching the
+          // live tool_start path (see model-history step grouping).
+          refs: {
+            storedMessageId: message.id,
+            toolCallId: message.id,
+            ...(message.stepId !== undefined ? { stepId: message.stepId } : {}),
+          },
         });
         break;
 

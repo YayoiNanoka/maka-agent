@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { PersonalizationSettingsPage } from './appearance-settings-page';
 import type {
   AppSettings,
   ChatDefaultPermissionMode,
@@ -20,6 +21,7 @@ import {
   modelChoiceValue,
   modelMenuGroups,
   parseModelChoiceValue,
+  useMountedRef,
   useToast,
 } from '@maka/ui';
 import { ProviderLogo } from './ProvidersPanel';
@@ -38,6 +40,10 @@ export function GeneralSettingsPage(props: {
   const toast = useToast();
   return (
     <div className="settingsStructuredPage">
+      {/* Designer audit P2-13: identity fields (显示名称/界面语言/语气偏好)
+          moved here from the 外观 page — they configure who you are to the
+          app, not how the app looks. The component keeps its save flow. */}
+      <PersonalizationSettingsPage settings={props.settings} onUpdate={props.onUpdate} />
       <SettingsRows>
         <div className="settingsFormRow">
           <div>
@@ -50,6 +56,21 @@ export function GeneralSettingsPage(props: {
             onChange={(incognitoActive) => {
               props.onUpdate({ privacy: { incognitoActive } }).catch((error: unknown) => {
                 toast.error('隐身模式切换失败', generalizedErrorMessageChinese(error, '设置未生效，请稍后重试'));
+              });
+            }}
+          />
+        </div>
+        <div className="settingsFormRow">
+          <div>
+            <strong>完成时发送系统通知</strong>
+            <small>当窗口不在前台时，一轮回答生成完成或出错后发送桌面通知；窗口聚焦时不打扰。需系统已授予通知权限。</small>
+          </div>
+          <Switch
+            ariaLabel="完成时发送系统通知"
+            checked={props.settings.notifications.runComplete}
+            onChange={(runComplete) => {
+              props.onUpdate({ notifications: { runComplete } }).catch((error: unknown) => {
+                toast.error('通知设置切换失败', generalizedErrorMessageChinese(error, '设置未生效，请稍后重试'));
               });
             }}
           />
@@ -97,16 +118,14 @@ function GeneralDefaultsCard(props: {
   onUpdate(patch: Parameters<typeof window.maka.settings.update>[0]): Promise<UpdateAppSettingsResult>;
 }) {
   const toast = useToast();
-  const mountedRef = useRef(true);
+  const mountedRef = useMountedRef();
   const savingRef = useRef(false);
   const [saving, setSaving] = useState(false);
   const savingPermissionModeRef = useRef(false);
   const [savingPermissionMode, setSavingPermissionMode] = useState(false);
 
   useEffect(() => {
-    mountedRef.current = true;
     return () => {
-      mountedRef.current = false;
       savingRef.current = false;
       savingPermissionModeRef.current = false;
     };
@@ -175,7 +194,7 @@ function GeneralDefaultsCard(props: {
       <div className="settingsRow" data-control-width="select">
         <div>
           <strong>默认模型</strong>
-          <small>新对话默认使用的具体模型；按连接分组，不显示 OAuth 账号邮箱。</small>
+          <small>新对话默认使用的模型。</small>
         </div>
         {/* Shared searchable picker with the composer's model switcher
             (ModelPicker in @maka/ui) so the grouped list, provider marks,
@@ -337,7 +356,7 @@ function NetworkProxySection(props: {
             </label>
             <label>
               <span>端口</span>
-              <NumberField value={proxyDraft.port || null} onValueChange={(v) => void updateProxy({ port: v ?? 0 })}>
+              <NumberField value={proxyDraft.port || null} format={{ useGrouping: false }} onValueChange={(v) => void updateProxy({ port: v ?? 0 })}>
                 <NumberFieldInput placeholder="7890" aria-label="代理端口" />
               </NumberField>
             </label>

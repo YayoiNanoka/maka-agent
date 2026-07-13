@@ -17,6 +17,10 @@
     "./ahe-evidence-export": {
       "types": "./dist/ahe-evidence-export.d.ts",
       "default": "./dist/ahe-evidence-export.js"
+    },
+    "./eval-router": {
+      "types": "./dist/eval-router.d.ts",
+      "default": "./dist/eval-router.js"
     }
   },
   "imports": {
@@ -32,6 +36,13 @@
     "#prompt-ab-run": "./dist/prompt-ab-run.js",
     "#harbor-task-runner": "./dist/harbor-task-runner.js",
     "#harbor-cell": "./dist/harbor-cell.js",
+    "#runtime-policy-ab-profile": "./dist/runtime-policy-ab-profile.js",
+    "#runtime-policy-ab-spec": "./dist/runtime-policy-ab-spec.js",
+    "#runtime-policy-ab-run": "./dist/runtime-policy-ab-run.js",
+    "#runtime-policy-ab-lifecycle": "./dist/runtime-policy-ab-lifecycle.js",
+    "#harness-ab-manifest": "./dist/harness-ab-manifest.js",
+    "#harness-ab-run": "./dist/harness-ab-run.js",
+    "#harness-ab-report": "./dist/harness-ab-report.js",
     "#prompt-structural-smoke": "./dist/prompt-structural-smoke.js"
   },
   "bin": {
@@ -39,7 +50,7 @@
   },
   "scripts": {
     "clean": "node ../../scripts/clean-paths.mjs dist tsconfig.tsbuildinfo",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/chmod-bin.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run clean && npm run build && node ../../scripts/run-headless-tests.mjs"
   },

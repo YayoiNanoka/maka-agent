@@ -86,15 +86,18 @@ describe('Office document capability contract', () => {
     assert.match(styles, /\.settingsCapabilityGuidanceActions/);
   });
 
-  it('allows only read-only officecli commands as safe shell prefixes', async () => {
-    const permission = await readFile(PERMISSION, 'utf8');
-    assert.match(permission, /'officecli view'/);
-    assert.match(permission, /'officecli get'/);
-    assert.match(permission, /'officecli query'/);
-    assert.match(permission, /'officecli validate'/);
-    assert.doesNotMatch(permission, /'officecli set'/);
-    assert.doesNotMatch(permission, /'officecli add'/);
-    assert.doesNotMatch(permission, /'officecli close'/);
+  it('officecli commands are never auto-safe shell — read and write alike prompt', async () => {
+    // The safe-shell-prefix allowlist was removed: no shell command is provably
+    // safe (args can embed execution), so officecli — read-only inspection AND
+    // mutating verbs — all categorize as shell_unsafe and prompt. The Office
+    // capability still works; it just confirms before running the CLI.
+    const { categorizeBash } = await import('@maka/core');
+    for (const cmd of ['officecli view deck.pptx outline', 'officecli get deck.pptx "/slide[1]"', 'officecli validate model.xlsx']) {
+      assert.equal(categorizeBash(cmd), 'shell_unsafe', `${cmd} should prompt, not auto-run`);
+    }
+    for (const cmd of ['officecli set deck.pptx --prop x=1', 'officecli close deck.pptx']) {
+      assert.equal(categorizeBash(cmd), 'shell_unsafe', `${cmd} should prompt`);
+    }
   });
 
   it('resolves bundled OfficeCLI tools before falling back to PATH', async () => {
@@ -168,13 +171,13 @@ describe('Office document capability contract', () => {
     assert.ok(officeBranch > 0, 'Office document branch must exist');
     assert.ok(jsonBranch > 0, 'JSON branch must exist');
     assert.ok(officeBranch < jsonBranch, 'Office document results must be intercepted before raw JSON rendering');
-    // #332 PR4: the office preview shell migrated onto the @maka/ui previewVariants
-    // literalize table; the bespoke selectors are retired and the render site wires
-    // the governed parts instead.
+    // Tool-output quiet panel: office structure nests inside the shared
+    // tool-output body classes (no second card chrome / retired CSS selectors).
     assert.doesNotMatch(styles, /\.maka-office-document-preview/, 'retired office preview selector must be gone post-migration');
     assert.doesNotMatch(styles, /\.maka-office-document-stream/, 'retired office stream selector must be gone post-migration');
-    assert.match(previewSource, /previewVariants\(\{ part: 'office' \}\)/, 'office preview must render the governed previewVariants office surface');
-    assert.match(previewSource, /previewVariants\(\{ part: 'office-stream' \}\)/, 'office stdout/stderr must render the governed previewVariants office-stream surface');
+    assert.match(previewSource, /data-kind="office_document"/, 'office preview must keep a stable data-kind hook');
+    assert.match(previewSource, /TOOL_OUTPUT_BODY_CLASS/, 'office stdout/stderr must use the shared tool-output body surface');
+    assert.match(previewSource, /TOOL_OUTPUT_COMMAND_CLASS/, 'officecli args must use the shared command surface');
   });
 
   it('summarizes Office document edits in the permission dialog before raw args', async () => {

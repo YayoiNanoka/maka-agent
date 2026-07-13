@@ -1,23 +1,33 @@
-import {
-  Markdown,
-  truncateToWidth,
-  visibleWidth,
-  wrapTextWithAnsi,
-  type MarkdownTheme,
-} from '@earendil-works/pi-tui';
+import { Markdown } from '@earendil-works/pi-tui';
 import type {
   PermissionRequestEvent,
   SessionEvent,
   ToolOutputStream,
   ToolResultContent,
 } from '@maka/core/events';
-import type { StoredMessage, SystemNoteMessage } from '@maka/core/session';
+import { failureClassFromCompleteStopReason } from '@maka/core/events';
+import { STEP_LIMIT_NOTICE_TEXT, type StoredMessage, type SystemNoteMessage } from '@maka/core/session';
 import type { ContextBudgetDiagnostic } from '@maka/core/usage-stats/types';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
+import {
+  mergeShellRunStateWithDiagnostics,
+  projectToolActivityArgs,
+  readWriteStdinInputPreview,
+  type ShellRunUpdate,
+} from '@maka/core';
 import { materializeSession, type ChatItem, type ToolActivityItem } from '@maka/runtime';
 import type { MakaSessionDriver } from './session-driver.js';
+import { BoundedChunkBuffer } from './bounded-chunk-buffer.js';
 import { ansi } from './tui-ansi.js';
-import { colorDiff, diffLineKind } from './tui-diff.js';
+import {
+  fitLine,
+  formatToolResultContent,
+  formatUnknown,
+  limitText,
+  markdownTheme,
+  renderIndented,
+} from './pi-transcript-format.js';
+import { renderToolBlock } from './pi-transcript-tools.js';
 
 export interface MakaPiTranscriptState {
   entries: MakaPiTranscriptEntry[];
@@ -41,6 +51,9 @@ export interface MakaPiToolOutputDelta {
   redacted: boolean;
 }
 
+const LIVE_TOOL_BUFFER_MAX_CHARS = 64 * 1024;
+const LIVE_TOOL_BUFFER_MAX_CHUNKS = 512;
+
 export type MakaPiTranscriptEntry =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; messageId: string; text: string }
@@ -55,10 +68,12 @@ export type MakaPiTranscriptEntry =
       result?: ToolResultContent;
       /** Flattened result text, kept as a fallback for text/json/unknown kinds. */
       output?: string;
-      progress: string[];
-      outputDeltas: MakaPiToolOutputDelta[];
+      /** In-memory revision for render-cache invalidation when a result is replaced. */
+      resultVersion: number;
+      progress: BoundedChunkBuffer<string>;
+      outputDeltas: BoundedChunkBuffer<MakaPiToolOutputDelta>;
       durationMs?: number;
-      status: 'running' | 'done' | 'error';
+      status: 'running' | 'done' | 'error' | 'failed' | 'aborted' | 'detached' | 'unavailable';
     }
   | { kind: 'notice'; level: 'info' | 'error'; text: string };
 
@@ -87,12 +102,55 @@ export function appendUserPrompt(state: MakaPiTranscriptState, text: string): vo
   state.entries.push({ kind: 'user', text });
 }
 
+export function refreshRunningShellRunElapsed(
+  state: MakaPiTranscriptState,
+  now = Date.now(),
+): boolean {
+  let found = false;
+  for (const entry of state.entries) {
+    if (entry.kind !== 'tool' || entry.status !== 'running' || entry.result?.kind !== 'shell_run') continue;
+    entry.durationMs = Math.max(0, now - entry.result.startedAt);
+    found = true;
+  }
+  return found;
+}
+
+export function applyShellRunViewUpdateToTranscript(
+  state: MakaPiTranscriptState,
+  update: ShellRunUpdate,
+): boolean {
+  const applied = applyShellRunUpdateToTranscript(state, update.sourceToolCallId, update.result);
+  const tool = findToolEntry(state, update.sourceToolCallId);
+  if (!tool
+    || tool.toolName !== 'Bash'
+    || tool.result?.kind !== 'shell_run'
+    || tool.result.ref !== update.result.ref
+    || tool.result.status !== 'running') return applied;
+  const status = update.ownership.kind === 'local'
+    ? 'running'
+    : update.ownership.kind === 'source_owned' ? 'detached' : 'unavailable';
+  if (tool.status === status) return applied;
+  tool.status = status;
+  return true;
+}
+
+export function applyShellRunUpdateToTranscript(
+  state: MakaPiTranscriptState,
+  sourceToolCallId: string,
+  update: Extract<ToolResultContent, { kind: 'shell_run' }>,
+): boolean {
+  const tool = findToolEntry(state, sourceToolCallId);
+  if (!tool || tool.toolName !== 'Bash') return false;
+  if (tool.result?.kind === 'shell_run' && tool.result.ref !== update.ref) return false;
+  return applyShellRunResult(tool, update);
+}
+
 export function replaceTranscriptWithStoredMessages(
   state: MakaPiTranscriptState,
   messages: readonly StoredMessage[],
 ): void {
   const view = materializeSession(messages);
-  state.entries = view.items.flatMap(chatItemToTranscriptEntries);
+  state.entries = foldStoredShellRunChildren(view.items.flatMap(chatItemToTranscriptEntries));
   state.sawTextDeltaMessageIds = new Set(
     state.entries
       .filter((entry): entry is Extract<MakaPiTranscriptEntry, { kind: 'assistant' }> => entry.kind === 'assistant')
@@ -121,28 +179,66 @@ export function toggleAllThinkingExpansion(state: MakaPiTranscriptState): boolea
   return true;
 }
 
+export interface TurnOutcome {
+  /** The turn was user-stopped or aborted (double-Escape → driver.stop()). */
+  aborted: boolean;
+  /** The turn ended in an error (stream `error` event or thrown failure). */
+  errored: boolean;
+}
+
 export async function submitPromptToTranscript(input: {
   state: MakaPiTranscriptState;
   driver: Pick<MakaSessionDriver, 'sendPrompt'>;
   prompt: string;
   onChange?: () => void;
-}): Promise<void> {
+  /**
+   * An error surfaced during the turn — either a stream `error` event or a
+   * thrown `sendPrompt` failure. Distinct from `onChange` so a caller can raise
+   * attention on failures without diffing transcript entries every render.
+   */
+  onError?: () => void;
+}): Promise<TurnOutcome> {
   appendUserPrompt(input.state, input.prompt);
   input.onChange?.();
 
+  // Surface how the turn ended so the host can gate goal auto-continuation: a
+  // user_stop/abort (the Stop affordance) or an errored turn must NOT trigger
+  // another autonomous turn — mirrors the desktop `turnAborted` guard.
+  let aborted = false;
+  let errored = false;
   try {
     for await (const event of input.driver.sendPrompt(input.prompt)) {
       applyMakaSessionEventToTranscript(input.state, event);
+      if (event.type === 'abort' || (event.type === 'complete' && event.stopReason === 'user_stop')) {
+        aborted = true;
+      }
+      if (event.type === 'error') {
+        errored = true;
+        input.onError?.();
+      }
+      // A non-throwing error finish (e.g. content-filter) arrives as
+      // complete{stopReason:'error'} with no separate `error` event — treat it as
+      // errored too, so goal continuation never re-injects into a failed turn
+      // (self-sufficient, not reliant on the session-status backstop).
+      if (
+        event.type === 'complete'
+        && failureClassFromCompleteStopReason(event.stopReason) !== undefined
+      ) {
+        errored = true;
+      }
       input.onChange?.();
     }
   } catch (error) {
+    errored = true;
     input.state.entries.push({
       kind: 'notice',
       level: 'error',
       text: error instanceof Error ? error.message : String(error),
     });
+    input.onError?.();
     input.onChange?.();
   }
+  return { aborted, errored };
 }
 
 export async function submitCompactToTranscript(input: {
@@ -207,30 +303,54 @@ export function applyMakaSessionEventToTranscript(
         toolUseId: event.toolUseId,
         toolName: event.toolName,
         ...(event.displayName ? { title: event.displayName } : {}),
-        input: event.args,
-        progress: [],
-        outputDeltas: [],
+        input: projectToolActivityArgs(event.toolName, event.args),
+        resultVersion: 0,
+        progress: createProgressBuffer(),
+        outputDeltas: createOutputBuffer(),
         status: 'running',
       });
       break;
 
     case 'tool_result': {
       const tool = findToolEntry(state, event.toolUseId);
+      const shellRun = event.content.kind === 'shell_run' ? event.content : undefined;
+      const parent = shellRun
+        ? findShellRunParent(state, shellRun.ref, event.toolUseId)
+        : undefined;
+      if (tool && parent && shellRun) {
+        applyShellRunResult(parent, shellRun);
+        if (tool.toolName === 'Read' || tool.toolName === 'StopBackgroundTask') {
+          state.entries.splice(state.entries.indexOf(tool), 1);
+        } else {
+          applyOwnShellRunResult(tool, shellRun, event.durationMs);
+        }
+        break;
+      }
       if (tool) {
-        tool.status = event.isError ? 'error' : 'done';
-        tool.result = event.content;
-        tool.output = formatToolResultContent(event.content);
-        tool.durationMs = event.durationMs;
+        if (shellRun) {
+          if (tool.toolName === 'Bash') {
+            applyShellRunResult(tool, shellRun);
+          } else {
+            applyOwnShellRunResult(tool, shellRun, event.durationMs);
+          }
+        } else {
+          tool.status = event.isError ? 'error' : 'done';
+          tool.result = event.content;
+          tool.output = formatToolResultContent(event.content);
+          tool.durationMs = event.durationMs;
+          tool.resultVersion += 1;
+        }
       } else {
         state.entries.push({
           kind: 'tool',
           toolUseId: event.toolUseId,
           toolName: event.toolUseId,
           input: undefined,
-          progress: [],
-          outputDeltas: [],
+          progress: createProgressBuffer(),
+          outputDeltas: createOutputBuffer(),
           result: event.content,
           output: formatToolResultContent(event.content),
+          resultVersion: 1,
           durationMs: event.durationMs,
           status: event.isError ? 'error' : 'done',
         });
@@ -241,15 +361,20 @@ export function applyMakaSessionEventToTranscript(
     case 'tool_progress': {
       const tool = findToolEntry(state, event.toolUseId);
       if (tool) {
-        tool.progress.push(typeof event.chunk === 'string' ? event.chunk : `[${event.chunk.kind}] ${event.chunk.text}`);
+        const progress = typeof event.chunk === 'string'
+          ? event.chunk
+          : event.chunk.text
+            ? `[${event.chunk.kind}] ${event.chunk.text}`
+            : '';
+        if (progress) tool.progress.append(progress);
       }
       break;
     }
 
     case 'tool_output_delta': {
       const tool = findToolEntry(state, event.toolUseId);
-      if (tool) {
-        tool.outputDeltas.push({
+      if (tool && (event.chunk || event.redacted)) {
+        tool.outputDeltas.append({
           seq: event.seq,
           stream: event.stream,
           chunk: event.chunk,
@@ -323,6 +448,9 @@ export function applyMakaSessionEventToTranscript(
           text: 'Stopped: max tokens',
         });
       }
+      if (event.stopReason === 'step_limit') {
+        state.entries.push({ kind: 'notice', level: 'info', text: STEP_LIMIT_NOTICE_TEXT });
+      }
       break;
   }
 }
@@ -350,25 +478,49 @@ function chatItemToTranscriptEntries(item: ChatItem): MakaPiTranscriptEntry[] {
   }
 }
 
-function toolActivityToTranscriptEntry(item: ToolActivityItem): MakaPiTranscriptEntry {
+function toolActivityToTranscriptEntry(item: ToolActivityItem): MakaPiToolEntry {
   const output = item.result
     ? formatToolResultContent(item.result)
     : item.status === 'interrupted'
       ? 'Interrupted before the tool returned a result.'
       : undefined;
-  return {
+  const entry: MakaPiToolEntry = {
     kind: 'tool',
     toolUseId: item.toolUseId,
     toolName: item.toolName,
     ...(item.displayName ? { title: item.displayName } : {}),
     input: item.args,
-    progress: [],
-    outputDeltas: [],
+    progress: createProgressBuffer(),
+    outputDeltas: createOutputBuffer(),
     ...(item.result ? { result: item.result } : {}),
     ...(output ? { output } : {}),
+    resultVersion: item.result ? 1 : 0,
     ...(item.durationMs !== undefined ? { durationMs: item.durationMs } : {}),
     status: transcriptToolStatus(item.status),
   };
+  if (item.result?.kind === 'shell_run') applyOwnShellRunResult(entry, item.result);
+  return entry;
+}
+
+function foldStoredShellRunChildren(entries: MakaPiTranscriptEntry[]): MakaPiTranscriptEntry[] {
+  const folded: MakaPiTranscriptEntry[] = [];
+  for (const entry of entries) {
+    if (entry.kind === 'tool' && entry.result?.kind === 'shell_run') {
+      const shellRun = entry.result;
+      const parent = [...folded]
+        .reverse()
+        .find((candidate): candidate is MakaPiToolEntry => candidate.kind === 'tool'
+          && candidate.toolName === 'Bash'
+          && candidate.result?.kind === 'shell_run'
+          && candidate.result.ref === shellRun.ref);
+      if (parent) {
+        applyShellRunResult(parent, shellRun);
+        if (entry.toolName === 'Read' || entry.toolName === 'StopBackgroundTask') continue;
+      }
+    }
+    folded.push(entry);
+  }
+  return folded;
 }
 
 function transcriptToolStatus(status: ToolActivityItem['status']): MakaPiToolEntry['status'] {
@@ -383,6 +535,59 @@ function transcriptToolStatus(status: ToolActivityItem['status']): MakaPiToolEnt
     case 'running':
       return 'running';
   }
+}
+
+function shellRunTranscriptStatus(
+  status: Extract<ToolResultContent, { kind: 'shell_run' }>['status'],
+): MakaPiToolEntry['status'] {
+  switch (status) {
+    case 'running':
+      return 'running';
+    case 'completed':
+      return 'done';
+    case 'cancelled':
+      return 'aborted';
+    case 'failed':
+    case 'timed_out':
+    case 'orphaned':
+      return 'failed';
+  }
+}
+
+function applyShellRunResult(
+  entry: MakaPiToolEntry,
+  result: Extract<ToolResultContent, { kind: 'shell_run' }>,
+): boolean {
+  const current = entry.result?.kind === 'shell_run' ? entry.result : undefined;
+  const merged = mergeShellRunStateWithDiagnostics(current, result, 'cli.transcript');
+  if (!merged.changed) return false;
+  entry.status = shellRunTranscriptStatus(merged.result.status);
+  entry.result = merged.result;
+  entry.output = formatToolResultContent(merged.result);
+  entry.durationMs = Math.max(
+    0,
+    (merged.result.completedAt ?? merged.result.updatedAt) - merged.result.startedAt,
+  );
+  entry.resultVersion += 1;
+  return true;
+}
+
+function applyOwnShellRunResult(
+  entry: MakaPiToolEntry,
+  result: Extract<ToolResultContent, { kind: 'shell_run' }>,
+  operationDurationMs = entry.durationMs,
+): void {
+  entry.status = entry.toolName === 'WriteStdin'
+    ? result.operation?.kind === 'pty_control' && result.operation.failed ? 'error' : 'done'
+    : shellRunTranscriptStatus(result.status);
+  entry.result = result;
+  entry.output = formatToolResultContent(result);
+  if (entry.toolName === 'WriteStdin') {
+    entry.durationMs = operationDurationMs;
+  } else {
+    entry.durationMs = Math.max(0, (result.completedAt ?? result.updatedAt) - result.startedAt);
+  }
+  entry.resultVersion += 1;
 }
 
 function systemNoteToTranscriptEntry(message: SystemNoteMessage): MakaPiTranscriptEntry | undefined {
@@ -443,6 +648,12 @@ function systemNoteText(message: SystemNoteMessage): string | undefined {
       return 'Permission mode changed.';
     case 'model_change':
       return 'Model changed.';
+    case 'context_compacted':
+      return 'Context compacted to keep this session within the model window.';
+    case 'context_compaction_failed_open':
+      return 'Context summary failed; the session continued without a new summary.';
+    case 'step_limit':
+      return STEP_LIMIT_NOTICE_TEXT;
     case 'error':
       return 'Session recorded an error.';
     case 'abort':
@@ -452,31 +663,23 @@ function systemNoteText(message: SystemNoteMessage): string | undefined {
 
 export function renderMakaPiTranscript(
   state: MakaPiTranscriptState,
-  _metadata: MakaPiTranscriptMetadata,
+  metadata: MakaPiTranscriptMetadata,
   width: number,
 ): string[] {
   const safeWidth = Math.max(1, width);
   const lines: string[] = [];
 
+  // A fresh session (no history, nothing pending) opens on a welcome block so the
+  // first screen greets and orients instead of showing an empty pane. Once the
+  // first prompt lands, entries take over and it never renders again.
+  if (state.entries.length === 0 && !state.pendingPermission) {
+    return renderWelcomeBlock(metadata, safeWidth);
+  }
+
   for (const entry of state.entries) {
+    // A blank spacer above every entry, then its (memoized) rendered block.
     lines.push('');
-    switch (entry.kind) {
-      case 'user':
-        lines.push(...renderTextBlock('User', entry.text, safeWidth, { markdown: false, heading: ansi.accent }));
-        break;
-      case 'assistant':
-        lines.push(...renderTextBlock('maka', entry.text, safeWidth, { markdown: true, heading: ansi.accent }));
-        break;
-      case 'thinking':
-        lines.push(...renderThinkingBlock(entry, safeWidth, state.expandAllThinking));
-        break;
-      case 'tool':
-        lines.push(...renderToolBlock(entry, safeWidth, state.expandAllTools));
-        break;
-      case 'notice':
-        lines.push(...renderNotice(entry, safeWidth));
-        break;
-    }
+    lines.push(...renderTranscriptEntryMemoized(entry, safeWidth, state.expandAllTools, state.expandAllThinking));
   }
 
   if (state.pendingPermission) {
@@ -485,6 +688,102 @@ export function renderMakaPiTranscript(
   }
 
   return lines;
+}
+
+/**
+ * Per-entry render cache. The transcript re-renders on every keystroke and
+ * stream delta, but only the tail entry actually changes; caching the rendered
+ * lines of unchanged entries avoids rebuilding a `Markdown` instance per block
+ * on each pass. Keyed by entry identity (a fresh entry object is a cache miss);
+ * the signature busts the cache when anything that affects the entry's rendered
+ * lines changes (its growing text, tool status, width, or an expansion toggle).
+ */
+interface TranscriptEntryRender {
+  signature: string;
+  lines: string[];
+}
+
+const transcriptEntryRenderCache = new WeakMap<MakaPiTranscriptEntry, TranscriptEntryRender>();
+
+// Returns the cached line array by reference on a hit — callers must treat it as
+// read-only (copy the lines into their own buffer rather than mutating in place),
+// or a later render would serve corrupted content for that entry. The only
+// caller, renderMakaPiTranscript, spreads the lines into its own buffer.
+function renderTranscriptEntryMemoized(
+  entry: MakaPiTranscriptEntry,
+  width: number,
+  expandAllTools: boolean,
+  expandAllThinking: boolean,
+): string[] {
+  const signature = transcriptEntrySignature(entry, width, expandAllTools, expandAllThinking);
+  const cached = transcriptEntryRenderCache.get(entry);
+  if (cached && cached.signature === signature) return cached.lines;
+  const lines = renderTranscriptEntryBlock(entry, width, expandAllTools, expandAllThinking);
+  transcriptEntryRenderCache.set(entry, { signature, lines });
+  return lines;
+}
+
+function renderTranscriptEntryBlock(
+  entry: MakaPiTranscriptEntry,
+  width: number,
+  expandAllTools: boolean,
+  expandAllThinking: boolean,
+): string[] {
+  switch (entry.kind) {
+    case 'user':
+      return renderTextBlock('User', entry.text, width, { markdown: false, heading: ansi.accent });
+    case 'assistant':
+      return renderTextBlock('maka', entry.text, width, { markdown: true, heading: ansi.accent });
+    case 'thinking':
+      return renderThinkingBlock(entry, width, expandAllThinking);
+    case 'tool':
+      return renderToolBlock(entry, width, expandAllTools);
+    case 'notice':
+      return renderNotice(entry, width);
+  }
+}
+
+function transcriptEntrySignature(
+  entry: MakaPiTranscriptEntry,
+  width: number,
+  expandAllTools: boolean,
+  expandAllThinking: boolean,
+): string {
+  switch (entry.kind) {
+    // user and assistant text is append-only (user is immutable; assistant only
+    // grows via appendAssistantText, and text_complete is guarded from replacing
+    // it), so length is a safe change key. If a path ever replaces their text in
+    // place, switch these to full-text keys like thinking below.
+    case 'user':
+      return `user|${width}|${entry.text.length}`;
+    case 'assistant':
+      return `assistant|${width}|${entry.text.length}`;
+    case 'thinking':
+      // Not just the length: `thinking_complete` can replace the streamed text
+      // in place with a same-length final, which a length-only key would miss and
+      // then serve stale reasoning from the cache. Key on the full text.
+      return `thinking|${width}|${expandAllThinking ? 1 : 0}|${entry.text}`;
+    case 'notice':
+      return `notice|${width}|${entry.level}|${entry.text.length}`;
+    case 'tool':
+      // A tool entry mutates in place as it runs: status/duration flip,
+      // progress/output deltas append, and resultVersion advances whenever a
+      // result is accepted. Count those revisions instead of duplicating the
+      // result's rendering contract in this cache key. `input` and
+      // `toolName` are omitted deliberately: both are set once at `tool_start`,
+      // before the first render, and never change, so they can't go stale.
+      return [
+        'tool',
+        width,
+        expandAllTools ? 1 : 0,
+        entry.status,
+        entry.durationMs ?? '',
+        entry.title ?? entry.toolName,
+        entry.progress.version,
+        entry.outputDeltas.version,
+        entry.resultVersion,
+      ].join('|');
+  }
 }
 
 export function renderMakaPiStatusLine(metadata: MakaPiTranscriptMetadata, width: number): string {
@@ -540,13 +839,46 @@ function renderThinkingBlock(entry: MakaPiThinkingEntry, width: number, expanded
 type MakaPiAssistantEntry = Extract<MakaPiTranscriptEntry, { kind: 'assistant' }>;
 type MakaPiThinkingEntry = Extract<MakaPiTranscriptEntry, { kind: 'thinking' }>;
 
-type MakaPiToolEntry = Extract<MakaPiTranscriptEntry, { kind: 'tool' }>;
+export type MakaPiToolEntry = Extract<MakaPiTranscriptEntry, { kind: 'tool' }>;
 type MakaPiNoticeEntry = Extract<MakaPiTranscriptEntry, { kind: 'notice' }>;
 
 function findToolEntry(state: MakaPiTranscriptState, toolUseId: string): MakaPiToolEntry | undefined {
   return [...state.entries]
     .reverse()
     .find((entry): entry is MakaPiToolEntry => entry.kind === 'tool' && entry.toolUseId === toolUseId);
+}
+
+function createProgressBuffer(): BoundedChunkBuffer<string> {
+  return new BoundedChunkBuffer({
+    maxChars: LIVE_TOOL_BUFFER_MAX_CHARS,
+    maxChunks: LIVE_TOOL_BUFFER_MAX_CHUNKS,
+    textOf: (chunk) => chunk,
+    withText: (_chunk, text) => text,
+  });
+}
+
+function createOutputBuffer(): BoundedChunkBuffer<MakaPiToolOutputDelta> {
+  return new BoundedChunkBuffer({
+    maxChars: LIVE_TOOL_BUFFER_MAX_CHARS,
+    maxChunks: LIVE_TOOL_BUFFER_MAX_CHUNKS,
+    textOf: (delta) => delta.chunk,
+    withText: (delta, chunk) => ({ ...delta, chunk }),
+    sequence: (delta) => delta.seq,
+  });
+}
+
+function findShellRunParent(
+  state: MakaPiTranscriptState,
+  ref: string,
+  childToolUseId: string,
+): MakaPiToolEntry | undefined {
+  return [...state.entries]
+    .reverse()
+    .find((entry): entry is MakaPiToolEntry => entry.kind === 'tool'
+      && entry.toolName === 'Bash'
+      && entry.toolUseId !== childToolUseId
+      && entry.result?.kind === 'shell_run'
+      && entry.result.ref === ref);
 }
 
 function renderTextBlock(
@@ -565,338 +897,34 @@ function renderTextBlock(
   return lines;
 }
 
-function renderToolBlock(entry: MakaPiToolEntry, width: number, expanded: boolean): string[] {
-  return expanded ? renderExpandedToolBlock(entry, width) : renderCompactToolBlock(entry, width);
-}
-
-function toolStatusText(entry: MakaPiToolEntry): string {
-  const status = entry.status === 'running'
-    ? ansi.yellow('running')
-    : entry.status === 'error'
-      ? ansi.red('error')
-      : ansi.green('done');
-  const duration = entry.durationMs === undefined ? '' : ansi.dim(` ${entry.durationMs}ms`);
-  return `${status}${duration}`;
-}
-
-/**
- * Compact tool card: at most two lines. Line 1 carries the tool name, an
- * inline dim input summary, and status; line 2 is a one-line result summary
- * with a dim `(Ctrl+O)` hint when expanding would reveal more.
- */
-function renderCompactToolBlock(entry: MakaPiToolEntry, width: number): string[] {
-  // collapseToSingleLine guards both slots: fitLine truncates width, not \n,
-  // so any multi-line summary text would silently break the two-line card.
-  const inputSummary = collapseToSingleLine(toolInputSummary(entry));
-  const header = `${ansi.yellow('Tool')} ${entry.title ?? entry.toolName}`
-    + `${inputSummary ? ` ${ansi.dim(inputSummary)}` : ''} ${toolStatusText(entry)}`;
-  const lines = [fitLine(header, width)];
-  const summary = compactToolSummary(entry, width);
-  if (summary) {
-    const hint = summary.expandable ? ansi.dim(' (Ctrl+O)') : '';
-    lines.push(fitLine(`  ${collapseToSingleLine(summary.text)}${hint}`, width));
-  }
-  return lines;
-}
-
-function renderExpandedToolBlock(entry: MakaPiToolEntry, width: number): string[] {
-  const lines = [
-    fitLine(`${ansi.yellow('Tool')} ${entry.title ?? entry.toolName} ${toolStatusText(entry)}`, width),
-  ];
-  const inputSummary = toolInputSummary(entry);
-  if (inputSummary) lines.push(...renderIndented(inputSummary, width, 2).map(ansi.dim));
-  if (entry.progress.length > 0) {
-    lines.push(...renderToolText(entry.progress.join(''), width).map(ansi.dim));
-  }
-  lines.push(...renderToolStreams(entry.outputDeltas, width));
-  if (entry.result || entry.output) {
-    lines.push(...renderToolResult(entry, width));
-  }
-  return lines.map((line) => fitLine(line, width));
-}
-
-interface CompactToolSummary {
-  text: string;
-  /** True when expanding would reveal more than this one-line summary. */
-  expandable: boolean;
-}
-
-function compactToolSummary(entry: MakaPiToolEntry, width: number): CompactToolSummary | undefined {
-  const hasLiveOutput = entry.outputDeltas.length > 0 || entry.progress.length > 0;
-  if (entry.status === 'running' && hasLiveOutput) {
-    const live = latestLiveOutputLine(entry);
-    if (live) return { text: live, expandable: true };
-  }
-
-  const result = entry.result;
-  if (result?.kind === 'terminal') return compactTerminalSummary(result, hasLiveOutput);
-  if (result?.kind === 'file_diff') return compactDiffSummary(result);
-  if (result?.kind === 'file_write') {
-    return { text: `wrote ${result.bytes} bytes ${result.path}`, expandable: hasLiveOutput };
-  }
-
-  if (entry.toolName === 'Grep') {
-    const count = jsonArrayCount(entry, 'matches');
-    if (count !== undefined) {
-      return {
-        text: `${count} match${count === 1 ? '' : 'es'}`,
-        expandable: count > 0 || hasLiveOutput,
-      };
-    }
-  }
-
-  if (entry.toolName === 'Glob') {
-    const count = jsonArrayCount(entry, 'files');
-    if (count !== undefined) {
-      return {
-        text: `${count} file${count === 1 ? '' : 's'}`,
-        expandable: count > 0 || hasLiveOutput,
-      };
-    }
-  }
-
-  const text = plainResultText(entry);
-  if (!text) return undefined;
-  if (entry.toolName === 'Read') {
-    const lineCount = text.split('\n').length;
-    return {
-      text: `${lineCount} line${lineCount === 1 ? '' : 's'}, ${byteLength(text)} bytes`,
-      expandable: true,
-    };
-  }
-  const firstLine = text.split('\n', 1)[0] ?? '';
-  return {
-    text: firstLine,
-    expandable: text.includes('\n') || hasLiveOutput || firstLine.length + 2 > width,
-  };
-}
-
-function compactTerminalSummary(
-  content: Extract<ToolResultContent, { kind: 'terminal' }>,
-  hasLiveOutput: boolean,
-): CompactToolSummary {
-  const hasOutput = Boolean(content.stdout || content.stderr);
-  if (content.exitCode !== 0) {
-    const stderrLine = lastNonEmptyLine(content.stderr);
-    const exit = ansi.red(`exit ${content.exitCode}`);
-    return {
-      text: stderrLine ? `${exit} ${stderrLine}` : exit,
-      expandable: hasOutput || hasLiveOutput,
-    };
-  }
-  const combined = [content.stdout, content.stderr].filter(Boolean).join('\n').replace(/\n+$/, '');
-  if (!combined) return { text: ansi.dim('(no output)'), expandable: hasLiveOutput };
-  const totalLines = combined.split('\n').length;
-  const prefix = totalLines > 1 ? ansi.dim(`(${totalLines} lines) `) : '';
-  return {
-    text: `${prefix}${lastNonEmptyLine(combined)}`,
-    expandable: totalLines > 1 || hasLiveOutput,
-  };
-}
-
-function compactDiffSummary(
-  content: Extract<ToolResultContent, { kind: 'file_diff' }>,
-): CompactToolSummary {
-  let adds = 0;
-  let dels = 0;
-  for (const line of content.diff.split('\n')) {
-    const kind = diffLineKind(line);
-    if (kind === 'add') adds += 1;
-    else if (kind === 'del') dels += 1;
-  }
-  const path = content.paths[0];
-  return {
-    text: `${ansi.green(`+${adds}`)} ${ansi.red(`-${dels}`)}${path ? ` ${path}` : ''}`,
-    expandable: true,
-  };
-}
-
-/**
- * Row count for list-shaped json results (Grep `matches`, Glob `files`).
- * Returns a count only when the keyed field is genuinely an array; an
- * error-shaped result (e.g. `{ error: "..." }`) returns undefined so the
- * caller falls back to a generic first-line summary rather than reporting a
- * fabricated "N matches" / "N files" from an unrelated line count.
- */
-function jsonArrayCount(entry: MakaPiToolEntry, key: string): number | undefined {
-  const result = entry.result;
-  if (result?.kind === 'json' && result.value !== null && typeof result.value === 'object') {
-    const rows = (result.value as Record<string, unknown>)[key];
-    if (Array.isArray(rows)) return rows.length;
-  }
-  return undefined;
-}
-
-/** Latest non-empty output line from live deltas (redaction-aware), else progress. */
-function latestLiveOutputLine(entry: MakaPiToolEntry): string {
-  const groups = groupOutputDeltas(entry.outputDeltas);
-  if (groups.length > 0) {
-    const fromDeltas = lastNonEmptyLine(groups.map((group) => group.text).join('\n'));
-    if (fromDeltas) return fromDeltas;
-  }
-  return lastNonEmptyLine(entry.progress.join(''));
-}
-
-function lastNonEmptyLine(text: string): string {
-  const lines = text.split('\n');
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i];
-    if (line && line.trim()) return line;
-  }
-  return '';
-}
-
-function renderToolText(text: string, width: number): string[] {
-  return renderIndented(limitText(text, 12_000), width, 2);
-}
-
-/**
- * Render live `tool_output_delta` chunks. Chunks are de-duped and ordered by
- * `seq` (so a late or repeated seq cannot corrupt the display), consecutive
- * same-stream chunks are grouped under a single dim `[stream]` label, and any
- * redacted chunk shows a `[redacted]` marker instead of its raw content.
- */
-function renderToolStreams(deltas: readonly MakaPiToolOutputDelta[], width: number): string[] {
-  const lines: string[] = [];
-  for (const group of groupOutputDeltas(deltas)) {
-    lines.push(fitLine(ansi.dim(`[${group.stream}]`), width));
-    lines.push(...renderToolText(group.text, width).map(ansi.dim));
-  }
-  return lines;
-}
-
-function groupOutputDeltas(
-  deltas: readonly MakaPiToolOutputDelta[],
-): Array<{ stream: ToolOutputStream; text: string }> {
-  const bySeq = new Map<number, MakaPiToolOutputDelta>();
-  for (const delta of deltas) {
-    if (!bySeq.has(delta.seq)) bySeq.set(delta.seq, delta);
-  }
-  const ordered = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
-  const groups: Array<{ stream: ToolOutputStream; text: string }> = [];
-  for (const delta of ordered) {
-    const chunk = delta.redacted ? '[redacted]' : delta.chunk;
-    const last = groups[groups.length - 1];
-    if (last && last.stream === delta.stream) {
-      last.text += chunk;
-    } else {
-      groups.push({ stream: delta.stream, text: chunk });
-    }
-  }
-  return groups;
-}
-
-function renderToolResult(entry: MakaPiToolEntry, width: number): string[] {
-  const result = entry.result;
-  if (result?.kind === 'terminal') return renderTerminalResult(result, width);
-  if (result?.kind === 'file_diff') return renderDiffResult(result.diff, width);
-  if (result?.kind === 'file_write') {
-    return renderIndented(`Wrote ${result.bytes} bytes to ${result.path}`, width, 2);
-  }
-  return renderToolText(plainResultText(entry), width);
-}
-
-/** Best-effort extraction of the human-readable body from a tool result. */
-function plainResultText(entry: MakaPiToolEntry): string {
-  const result = entry.result;
-  if (result?.kind === 'text') return result.text;
-  if (result?.kind === 'json') {
-    const value = result.value;
-    if (value !== null && typeof value === 'object') {
-      const content = (value as { content?: unknown }).content;
-      if (typeof content === 'string') return content;
-      const record = value as { matches?: unknown; files?: unknown };
-      const rows = record.matches ?? record.files;
-      if (Array.isArray(rows)) return rows.map((row) => String(row)).join('\n');
-    }
-    // Single line: this text can land on the compact summary line, and a
-    // pretty-printed JSON body would break the two-line card contract.
-    return formatUnknownInline(value);
-  }
-  return entry.output ?? '';
-}
-
-function renderTerminalResult(
-  content: Extract<ToolResultContent, { kind: 'terminal' }>,
-  width: number,
-): string[] {
-  const lines: string[] = [];
-  if (content.exitCode !== 0) {
-    lines.push(...renderIndented(ansi.red(`exit ${content.exitCode}`), width, 2));
-  }
-  if (content.stdout) {
-    lines.push(...renderToolText(content.stdout, width));
-  }
-  if (content.stderr) {
-    lines.push(...renderIndented(ansi.dim('[stderr]'), width, 2));
-    lines.push(...renderToolText(content.stderr, width).map(ansi.dim));
-  }
-  return lines;
-}
-
-function renderDiffResult(diff: string, width: number): string[] {
-  return renderIndented(colorDiff(limitText(diff, 12_000)), width, 2);
-}
-
-function byteLength(text: string): number {
-  return Buffer.byteLength(text, 'utf8');
-}
-
-function toolInputSummary(entry: MakaPiToolEntry): string {
-  const input = entry.input;
-  const obj = input !== null && typeof input === 'object' ? (input as Record<string, unknown>) : undefined;
-  switch (entry.toolName) {
-    case 'Bash': {
-      const command = obj?.command;
-      if (typeof command === 'string' && command.trim()) {
-        return `$ ${command.split('\n')[0]}`;
-      }
-      break;
-    }
-    case 'Read': {
-      const path = obj?.path;
-      if (typeof path === 'string' && path.trim()) {
-        const parts = [path];
-        if (typeof obj?.offset === 'number') parts.push(`offset ${obj.offset}`);
-        if (typeof obj?.limit === 'number') parts.push(`limit ${obj.limit}`);
-        return parts.join(' ');
-      }
-      break;
-    }
-    case 'Write':
-    case 'Edit': {
-      const path = obj?.path;
-      if (typeof path === 'string' && path.trim()) return path;
-      break;
-    }
-    case 'Grep': {
-      const pattern = obj?.pattern;
-      if (typeof pattern === 'string' && pattern.trim()) {
-        const parts = [pattern];
-        if (typeof obj?.path === 'string' && obj.path.trim()) parts.push(`in ${obj.path}`);
-        if (typeof obj?.glob === 'string' && obj.glob.trim()) parts.push(`glob ${obj.glob}`);
-        return parts.join(' ');
-      }
-      break;
-    }
-    case 'Glob': {
-      const pattern = obj?.pattern;
-      if (typeof pattern === 'string' && pattern.trim()) {
-        const cwd = obj?.cwd;
-        return typeof cwd === 'string' && cwd.trim() ? `${pattern} in ${cwd}` : pattern;
-      }
-      break;
-    }
-  }
-  if (input === undefined) return '';
-  // Single line: this summary is inlined into the compact header, and a
-  // pretty-printed JSON body would break the two-line card contract.
-  return `input: ${limitText(formatUnknownInline(input), 600)}`;
-}
-
 function renderNotice(entry: MakaPiNoticeEntry, width: number): string[] {
   const label = entry.level === 'error' ? ansi.red('Error') : ansi.dim('Note');
   return renderIndented(`${label}: ${entry.text}`, width, 0).map((line) => fitLine(line, width));
+}
+
+// Shown on a fresh, empty session. Greets, states where we are (model /
+// connection / folder), and lists the handful of commands and keys worth
+// knowing up front — enough to start without reading docs.
+function renderWelcomeBlock(metadata: MakaPiTranscriptMetadata, width: number): string[] {
+  // Point at /help for the full command list rather than duplicating it here —
+  // the autocomplete already teaches commands as you type. Just the greeting plus
+  // the keys you cannot discover by typing `/`.
+  const tips: [string, string][] = [
+    ['/help', '查看全部命令与快捷键'],
+    ['Ctrl+O', '展开或折叠工具输出'],
+    ['Esc Esc', '回退到较早的轮次'],
+  ];
+  const keyWidth = Math.max(...tips.map(([key]) => key.length));
+  const lines = [
+    fitLine(ansi.accent('maka'), width),
+    fitLine(ansi.dim(`${metadata.model} · ${metadata.connectionSlug} · ${metadata.cwd}`), width),
+    '',
+    fitLine('输入消息开始对话，或用斜杠命令：', width),
+  ];
+  for (const [key, description] of tips) {
+    lines.push(fitLine(ansi.dim(`  ${key.padEnd(keyWidth)}  ${description}`), width));
+  }
+  return lines;
 }
 
 function renderPermissionPrompt(request: PermissionRequestEvent, width: number): string[] {
@@ -940,123 +968,13 @@ function permissionRequestSummary(request: PermissionRequestEvent): string {
     const command = (args as { command?: unknown }).command;
     if (typeof command === 'string' && command.trim()) return `$ ${command}`;
   }
+  if (request.toolName === 'WriteStdin') {
+    const input = readWriteStdinInputPreview(args);
+    if (input) return input.truncated ? `${input.text}… · ${input.bytes} bytes total` : input.text;
+  }
   if ((request.toolName === 'Write' || request.toolName === 'Edit') && args !== null && typeof args === 'object') {
     const path = (args as { path?: unknown }).path;
     if (typeof path === 'string' && path.trim()) return path;
   }
   return limitText(formatUnknown(request.args), 600);
 }
-
-function renderIndented(text: string, width: number, indent: number): string[] {
-  const prefix = ' '.repeat(indent);
-  const contentWidth = Math.max(1, width - indent);
-  const out: string[] = [];
-  for (const rawLine of text.split('\n')) {
-    const wrapped = wrapTextWithAnsi(rawLine, contentWidth);
-    for (const line of wrapped.length > 0 ? wrapped : ['']) {
-      out.push(prefix + line);
-    }
-  }
-  return out;
-}
-
-function fitLine(line: string, width: number): string {
-  return visibleWidth(line) > width ? truncateToWidth(line, width, '') : line;
-}
-
-function formatToolResultContent(content: ToolResultContent): string {
-  switch (content.kind) {
-    case 'text':
-      return content.text;
-    case 'json':
-      return formatUnknown(content.value);
-    case 'terminal':
-      return [
-        `$ ${content.cmd}`,
-        `cwd: ${content.cwd}`,
-        `exit: ${content.exitCode}`,
-        content.stdout ? `stdout:\n${content.stdout}` : '',
-        content.stderr ? `stderr:\n${content.stderr}` : '',
-      ].filter(Boolean).join('\n\n');
-    case 'shell_run':
-      return [
-        `$ ${content.cmd}`,
-        `cwd: ${content.cwd}`,
-        `ref: ${content.ref}`,
-        `status: ${content.status}`,
-        content.exitCode !== undefined ? `exit: ${content.exitCode}` : '',
-        content.stdout ? `stdout:\n${content.stdout}` : '',
-        content.stderr ? `stderr:\n${content.stderr}` : '',
-      ].filter(Boolean).join('\n\n');
-    case 'file_diff':
-      return content.diff;
-    case 'file_write':
-      return `Wrote ${content.bytes} bytes to ${content.path}`;
-    case 'summary':
-      return content.summarized;
-    case 'image':
-      return `${content.mimeType} image result`;
-    case 'web_search':
-      return [
-        `Search ${content.provider}: ${content.query}`,
-        ...content.rows.map((row) => `${row.title}\n${row.url}\n${row.snippet}`),
-      ].join('\n\n');
-    case 'web_search_error':
-      return content.message;
-    case 'office_document':
-      return content.message ?? [content.operation, content.path, content.stdout, content.stderr].filter(Boolean).join('\n');
-    case 'explore_agent':
-      return content.report ?? content.summary ?? content.message ?? `Inspected ${content.filesInspected} files`;
-    case 'subagent':
-      return content.summary;
-    case 'rive_workflow':
-      return content.summary;
-    case 'archived_tool_result':
-      return `Archived tool result: ${content.status}`;
-  }
-}
-
-function formatUnknown(value: unknown): string {
-  if (typeof value === 'string') return value;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function formatUnknownInline(value: unknown): string {
-  if (typeof value === 'string') return value;
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-/** Fold line breaks into spaces so a summary can never split a one-line slot. */
-function collapseToSingleLine(text: string): string {
-  return text.replace(/\s*\n\s*/g, ' ');
-}
-
-function limitText(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}\n... ${text.length - maxChars} chars truncated`;
-}
-
-const markdownTheme: MarkdownTheme = {
-  heading: ansi.accent,
-  link: ansi.underline,
-  linkUrl: ansi.dim,
-  code: ansi.yellow,
-  codeBlock: (text) => text,
-  codeBlockBorder: ansi.dim,
-  quote: ansi.dim,
-  quoteBorder: ansi.dim,
-  hr: ansi.dim,
-  listBullet: ansi.accent,
-  bold: ansi.bold,
-  italic: ansi.italic,
-  strikethrough: ansi.strikethrough,
-  underline: ansi.underline,
-};

@@ -24,23 +24,31 @@ import { readMainProcessCombinedSource } from './main-process-contract-source-he
 
 const REPO_ROOT = resolve(process.cwd(), '..', '..');
 const PRELOAD_SOURCE = resolve(REPO_ROOT, 'apps', 'desktop', 'src', 'preload', 'preload.ts');
+// The browser-loopback login/logout controller was extracted out of
+// SubscriptionLoginModal into this shared hook so the model connection detail
+// sheet's 重新登录 button drives the identical flow. Its internals are pinned
+// here directly (it is not part of the provider settings combined source).
+const OAUTH_LOGIN_FLOW_HOOK_SOURCE = resolve(
+  REPO_ROOT,
+  'apps', 'desktop', 'src', 'renderer', 'settings', 'use-oauth-login-flow.ts',
+);
 
 describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MOVE-0)', () => {
-  it('renders OAuth as a catalog tab peer, not a standalone section above the market', async () => {
+  it('keeps OAuth account connections on the connection page, outside the provider transport catalog', async () => {
     const src = await readProviderSettingsCombinedSource();
     const tabs = src.match(/const CATALOG_TABS:[\s\S]*?\];/);
     assert.ok(tabs, 'CATALOG_TABS literal must exist');
-    assert.match(tabs[0], /id:\s*'oauth'[\s\S]*label:\s*'OAuth'/, 'OAuth must be a catalog tab');
+    assert.doesNotMatch(tabs[0], /id:\s*'oauth'/, 'OAuth is an account connection, not a provider transport category');
     assert.match(
       src,
-      /<PrimitiveTabsPanel value="oauth">\s*<ModelOAuthSection\s+onConnectionsChanged=\{async \(\) => \{ await reload\(\); \}\}\s*\/>\s*<\/PrimitiveTabsPanel>/,
-      'OAuth login UI must render inside the oauth TabsPanel and refresh enabled models',
+      /<section className="providerAccountSection" aria-label="账号连接">[\s\S]*<ModelOAuthSection onConnectionsChanged=\{async \(\) => \{ await reload\(\); \}\} \/>[\s\S]*<\/section>/,
+      'OAuth login UI must render as account connections and refresh enabled models',
     );
     const marketStart = src.indexOf('<section className="providerMarket">');
     const firstOAuthRender = src.indexOf('<ModelOAuthSection');
     assert.ok(marketStart !== -1, 'provider market section must exist');
-    assert.ok(firstOAuthRender > marketStart, 'ModelOAuthSection must not be pinned above providerMarket');
-    assert.doesNotMatch(src, /providerOAuthHeader/, 'OAuth tab must not carry a second standalone section header');
+    assert.ok(firstOAuthRender > marketStart, 'ModelOAuthSection must stay inside the provider connection surface');
+    assert.match(src, /<h3>账号连接<\/h3>/, 'OAuth account connections need an explicit section label');
   });
 
   it('catalog tabs use the shared primitive Tabs primitive as a real tablist', async () => {
@@ -64,7 +72,7 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     }
     assert.doesNotMatch(src, /function onCatalogTabsKeyDown/, 'provider catalog tabs should not keep a custom keyboard handler');
     assert.doesNotMatch(src, /data-catalog-tab="\$\{CSS\.escape/, 'provider catalog tabs should not use manual focus queries');
-    assert.match(tabs, /value=\{catalogTab\}[\s\S]*onValueChange=\{\(value\) => setCatalogTab\(value as CatalogTab\)\}/);
+    assert.match(tabs, /value=\{catalogCategory\}[\s\S]*onValueChange=\{\(value\) => setCatalogCategory\(value as CatalogCategory\)\}/);
     assert.match(tabs, /<PrimitiveTabsList[^>]*variant="pill"[^>]*aria-label="模型供应商分类">/);
     assert.match(tabs, /<PrimitiveTabsTrigger[\s\S]*value=\{tab\.id\}/, 'catalog tabs use PrimitiveTabsTrigger as a real tablist (maka-tab comes from the primitive)');
     assert.match(tabs, /data-catalog-tab=\{tab\.id\}/);
@@ -77,7 +85,7 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     assert.ok(reloadMatch, 'ProvidersPanel reload() must exist');
     assert.match(
       panel,
-      /const providersPanelMountedRef = useRef\(false\);[\s\S]*const providersReloadTicketRef = useRef\(0\);[\s\S]*const providerSheetLifecycleRef = useRef\(0\);/,
+      /const providersPanelMountedRef = useRef\(false\);[\s\S]*const providersReloadTicketRef = useRef\(0\);[\s\S]*const providerPageLifecycleRef = useRef\(0\);/,
       'ProvidersPanel reloads must track mounted state and latest request ownership',
     );
     assert.match(
@@ -102,17 +110,17 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     );
     assert.match(
       src,
-      /function closeProviderConfigSheet\(\) \{[\s\S]*providerSheetLifecycleRef\.current \+= 1;[\s\S]*setAddingType\(null\);[\s\S]*setSelectedSlug\(null\);[\s\S]*\}/,
-      'closing a provider config sheet must invalidate pending sheet-scoped continuations',
+      /function navigate\(nextPage: ProviderPage, focusTarget: ProviderFocusTarget\) \{[\s\S]*providerPageLifecycleRef\.current \+= 1;[\s\S]*pendingFocusRef\.current = focusTarget;[\s\S]*setPage\(nextPage\);[\s\S]*\}/,
+      'navigating away must invalidate pending page-scoped continuations',
     );
     assert.match(
       src,
-      /onCreated=\{async \(slug\) => \{[\s\S]*const providerSheetLifecycle = providerSheetLifecycleRef\.current;[\s\S]*const reloaded = await reload\(\);[\s\S]*providerSheetLifecycleRef\.current !== providerSheetLifecycle[\s\S]*\) return;[\s\S]*setSelectedSlug\(slug\);[\s\S]*setAddingType\(null\);/,
-      'AddProviderForm completion must not select/close a stale sheet after ProvidersPanel unmounts or sheet close',
+      /onCreated=\{async \(slug\) => \{[\s\S]*const lifecycle = providerPageLifecycleRef\.current;[\s\S]*const reloaded = await reload\(\);[\s\S]*providerPageLifecycleRef\.current !== lifecycle[\s\S]*\) return;[\s\S]*navigate\(\{ kind: 'detail', slug \}, \{ kind: 'child-back' \}\);/,
+      'AddProviderForm completion must not navigate a stale page after ProvidersPanel unmounts or back navigation',
     );
     assert.match(
       src,
-      /onDeleted=\{async \(\) => \{[\s\S]*if \(!providersPanelMountedRef\.current\) return;[\s\S]*setSelectedSlug\(null\);[\s\S]*await reload\(\);/,
+      /onDeleted=\{async \(\) => \{[\s\S]*if \(!providersPanelMountedRef\.current\) return;[\s\S]*navigate\(\{ kind: 'connections' \}, \{ kind: 'add-provider' \}\);[\s\S]*await reload\(\);/,
       'Connection delete completion must not write ProvidersPanel state after unmount',
     );
   });
@@ -280,35 +288,15 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     );
   });
 
-  it('provider config sheets expose their own accessible close button', async () => {
+  it('provider configuration uses an accessible in-pane child page, not a Sheet', async () => {
     const src = await readProviderSettingsCombinedSource();
-    const styles = await readRendererContractCss();
-    const overlay = src.match(/function ProviderConfigSheetOverlay[\s\S]*?function ProviderCatalogCard/)?.[0] ?? '';
-
-    assert.match(overlay, /className="providerConfigSheetClose"/);
-    assert.match(overlay, /aria-label="关闭模型配置"/);
-    assert.match(overlay, /<X strokeWidth=\{1\.75\} aria-hidden="true" \/>/);
-    assert.match(styles, /\.providerConfigOverlay\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*0;/);
-    assert.doesNotMatch(
-      styles,
-      /\.providerConfigOverlay\s*\{[^}]*justify-content:\s*flex-end;/,
-      'Base UI renders Backdrop and Popup as siblings; overlay flex must not be treated as sheet layout',
-    );
-    assert.match(styles, /\.providerConfigSheet\s*\{[^}]*position:\s*absolute;/);
-    assert.match(styles, /\.providerConfigSheet\s*\{[^}]*inset:\s*var\(--space-3\)\s+var\(--space-3\)\s+var\(--space-3\)\s+auto;/);
-    assert.match(styles, /\.providerConfigSheet\s*\{[^}]*width:\s*min\(430px,\s*calc\(100%\s*-\s*\(var\(--space-3\)\s*\*\s*2\)\)\);/);
-    assert.match(styles, /\.providerConfigSheetClose\s*\{[\s\S]*position:\s*absolute;[\s\S]*right:\s*14px;/);
-    // The close button reuses the governed quiet icon Button, so its rest /
-    // hover / focus states come from the component, not hand-written CSS. The
-    // local class only positions and rounds it.
-    assert.match(
-      overlay,
-      /variant="quiet"[\s\S]*?size="icon-sm"[\s\S]*?className="providerConfigSheetClose"/,
-      'close button must reuse the governed quiet icon Button for its hover/focus states',
-    );
+    assert.match(src, /type ProviderPage =[\s\S]*kind: 'add'[\s\S]*kind: 'detail'/);
+    assert.match(src, /function ProviderPageHeader[\s\S]*aria-label="返回模型连接"/);
+    assert.match(src, /<div className="providerInlineEditor">[\s\S]*<AddProviderForm/);
+    assert.doesNotMatch(src, /ProviderConfigSheetOverlay/, 'API provider configuration must not use the OAuth modal infrastructure');
   });
 
-  it('provider config sheets route through Base UI Dialog nested in the settings surface', async () => {
+  it('OAuth login sheets route through Base UI Dialog nested in the settings surface', async () => {
     const src = await readProviderSettingsCombinedSource();
 
     // ProviderSheet wraps Base UI Dialog so the nested modal layer handles
@@ -329,7 +317,7 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
       /Backdrop[\s\S]{0,80}forceRender/,
       'nested backdrop must forceRender (Base UI skips nested backdrops by default; provider sheets want the scrim)',
     );
-    assert.match(src, /<ProviderSheet/, 'provider/OAuth sheets must render via ProviderSheet');
+    assert.match(src, /<ProviderSheet/, 'OAuth sheets must render via ProviderSheet');
     assert.doesNotMatch(
       src,
       /\buseProviderSheetBackgroundInert\(/,
@@ -342,7 +330,7 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     );
   });
 
-  it('does not auto-open the first provider config sheet after loading connections', async () => {
+  it('does not auto-open the first provider detail page after loading connections', async () => {
     // WAWQAQ goal sweep: Settings -> 模型 kept reopening the first
     // provider config sheet on every Settings open because reload()
     // defaulted selectedSlug to list[0]. A model list refresh should
@@ -351,9 +339,9 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     const src = await readProviderSettingsCombinedSource();
     const reloadBlock = src.match(/async function reload\(\)[\s\S]*?^\s*\}/m)?.[0] ?? '';
 
-    assert.match(reloadBlock, /setSelectedSlug\(\(current\) =>[\s\S]*list\.some\(\(connection\) => connection\.slug === current\)/);
-    assert.match(reloadBlock, /\?\s*current\s*:\s*null/);
-    assert.doesNotMatch(reloadBlock, /current\s*\?\?\s*list\[0\]\?\.slug/, 'reload must not auto-select the first provider');
+    assert.match(reloadBlock, /setPage\(\(current\) => current\.kind === 'detail' && !list\.some\(\(connection\) => connection\.slug === current\.slug\)/);
+    assert.match(reloadBlock, /\? \{ kind: 'connections' \}\s*:\s*current/);
+    assert.doesNotMatch(reloadBlock, /list\[0\]\?\.slug/, 'reload must not auto-select the first provider');
   });
 
   it('enabled model chips expose a concise aria-label instead of concatenated duplicate visible text', async () => {
@@ -416,7 +404,7 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
       'provider badges must be separated in the accessible name instead of glued to the provider name',
     );
     assert.match(src, /自定义 OpenAI 兼容接口/);
-    assert.match(src, /添加 OpenAI 兼容接口/);
+    assert.match(src, /添加模型供应商：\$\{display\.name\}/);
     assert.match(src, /智谱 · OpenAI 兼容/);
     assert.match(
       src,
@@ -500,7 +488,7 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
 
     assert.match(
       section,
-      /className="providerCatalogRow providerOAuthCard rounded-none"/,
+      /className="providerCatalogRow providerOAuthCard"/,
       'OAuth tab rows must reuse the same governed provider catalog row chrome as 国内 / 海外 / 本地 rows',
     );
     assert.match(
@@ -1020,100 +1008,108 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     assert.match(body, /case 'antigravity'[\s\S]*?window\.maka\.antigravitySubscription/);
   });
 
-  it('modal flow calls getAuthUrl → openAuthUrl → completeAuthorization on the bridge', async () => {
-    const src = await readProviderSettingsCombinedSource();
-    const fnMatch = src.match(/async function startLogin\(\)[\s\S]*?\n  \}/);
-    assert.ok(fnMatch, 'startLogin must exist on SubscriptionLoginModal');
+  it('shared login flow calls getAuthUrl → openAuthUrl → completeAuthorization on the bridge', async () => {
+    const hook = await readFile(OAUTH_LOGIN_FLOW_HOOK_SOURCE, 'utf8');
+    const fnMatch = hook.match(/async function startLogin\(\)[\s\S]*?\n  \}/);
+    assert.ok(fnMatch, 'startLogin must exist in the shared useOAuthLoginFlow hook');
     const body = fnMatch[0];
     assert.match(body, /bridge\.getAuthUrl\(\)/);
     assert.match(body, /bridge\.openAuthUrl\(payload\.authRequestId\)/);
     assert.match(body, /bridge\.completeAuthorization\(payload\.authRequestId\)/);
+    // Both the OAuth catalog modal and the connection detail sheet must drive
+    // this one flow rather than re-implementing the browser handoff.
+    const src = await readProviderSettingsCombinedSource();
+    assert.match(src, /const flow = useOAuthLoginFlow\(\{/, 'SubscriptionLoginModal must consume the shared login-flow hook');
   });
 
   it('OAuth login modals surface thrown IPC/service failures instead of leaving console-only rejections', async () => {
     const src = await readProviderSettingsCombinedSource();
-    const helper = src.match(/function subscriptionActionErrorMessage[\s\S]*?async function getSubscriptionSnapshot/)?.[0] ?? '';
+    // Localization helpers + the whole browser-loopback controller now live in
+    // the shared hook; the thin modal only renders from its return.
+    const hook = await readFile(OAUTH_LOGIN_FLOW_HOOK_SOURCE, 'utf8');
     const browserModal = src.match(/function SubscriptionLoginModal[\s\S]*?function ClaudeSubscriptionCard/)?.[0] ?? '';
     const claudeCard = src.match(/function ClaudeSubscriptionCard[\s\S]*?function presentSubscriptionState/)?.[0] ?? '';
 
-    assert.match(helper, /登录服务暂时不可用，请检查网络后重试。/, 'OAuth thrown-error fallback must be user-facing Chinese copy');
-    assert.match(helper, /redactSecrets\(message \?\? ''\)\.trim\(\)/, 'OAuth service messages must be redacted before reaching visible UI');
-    assert.match(helper, /generalizedErrorMessageChinese\(new Error\(raw\), ''\)/, 'OAuth service messages must pass through Chinese error classification');
-    assert.match(helper, /\/\[\\u4e00-\\u9fff\]\/\.test\(raw\)/, 'already-Chinese OAuth diagnostics may be preserved after redaction');
-    assert.match(browserModal, /async function refresh\(\)(?:: Promise<boolean>)?[\s\S]*catch \(error\) \{[\s\S]*toast\.error\('刷新登录状态失败', message\);[\s\S]*setErrorMessage\(message\);/, 'browser OAuth state refresh must surface thrown failures');
-    assert.match(browserModal, /catch \(error\) \{[\s\S]*toast\.error\('登录失败', message\);[\s\S]*setErrorMessage\(message\);/, 'browser OAuth login must toast thrown failures');
-    assert.match(browserModal, /catch \(error\) \{[\s\S]*toast\.error\('退出失败', subscriptionActionErrorMessage\(error\)\);/, 'browser OAuth logout must toast thrown failures');
-    assert.doesNotMatch(browserModal, /toast\.error\('[^']+', (?:payload|opened|result)\.message\)/, 'browser OAuth action envelopes must not toast raw service messages');
-    assert.doesNotMatch(browserModal, /setErrorMessage\((?:payload|opened|result)\.message\)/, 'browser OAuth action envelopes must not render raw service messages');
-    assert.match(browserModal, /subscriptionResultMessage\(payload\.message, '无法开始登录，请稍后再试。'\)/, 'browser OAuth getAuthUrl failures must be localized');
-    assert.match(browserModal, /subscriptionResultMessage\(opened\.message, '无法打开浏览器，请稍后重试。'\)/, 'browser OAuth openAuthUrl failures must be localized');
-    assert.match(browserModal, /subscriptionResultMessage\(result\.message, '登录未完成，请重新打开浏览器授权。'\)/, 'browser OAuth completion failures must be localized');
+    assert.match(hook, /登录服务暂时不可用，请检查网络后重试。/, 'OAuth thrown-error fallback must be user-facing Chinese copy');
+    assert.match(hook, /redactSecrets\(message \?\? ''\)\.trim\(\)/, 'OAuth service messages must be redacted before reaching visible UI');
+    assert.match(hook, /generalizedErrorMessageChinese\(new Error\(raw\), ''\)/, 'OAuth service messages must pass through Chinese error classification');
+    assert.match(hook, /\/\[\\u4e00-\\u9fff\]\/\.test\(raw\)/, 'already-Chinese OAuth diagnostics may be preserved after redaction');
+    assert.match(hook, /async function refresh\(\): Promise<boolean>[\s\S]*catch \(error\) \{[\s\S]*toast\.error\('刷新登录状态失败', message\);[\s\S]*setErrorMessage\(message\);/, 'shared OAuth state refresh must surface thrown failures');
+    assert.match(hook, /catch \(error\) \{[\s\S]*toast\.error\('登录失败', message\);[\s\S]*setErrorMessage\(message\);/, 'shared OAuth login must toast thrown failures');
+    assert.match(hook, /catch \(error\) \{[\s\S]*toast\.error\('退出失败', subscriptionActionErrorMessage\(error\)\);/, 'shared OAuth logout must toast thrown failures');
+    assert.doesNotMatch(hook, /toast\.error\('[^']+', (?:payload|opened|result)\.message\)/, 'shared OAuth action envelopes must not toast raw service messages');
+    assert.doesNotMatch(hook, /setErrorMessage\((?:payload|opened|result)\.message\)/, 'shared OAuth action envelopes must not render raw service messages');
+    assert.match(hook, /subscriptionResultMessage\(payload\.message, '无法开始登录，请稍后再试。'\)/, 'shared OAuth getAuthUrl failures must be localized');
+    assert.match(hook, /subscriptionResultMessage\(opened\.message, '无法打开浏览器，请稍后重试。'\)/, 'shared OAuth openAuthUrl failures must be localized');
+    assert.match(hook, /subscriptionResultMessage\(result\.message, '登录未完成，请重新打开浏览器授权。'\)/, 'shared OAuth completion failures must be localized');
     assert.match(
-      browserModal,
-      /const \[pendingAction, setPendingAction\] = useState<BrowserSubscriptionPendingAction \| null>\(null\)/,
-      'browser OAuth modal needs a named pending action, not a bare boolean',
+      hook,
+      /const \[pendingAction, setPendingAction\] = useState<OAuthLoginPendingAction \| null>\(null\)/,
+      'shared OAuth flow needs a named pending action, not a bare boolean',
     );
     assert.match(
-      browserModal,
-      /const pendingActionRef = useRef<BrowserSubscriptionPendingAction \| null>\(null\)/,
-      'browser OAuth modal must gate one-shot auth actions synchronously through a ref',
+      hook,
+      /const pendingGuard = useRef\(createOneShotActionGuard<OAuthLoginPendingAction>\(\)\)\.current/,
+      'shared OAuth flow must gate one-shot auth actions synchronously through a ref-held guard',
     );
     assert.match(
-      browserModal,
-      /const browserSubscriptionMountedRef = useRef\(false\)/,
-      'browser OAuth modal must own mounted state before writing async feedback',
+      hook,
+      /const oauthLoginFlowMountedRef = useRef\(false\)/,
+      'shared OAuth flow must own mounted state before writing async feedback',
     );
     assert.match(
-      browserModal,
+      hook,
       /const authRequestIdRef = useRef<string \| null>\(null\)/,
-      'browser OAuth modal must keep the pending authorization request in a ref for cleanup',
+      'shared OAuth flow must keep the pending authorization request in a ref for cleanup',
     );
     assert.match(
-      browserModal,
-      /async function refresh\(\): Promise<boolean> \{[\s\S]*const next = \(await bridge\.getAccountState\(\)\) as SubscriptionSnapshot;[\s\S]*if \(!browserSubscriptionMountedRef\.current\) return false;[\s\S]*setState\(next\);[\s\S]*catch \(error\) \{[\s\S]*if \(!browserSubscriptionMountedRef\.current\) return false;[\s\S]*toast\.error\('刷新登录状态失败', message\);[\s\S]*return true;/,
-      'browser OAuth refresh must drop late state/error writes after modal close',
+      hook,
+      /async function refresh\(\): Promise<boolean> \{[\s\S]*const next = \(await bridge\.getAccountState\(\)\) as SubscriptionSnapshot;[\s\S]*if \(!oauthLoginFlowMountedRef\.current\) return false;[\s\S]*setState\(next\);[\s\S]*catch \(error\) \{[\s\S]*if \(!oauthLoginFlowMountedRef\.current\) return false;[\s\S]*toast\.error\('刷新登录状态失败', message\);[\s\S]*return true;/,
+      'shared OAuth refresh must drop late state/error writes after unmount',
     );
     assert.match(
-      browserModal,
-      /useEffect\(\(\) => \{[\s\S]*browserSubscriptionMountedRef\.current = true;[\s\S]*void refresh\(\);[\s\S]*return \(\) => \{[\s\S]*browserSubscriptionMountedRef\.current = false;[\s\S]*pendingActionRef\.current = null;[\s\S]*const pendingAuthRequestId = authRequestIdRef\.current;[\s\S]*authRequestIdRef\.current = null;[\s\S]*if \(pendingAuthRequestId\) void bridge\.cancelAuthorization\(pendingAuthRequestId\);[\s\S]*\};[\s\S]*\}, \[\]\);/,
-      'browser OAuth modal cleanup must invalidate async feedback and cancel pending authorization',
+      hook,
+      /useEffect\(\(\) => \{[\s\S]*oauthLoginFlowMountedRef\.current = true;[\s\S]*void refresh\(\);[\s\S]*return \(\) => \{[\s\S]*oauthLoginFlowMountedRef\.current = false;[\s\S]*pendingGuard\.finish\(\);[\s\S]*teardownPendingAuthorization\(authRequestIdRef, \(id\) => void bridge\.cancelAuthorization\(id\)\);[\s\S]*\};[\s\S]*\}, \[\]\);/,
+      'shared OAuth flow cleanup must invalidate async feedback and cancel pending authorization',
     );
     assert.match(
-      browserModal,
-      /function finishPendingAction\(\) \{[\s\S]*pendingActionRef\.current = null;[\s\S]*if \(browserSubscriptionMountedRef\.current\) setPendingAction\(null\);[\s\S]*\}/,
-      'browser OAuth pending cleanup must not set state after unmount',
+      hook,
+      /function finishPendingAction\(\) \{[\s\S]*pendingGuard\.finish\(\);[\s\S]*if \(oauthLoginFlowMountedRef\.current\) setPendingAction\(null\);[\s\S]*\}/,
+      'shared OAuth pending cleanup must not set state after unmount',
     );
     assert.match(
-      browserModal,
-      /function beginPendingAction\(action: BrowserSubscriptionPendingAction\): boolean \{[\s\S]*if \(pendingActionRef\.current !== null\) return false;[\s\S]*pendingActionRef\.current = action;[\s\S]*setPendingAction\(action\);[\s\S]*return true;/,
-      'browser OAuth duplicate clicks must be rejected before React re-renders disabled buttons',
+      hook,
+      /function beginPendingAction\(action: OAuthLoginPendingAction\): boolean \{[\s\S]*if \(!pendingGuard\.begin\(action\)\) return false;[\s\S]*setPendingAction\(action\);[\s\S]*return true;/,
+      'shared OAuth duplicate clicks must be rejected before React re-renders disabled buttons',
     );
-    assert.match(browserModal, /if \(!beginPendingAction\('login'\)\) return;/, 'browser OAuth login must use the ref-backed action guard');
-    assert.match(browserModal, /if \(!beginPendingAction\('logout'\)\) return;/, 'browser OAuth logout must use the ref-backed action guard');
+    assert.match(hook, /if \(!beginPendingAction\('login'\)\) return;/, 'shared OAuth login must use the ref-backed action guard');
+    assert.match(hook, /if \(!beginPendingAction\('logout'\)\) return;/, 'shared OAuth logout must use the ref-backed action guard');
     assert.match(
-      browserModal,
-      /const payload = await bridge\.getAuthUrl\(\);[\s\S]*authRequestIdRef\.current = payload\.authRequestId;[\s\S]*if \(!browserSubscriptionMountedRef\.current\) \{[\s\S]*authRequestIdRef\.current = null;[\s\S]*void bridge\.cancelAuthorization\(payload\.authRequestId\);[\s\S]*return;[\s\S]*\}[\s\S]*const opened = await bridge\.openAuthUrl\(payload\.authRequestId\);[\s\S]*if \(!browserSubscriptionMountedRef\.current\) return;[\s\S]*const refreshed = await refresh\(\);[\s\S]*if \(!browserSubscriptionMountedRef\.current \|\| !refreshed\) return;[\s\S]*const result = await bridge\.completeAuthorization\(payload\.authRequestId\);[\s\S]*if \(!browserSubscriptionMountedRef\.current\) return;[\s\S]*authRequestIdRef\.current = null;/,
-      'browser OAuth login must stop each async continuation after modal close',
+      hook,
+      /const payload = await bridge\.getAuthUrl\(\);[\s\S]*authRequestIdRef\.current = payload\.authRequestId;[\s\S]*if \(!oauthLoginFlowMountedRef\.current\) \{[\s\S]*authRequestIdRef\.current = null;[\s\S]*void bridge\.cancelAuthorization\(payload\.authRequestId\);[\s\S]*return;[\s\S]*\}[\s\S]*const opened = await bridge\.openAuthUrl\(payload\.authRequestId\);[\s\S]*if \(!oauthLoginFlowMountedRef\.current\) return;[\s\S]*const refreshed = await refresh\(\);[\s\S]*if \(!oauthLoginFlowMountedRef\.current \|\| !refreshed\) return;[\s\S]*const result = await bridge\.completeAuthorization\(payload\.authRequestId\);[\s\S]*if \(!oauthLoginFlowMountedRef\.current\) return;[\s\S]*authRequestIdRef\.current = null;/,
+      'shared OAuth login must stop each async continuation after unmount',
     );
     assert.match(
-      browserModal,
+      hook,
       /if \(!opened\.ok\) \{[\s\S]*void bridge\.cancelAuthorization\(payload\.authRequestId\);[\s\S]*authRequestIdRef\.current = null;[\s\S]*setAuthRequestId\(null\);[\s\S]*setStateHint\(null\);/,
-      'browser OAuth open-browser failures must clear and cancel the pending authorization request',
+      'shared OAuth open-browser failures must clear and cancel the pending authorization request',
     );
     assert.match(
-      browserModal,
+      hook,
       /catch \(error\) \{[\s\S]*const pendingAuthRequestId = authRequestIdRef\.current;[\s\S]*authRequestIdRef\.current = null;[\s\S]*if \(pendingAuthRequestId\) void bridge\.cancelAuthorization\(pendingAuthRequestId\);[\s\S]*setAuthRequestId\(null\);[\s\S]*setStateHint\(null\);/,
-      'browser OAuth thrown login failures must clear and cancel the pending authorization request',
+      'shared OAuth thrown login failures must clear and cancel the pending authorization request',
     );
     assert.match(
-      browserModal,
-      /const result = await bridge\.logout\(\);[\s\S]*if \(!browserSubscriptionMountedRef\.current\) return;[\s\S]*catch \(error\) \{[\s\S]*if \(!browserSubscriptionMountedRef\.current\) return;[\s\S]*toast\.error\('退出失败', subscriptionActionErrorMessage\(error\)\);/,
-      'browser OAuth logout must not toast after modal close',
+      hook,
+      /const result = await bridge\.logout\(\);[\s\S]*if \(!oauthLoginFlowMountedRef\.current\) return;[\s\S]*catch \(error\) \{[\s\S]*if \(!oauthLoginFlowMountedRef\.current\) return;[\s\S]*toast\.error\('退出失败', subscriptionActionErrorMessage\(error\)\);/,
+      'shared OAuth logout must not toast after unmount',
     );
-    assert.match(browserModal, /const actionBusy = pendingAction !== null/, 'browser OAuth modal needs a shared busy flag derived from the named action');
-    assert.match(browserModal, /disabled=\{actionBusy\}/, 'browser OAuth action buttons must disable while another one-shot action is pending');
-    assert.match(browserModal, /pendingAction === 'login' \? '打开浏览器…' : `登录 \$\{display\.shortName\}`/, 'browser OAuth login start must expose specific pending copy');
-    assert.match(browserModal, /pendingAction === 'logout' \? '退出中…' : '退出登录'/, 'browser OAuth logout must expose local progress feedback');
+    assert.match(hook, /const actionBusy = pendingAction !== null/, 'shared OAuth flow needs a shared busy flag derived from the named action');
+    // The thin modal renders login/logout straight from the hook return.
+    assert.match(browserModal, /const flow = useOAuthLoginFlow\(\{/, 'SubscriptionLoginModal must consume the shared login-flow hook');
+    assert.match(browserModal, /disabled=\{flow\.actionBusy\}/, 'browser OAuth action buttons must disable while another one-shot action is pending');
+    assert.match(browserModal, /flow\.pendingAction === 'login' \? '打开浏览器…' : `登录 \$\{display\.shortName\}`/, 'browser OAuth login start must expose specific pending copy');
+    assert.match(browserModal, /flow\.pendingAction === 'logout' \? '退出中…' : '退出登录'/, 'browser OAuth logout must expose local progress feedback');
     assert.match(claudeCard, /const refresh = async \(\) => \{[\s\S]*catch \(error\) \{[\s\S]*toast\.error\('刷新登录状态失败', message\);[\s\S]*setPasteError\(message\);/, 'Claude OAuth state refresh must surface thrown failures');
     assert.match(claudeCard, /settingsErrorText" role="alert"\>\{pasteError\}/, 'Claude OAuth refresh failures must be visible in the modal body');
     assert.match(claudeCard, /catch \(error\) \{[\s\S]*toast\.error\('无法开始登录', message\);[\s\S]*setPasteError\(message\);/, 'Claude OAuth start must toast thrown failures');
@@ -1233,6 +1229,47 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     );
     assert.match(claudeCard, /pendingAction === 'submit' \? '提交中…' : '提交授权码'/, 'authorization-code submit must expose local progress feedback');
     assert.match(claudeCard, /pendingAction === 'cancel' \? '取消中…' : '取消'/, 'authorization cancel must expose local progress feedback');
+  });
+
+  it('OAuth model connection detail offers an in-sheet 重新登录 action wired to the shared login flow', async () => {
+    const src = await readProviderSettingsCombinedSource();
+    const mapping = src.match(/function oauthLoginServiceFor\(providerType: ProviderType\): OAuthLoginService \| null \{[\s\S]*?\n\}/)?.[0] ?? '';
+    const notice = src.match(/function OAuthReloginNotice\([\s\S]*?\ntype ConnectionDetailSnapshot/)?.[0] ?? '';
+    const detail = src.match(/function ConnectionDetail[\s\S]*?function OAuthReloginNotice/)?.[0] ?? '';
+
+    // Loopback services (Codex, Antigravity) get a bridge; Claude's paste flow
+    // and plain API-key providers fall through to null so the notice renders
+    // prose, never a dead button.
+    assert.match(mapping, /case 'codex-subscription':[\s\S]*window\.maka\.codexSubscription as unknown as OAuthLoginFlowBridge/);
+    assert.match(mapping, /case 'gemini-cli':[\s\S]*window\.maka\.antigravitySubscription as unknown as OAuthLoginFlowBridge/);
+    assert.match(mapping, /default:\s*return null;/);
+    assert.doesNotMatch(mapping, /case 'claude-subscription'/, 'Claude uses a paste-code flow and must not be routed through the one-button loopback hook');
+
+    // The notice drives the shared hook; its onLoginSuccess re-probes the
+    // credential and reloads the connection.
+    assert.match(notice, /const flow = useOAuthLoginFlow\(\{[\s\S]*bridge: props\.service\.bridge,[\s\S]*onLoginSuccess: props\.onRelogin,/);
+    // The button shows in every credential state EXCEPT 'loading'. An expired
+    // token still reads hasSecret===true, so the action must NOT hide behind
+    // hasSecret===false.
+    assert.match(notice, /const loggedIn = hasSecret === true;/);
+    assert.match(notice, /\{!loading && \(/);
+    assert.match(notice, /<Button[\s\S]*size="sm"[\s\S]*disabled=\{flow\.actionBusy\}[\s\S]*onClick=\{\(\) => void flow\.startLogin\(\)\}/);
+    assert.match(notice, /flow\.pendingAction === 'login' \? '登录中…' : loggedIn \? '重新登录' : '登录'/);
+    // Honest logged-in banner: it points at the re-auth action instead of
+    // claiming there is nothing to do.
+    assert.match(notice, /若请求提示需要重新登录，点这里重新走一遍授权/);
+    assert.doesNotMatch(notice, /请到上方 OAuth 分类完成登录/, 'the mapped notice must drop the go-hunt-the-catalog prose');
+
+    // ConnectionDetail wires the notice for mapped OAuth types and keeps a
+    // buttonless prose fallback for unmapped ones.
+    assert.match(detail, /const oauthLoginService = needsOAuth \? oauthLoginServiceFor\(connection\.providerType\) : null/);
+    assert.match(detail, /oauthLoginService \? \(\s*<OAuthReloginNotice/);
+    assert.match(
+      detail,
+      /async function refreshAfterRelogin\(\) \{[\s\S]*await props\.bridge\.hasSecret\(connection\.slug\)[\s\S]*setHasSecret\(nextHasSecret\);[\s\S]*await props\.onChanged\(\);/,
+      'a successful in-sheet re-login must re-probe the credential (expired tokens read hasSecret===true) and reload the connection status',
+    );
+    assert.match(detail, /请到账号连接完成登录/, 'unmapped OAuth types keep an honest prose fallback');
   });
 
   it('preload exposes the three new subscription namespaces alongside claudeSubscription', async () => {

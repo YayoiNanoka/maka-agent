@@ -1,4 +1,4 @@
-/* Daily Review page-card chrome — atlas §4 + Phase 2A recipe parity with
+/* Daily Review page-card chrome — recipe parity with
    Skills + Plan shells (1px hairline border + 6px radius + 4% lift + inner
    highlight). Was flat (transparent) which felt orphaned next to the other
    module pages. */
@@ -19,9 +19,11 @@
 .maka-daily-review-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    /* P2-10: range picker + stepper are one time-control cluster on the
+       left (was space-between, which split them to opposite corners). */
+    justify-content: flex-start;
     flex-wrap: wrap;
-    gap: var(--space-2);
+    gap: var(--space-3);
     padding: var(--space-0-5) var(--space-0-5) var(--space-1-5);
     border-bottom: var(--border-width-hairline) solid var(--foreground-10);
   }
@@ -110,28 +112,18 @@
     padding: 0;
   }
 
+/* Migrated onto the Item primitive (round 2): hover 4% / selected 6.5%
+   fills + the stacked title-over-meta column now come from Item +
+   ItemContent, so this rule keeps only geometry (padding, radius) and the
+   selected-state border accent. `data-selected` is Item's selected hook. */
 .maka-daily-review-archive-row {
-  appearance: none;
   border: var(--border-width-hairline) solid transparent;
   border-radius: var(--radius-control);
-  background: transparent;
-  color: inherit;
-  display: grid;
-  gap: 1px;
   min-width: 0;
   padding: var(--space-1-5) var(--space-2);
-  text-align: left;
-  transition:
-    background var(--duration-quick) var(--ease-out-strong),
-    border-color var(--duration-quick) var(--ease-out-strong);
 }
 
-.maka-daily-review-archive-row:hover {
-  background: var(--state-hover-bg);
-}
-
-.maka-daily-review-archive-row[data-active="true"] {
-  background: var(--state-selected-bg);
+.maka-daily-review-archive-row[data-selected] {
   border-color: var(--border-strong);
 }
 
@@ -196,26 +188,12 @@
     overflow-wrap: anywhere;
   }
 
+/* .maka-daily-review-archive-status is now the Chip primitive (squared status
+   label); tone→alpha from chip.tsx, ok/failed/no_model mapping from
+   dailyReviewArchiveChipTone in daily-review-panel.tsx. The status Chip keeps
+   flex:none so it never shrinks against the archive header title. */
 .maka-daily-review-archive-status {
     flex: none;
-    border: var(--border-width-hairline) solid var(--foreground-10);
-    border-radius: var(--radius-pill);
-    color: var(--muted-foreground);
-    font-size: var(--font-size-caption);
-    line-height: var(--leading-none);
-    padding: var(--space-1) var(--space-1-5);
-    white-space: nowrap;
-  }
-
-.maka-daily-review-archive-status[data-status="ok"] {
-    border-color: oklch(from var(--success, var(--status-running)) l c h / 0.26);
-    color: var(--success, var(--status-running));
-  }
-
-.maka-daily-review-archive-status[data-status="failed"],
-  .maka-daily-review-archive-status[data-status="no_model"] {
-    border-color: oklch(from var(--destructive, var(--warning, var(--info))) l c h / 0.30);
-    color: var(--destructive, var(--warning, var(--foreground)));
   }
 
 .maka-daily-review-archive-error {
@@ -354,29 +332,15 @@
 .maka-module-main .maka-daily-review-totals {
     grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   }
+/* Convergence R4: recipe lives in the StatTile primitive; density override
+   only (tight strip cells). */
 .maka-daily-review-totals-cell {
-    display: grid;
     gap: 1px;
     padding: var(--space-1) var(--space-2);
-    border: 0;
-    border-radius: var(--radius-control);
-    background: oklch(from var(--foreground) l c h / 0.04);
   }
-.maka-daily-review-totals-cell[data-tone="error"] {
+.maka-daily-review-totals-cell[data-tone="destructive"] {
     border-color: oklch(from var(--destructive, var(--warning, var(--info))) l c h / 0.35);
     background: oklch(from var(--destructive, var(--warning, var(--info))) l c h / 0.06);
-  }
-.maka-daily-review-totals-value {
-    font-size: var(--font-size-ui);
-    font-weight: var(--font-weight-semibold);
-    color: var(--foreground);
-    font-variant-numeric: tabular-nums;
-  }
-.maka-daily-review-totals-label {
-    font-size: var(--font-size-caption);
-    text-transform: none;
-    letter-spacing: var(--tracking-normal);
-    color: var(--muted-foreground);
   }
 
 /* PR-DAILY-REVIEW-EYEBROW-RHYTHM-0 (WAWQAQ msg `7f0ec4a5`): granularity

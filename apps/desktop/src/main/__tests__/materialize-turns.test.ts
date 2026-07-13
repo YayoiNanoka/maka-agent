@@ -8,7 +8,7 @@
 
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { deriveTurnLineageMap, materializeTurns } from '@maka/ui';
+import { deriveTurnLineageMap, materializeTurns, overlayLiveTurn, type LiveTurnProjection } from '@maka/ui';
 import type { StoredMessage } from '@maka/core';
 
 function userMsg(turnId: string, ts: number, text: string, id?: string): StoredMessage {
@@ -35,7 +35,41 @@ function toolResultMsg(turnId: string, ts: number, toolUseId: string, isError = 
   };
 }
 
+function materializeWithLive(messages: StoredMessage[], liveTurn: LiveTurnProjection) {
+  return overlayLiveTurn(materializeTurns(messages), liveTurn);
+}
+
 describe('materializeTurns', () => {
+  it('preserves settled turn identities while overlaying a live turn', () => {
+    const settled = materializeTurns([
+      userMsg('t1', 100, 'q1'),
+      assistantMsg('t1', 101, 'a1'),
+      userMsg('t2', 200, 'q2'),
+    ]);
+    const overlaid = overlayLiveTurn(settled, {
+      turnId: 't2',
+      phase: 'streamed',
+      steps: [{
+        stepId: 'step-live',
+        text: { text: 'streaming answer', truncated: false, complete: false },
+        tools: [],
+      }],
+    });
+
+    assert.notEqual(overlaid, settled);
+    assert.equal(overlaid[0], settled[0]);
+    assert.notEqual(overlaid[1], settled[1]);
+    assert.deepEqual(overlaid[1]?.timeline.at(-1), {
+      kind: 'text',
+      text: 'streaming answer',
+      messageId: 'step-live',
+      live: true,
+      complete: false,
+      truncated: false,
+    });
+    assert.equal(settled[1]?.timeline.length, 0);
+  });
+
   it('groups one full turn into user → tools → assistant', () => {
     const turns = materializeTurns([
       userMsg('t1', 100, 'hello'),
@@ -87,6 +121,30 @@ describe('materializeTurns', () => {
     assert.equal(turns[0]?.tools[0]?.status, 'interrupted');
   });
 
+  it('surfaces cancelled terminal results as interrupted instead of failed', () => {
+    const turns = materializeTurns([
+      userMsg('t1', 100, 'q'),
+      toolCallMsg('t1', 101, 'bash-cancel', 'Bash'),
+      {
+        type: 'tool_result',
+        id: 'r-bash-cancel',
+        turnId: 't1',
+        ts: 102,
+        toolUseId: 'bash-cancel',
+        isError: true,
+        content: {
+          kind: 'terminal',
+          cwd: '/repo',
+          cmd: 'sleep 99',
+          status: 'cancelled',
+          exitCode: 130,
+          output: pipeOutput(),
+        },
+      } as StoredMessage,
+    ]);
+    assert.equal(turns[0]?.tools[0]?.status, 'interrupted');
+  });
+
   it('surfaces canceled ExploreAgent results as interrupted instead of failed', () => {
     const turns = materializeTurns([
       userMsg('t1', 100, 'q'),
@@ -124,16 +182,16 @@ describe('materializeTurns', () => {
     // Scenario: user sent a message, server hasn't persisted the tool_call
     // yet, but a live event stream surfaced a "running" tool. It should
     // land inside the active turn, not float at the bottom.
-    const turns = materializeTurns(
+    const turns = materializeWithLive(
       [userMsg('t1', 100, 'q'), assistantMsg('t1', 999, 'placeholder')],
-      [
-        {
+      {
+        turnId: 't1', phase: 'streamed', steps: [{ stepId: 'tool:live-1', tools: [{
           toolUseId: 'live-1',
           toolName: 'Bash',
           status: 'running',
           args: { command: 'pwd' },
-        },
-      ],
+        }] }],
+      },
     );
     assert.equal(turns.length, 1);
     assert.equal(turns[0]?.tools.length, 1);
@@ -169,6 +227,41 @@ describe('materializeTurns', () => {
     assert.equal(turns[0]?.modelId, 'claude-sonnet-4-5');
     assert.equal(turns[0]?.durationMs, 5000);
     assert.equal(turns[0]?.assistantThinking, 'first I considered...');
+  });
+
+  it('concatenates per-step assistant messages into one answer with the first step id and last ts', () => {
+    // A multi-step turn persists one AssistantMessage per model step; the turn
+    // view-model joins their text (and thinking) in order, anchors on the first
+    // step id, and measures durationMs to the final step.
+    const turns = materializeTurns([
+      userMsg('t1', 100, 'q'),
+      toolCallMsg('t1', 101, 'c1'),
+      toolResultMsg('t1', 102, 'c1'),
+      {
+        type: 'assistant',
+        id: 'step-1',
+        turnId: 't1',
+        ts: 103,
+        text: 'first, I check the file',
+        modelId: 'claude-sonnet-4-5',
+        thinking: { text: 'reasoning one' },
+      } as StoredMessage,
+      {
+        type: 'assistant',
+        id: 'step-2',
+        turnId: 't1',
+        ts: 205,
+        text: 'here is the answer',
+        modelId: 'claude-sonnet-4-5',
+        thinking: { text: 'reasoning two' },
+      } as StoredMessage,
+    ]);
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0]?.assistant?.id, 'step-1');
+    assert.equal(turns[0]?.assistant?.text, 'first, I check the file\n\nhere is the answer');
+    assert.equal(turns[0]?.assistant?.ts, 205);
+    assert.equal(turns[0]?.assistantThinking, 'reasoning one\n\nreasoning two');
+    assert.equal(turns[0]?.durationMs, 105);
   });
 
   it('leaves durationMs undefined when assistant message is missing (in-progress turn)', () => {
@@ -257,20 +350,20 @@ describe('materializeTurns', () => {
     // it's actually still running. UI should prefer the live status so a
     // late-completing tool doesn't show stale "completed" while the user
     // is still seeing the in-flight spinner elsewhere.
-    const turns = materializeTurns(
+    const turns = materializeWithLive(
       [
         userMsg('t1', 100, 'q'),
         toolCallMsg('t1', 101, 'c1'),
         toolResultMsg('t1', 102, 'c1'),
       ],
-      [
-        {
+      {
+        turnId: 't1', phase: 'streamed', steps: [{ stepId: 'tool:c1', tools: [{
           toolUseId: 'c1',
           toolName: 'Bash',
           status: 'running',
           args: {},
-        },
-      ],
+        }] }],
+      },
     );
     assert.equal(turns[0]?.tools.length, 1);
     assert.equal(turns[0]?.tools[0]?.status, 'running');
@@ -287,14 +380,14 @@ describe('materializeTurns', () => {
     // in-flight (pending / running / waiting_permission) — if live has
     // already moved to `completed` or `errored`, live wins per the
     // general rule.
-    const turns = materializeTurns(
+    const turns = materializeWithLive(
       [
         userMsg('t1', 100, 'q'),
         toolCallMsg('t1', 101, 'c1'),
         // no tool_result → persisted status === 'interrupted'
       ],
-      [
-        {
+      {
+        turnId: 't1', phase: 'streamed', steps: [{ stepId: 'tool:c1', tools: [{
           toolUseId: 'c1',
           toolName: 'Bash',
           status: 'running',
@@ -302,13 +395,236 @@ describe('materializeTurns', () => {
           outputChunks: [
             { seq: 0, stream: 'stdout', text: 'hello\n', redacted: false, createdAt: 100 },
           ],
-        },
-      ],
+        }] }],
+      },
     );
     assert.equal(turns[0]?.tools.length, 1);
     assert.equal(turns[0]?.tools[0]?.status, 'interrupted');
     // Output chunks must survive the merge — chunks come from live.
     assert.equal(turns[0]?.tools[0]?.outputChunks?.length, 1);
+  });
+});
+
+function toolCallStep(turnId: string, ts: number, id: string, stepId: string, toolName = 'Read'): StoredMessage {
+  return { type: 'tool_call', id, turnId, ts, toolName, args: {}, stepId };
+}
+
+function pipeOutput(stdout = '', stderr = '') {
+  return {
+    mode: 'pipes' as const,
+    stdout,
+    stderr,
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    redacted: false,
+  };
+}
+
+function assistantStep(
+  turnId: string,
+  ts: number,
+  id: string,
+  text: string,
+  thinking?: string,
+): StoredMessage {
+  return {
+    type: 'assistant',
+    id,
+    turnId,
+    ts,
+    text,
+    modelId: 'm',
+    ...(thinking !== undefined ? { thinking: { text: thinking } } : {}),
+  } as StoredMessage;
+}
+
+describe('materializeTurns timeline', () => {
+  it('keeps a live step in thinking -> tools order before its assistant row is committed', () => {
+    const turns = materializeWithLive(
+      [userMsg('t1', 100, 'q')],
+      {
+        turnId: 't1',
+        phase: 'streamed',
+        steps: [{
+          stepId: 'a1',
+          thinking: { text: '先测试工具', truncated: false, complete: false },
+          tools: [{
+            toolUseId: 'c1',
+            toolName: 'Task List',
+            stepId: 'a1',
+            status: 'running',
+            args: {},
+          }],
+        }],
+      },
+    );
+
+    assert.deepEqual(turns[0]?.timeline.map((item) => item.kind), ['thinking', 'tools']);
+  });
+
+  it('appends the current live step after earlier committed steps in thinking -> text -> tools order', () => {
+    const turns = materializeWithLive(
+      [userMsg('t1', 100, 'q'), assistantStep('t1', 101, 'a1', 'first answer')],
+      {
+        turnId: 't1',
+        phase: 'streamed',
+        steps: [{
+          stepId: 'a2',
+          thinking: { text: 'think two', truncated: false, complete: false },
+          text: { text: 'second answer', truncated: false, complete: false },
+          tools: [{
+            toolUseId: 'c2', toolName: 'Bash', stepId: 'a2', status: 'running', args: {},
+          }],
+        }],
+      },
+    );
+
+    assert.deepEqual(turns[0]?.timeline.map((item) => item.kind), ['text', 'thinking', 'text', 'tools']);
+    assert.equal((turns[0]?.timeline[2] as { text: string } | undefined)?.text, 'second answer');
+  });
+
+  it('keeps multiple uncommitted live steps in production order', () => {
+    const turns = materializeWithLive(
+      [userMsg('t1', 100, 'q')],
+      {
+        turnId: 't1',
+        phase: 'streamed',
+        steps: [
+          {
+            stepId: 'a1',
+            thinking: { text: 'think one', truncated: false, complete: true },
+            tools: [{
+              toolUseId: 'c1', toolName: 'Bash', stepId: 'a1', status: 'completed', args: {},
+            }],
+          },
+          {
+            stepId: 'a2',
+            thinking: { text: 'think two', truncated: false, complete: false },
+            text: { text: 'answer two', truncated: false, complete: false },
+            tools: [],
+          },
+        ],
+      },
+    );
+
+    assert.deepEqual(turns[0]?.timeline.map((item) => item.kind), ['thinking', 'tools', 'thinking', 'text']);
+  });
+
+  it('interleaves each step: thinking -> text -> that step’s tools', () => {
+    const turns = materializeTurns([
+      userMsg('t1', 100, 'q'),
+      toolCallStep('t1', 101, 'c1', 'a1'),
+      toolResultMsg('t1', 102, 'c1'),
+      assistantStep('t1', 103, 'a1', 'step one', 'think one'),
+      toolCallStep('t1', 104, 'c2', 'a2'),
+      toolResultMsg('t1', 105, 'c2'),
+      assistantStep('t1', 106, 'a2', 'step two', 'think two'),
+    ]);
+    const timeline = turns[0]!.timeline;
+    assert.deepEqual(timeline.map((i) => i.kind), ['thinking', 'text', 'tools', 'thinking', 'text', 'tools']);
+    assert.equal((timeline[0] as { text: string }).text, 'think one');
+    assert.equal((timeline[1] as { text: string }).text, 'step one');
+    assert.equal((timeline[2] as { items: { toolUseId: string }[] }).items[0]?.toolUseId, 'c1');
+    assert.equal((timeline[5] as { items: { toolUseId: string }[] }).items[0]?.toolUseId, 'c2');
+    // Aggregate fields still reflect the concatenated whole for legacy consumers.
+    assert.equal(turns[0]?.assistant?.text, 'step one\n\nstep two');
+    assert.equal(turns[0]?.assistantThinking, 'think one\n\nthink two');
+  });
+
+  it('preserves the first-observed order recorded by the runtime read model', () => {
+    const turns = materializeTurns([
+      userMsg('t1', 100, 'q'),
+      toolCallStep('t1', 101, 'c1', 'a1'),
+      toolResultMsg('t1', 102, 'c1'),
+      {
+        type: 'assistant',
+        id: 'a1',
+        turnId: 't1',
+        ts: 103,
+        text: 'answer',
+        thinking: { text: 'late reasoning' },
+        contentOrder: ['tools', 'thinking', 'text'],
+        modelId: 'm',
+      },
+    ]);
+
+    assert.deepEqual(turns[0]?.timeline.map((item) => item.kind), ['tools', 'thinking', 'text']);
+  });
+
+  it('renders a pure-tool step’s orphan tools before the next step’s answer', () => {
+    // The most common tool turn: step a1 only calls tools (no assistant row
+    // is persisted for it), step a2 delivers the summary. The a1 tools carry
+    // a stepId no assistant row matches — they must still render before the
+    // answer, not park past it as answer-then-tools.
+    const turns = materializeTurns([
+      userMsg('t1', 100, 'q'),
+      toolCallStep('t1', 101, 'c1', 'a1'),
+      toolResultMsg('t1', 102, 'c1'),
+      assistantStep('t1', 103, 'a2', 'summary', 'think'),
+    ]);
+    const timeline = turns[0]!.timeline;
+    assert.deepEqual(timeline.map((i) => i.kind), ['tools', 'thinking', 'text']);
+    assert.equal((timeline[0] as { items: { toolUseId: string }[] }).items[0]?.toolUseId, 'c1');
+    assert.equal((timeline[2] as { text: string }).text, 'summary');
+  });
+
+  it('legacy call with no stepId sits before the summary text', () => {
+    const turns = materializeTurns([
+      userMsg('t1', 100, 'q'),
+      toolCallMsg('t1', 101, 'c1', 'Read'),
+      toolResultMsg('t1', 102, 'c1'),
+      assistantMsg('t1', 103, 'summary'),
+    ]);
+    const timeline = turns[0]!.timeline;
+    assert.deepEqual(timeline.map((i) => i.kind), ['tools', 'text']);
+    assert.equal((timeline[1] as { text: string }).text, 'summary');
+  });
+
+  it('flushes leftover tools as a trailing group when the turn has no assistant row (abort)', () => {
+    const turns = materializeTurns([
+      userMsg('t1', 100, 'q'),
+      toolCallStep('t1', 101, 'c1', 'a1'),
+    ]);
+    const timeline = turns[0]!.timeline;
+    assert.deepEqual(timeline.map((i) => i.kind), ['tools']);
+    assert.equal((timeline[0] as { items: { status: string }[] }).items[0]?.status, 'interrupted');
+  });
+
+  it('appends live-only in-flight tools to the timeline tail', () => {
+    const turns = materializeWithLive(
+      [userMsg('t1', 100, 'q'), assistantStep('t1', 103, 'a1', 'hi')],
+      {
+        turnId: 't1', phase: 'streamed', steps: [{
+          stepId: 'live-step',
+          tools: [{ toolUseId: 'live-1', toolName: 'Bash', status: 'running', args: {} }],
+        }],
+      },
+    );
+    const timeline = turns[0]!.timeline;
+    assert.deepEqual(timeline.map((i) => i.kind), ['text', 'tools']);
+    assert.equal((timeline[1] as { items: { toolUseId: string }[] }).items[0]?.toolUseId, 'live-1');
+  });
+
+  it('merges adjacent thinking blocks and adjacent tool groups', () => {
+    const thinkingOnly = materializeTurns([
+      userMsg('t1', 100, 'q'),
+      assistantStep('t1', 101, 'a1', '', 'first'),
+      assistantStep('t1', 102, 'a2', '', 'second'),
+    ]);
+    const tl1 = thinkingOnly[0]!.timeline;
+    assert.deepEqual(tl1.map((i) => i.kind), ['thinking']);
+    assert.equal((tl1[0] as { text: string }).text, 'first\n\nsecond');
+
+    const toolsOnly = materializeTurns([
+      userMsg('t1', 100, 'q'),
+      toolCallStep('t1', 101, 'c1', 'a1'),
+      assistantStep('t1', 102, 'a1', ''),
+      toolCallStep('t1', 103, 'c2', 'a2'),
+      assistantStep('t1', 104, 'a2', ''),
+    ]);
+    const tl2 = toolsOnly[0]!.timeline;
+    assert.deepEqual(tl2.map((i) => i.kind), ['tools']);
+    assert.equal((tl2[0] as { items: unknown[] }).items.length, 2);
   });
 });
 
@@ -409,5 +725,22 @@ describe('deriveTurnLineageMap', () => {
     const before = JSON.stringify(input);
     deriveTurnLineageMap(input);
     assert.equal(JSON.stringify(input), before);
+  });
+});
+
+describe('automation turn attribution (F6)', () => {
+  it('projects an automation origin onto the turn user entry', () => {
+    const turns = materializeTurns([
+      { type: 'user', id: 'u1', turnId: 't1', ts: 1, text: '早报', origin: { kind: 'automation', automationId: 'auto-1' } },
+      { type: 'assistant', id: 'a1', turnId: 't1', ts: 2, text: '好的' },
+    ] as StoredMessage[]);
+    assert.equal(turns[0]?.user?.automationOrigin?.automationId, 'auto-1');
+  });
+
+  it('hand-typed turns carry no automation origin', () => {
+    const turns = materializeTurns([
+      { type: 'user', id: 'u1', turnId: 't1', ts: 1, text: '你好' },
+    ] as StoredMessage[]);
+    assert.equal(turns[0]?.user?.automationOrigin, undefined);
   });
 });

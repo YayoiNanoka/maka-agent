@@ -9,8 +9,8 @@ import {
 } from '@maka/core/permission-profile-compiler';
 
 import { createDefaultSandboxManager } from './default-sandbox-manager.js';
-import type { SandboxManager } from './sandbox-manager.js';
 import type {
+  SandboxTransformManager,
   SandboxPathContext,
   SandboxPlatform,
   SandboxablePreference,
@@ -20,7 +20,7 @@ export interface CreatePermissionAwareSandboxContextInput {
   mode: PermissionMode;
   cwd: string;
   workspaceRoots?: readonly string[];
-  sandboxManager?: Pick<SandboxManager, 'transform'>;
+  sandboxManager?: SandboxTransformManager;
   preference?: SandboxablePreference;
   platform?: SandboxPlatform;
   pathContext?: Partial<Omit<SandboxPathContext, 'workspaceRoots'>>;
@@ -30,7 +30,7 @@ export interface PermissionAwareSandboxContext {
   cwd: string;
   profile: PermissionProfile;
   workspaceRoots: readonly string[];
-  sandboxManager: Pick<SandboxManager, 'transform'>;
+  sandboxManager: SandboxTransformManager;
   preference?: SandboxablePreference;
   platform?: SandboxPlatform;
   pathContext: SandboxPathContext;

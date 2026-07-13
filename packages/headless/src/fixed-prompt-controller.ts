@@ -1,11 +1,13 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { appendFile, mkdir, readFile, truncate, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {
   validateHarborCellOutput,
+  hashHarborSystemPrompt,
   type HarborCellContextBudgetPolicySnapshot,
   type HarborCellContextBudgetSummary,
   type HarborCellContinuationSummary,
+  type HarborCellExecutionIdentity,
   type HarborCellOutput,
   type HarborCellTaskToolSummary,
   type HarborCellTokenSummary,
@@ -15,6 +17,8 @@ import { assertFinitePositive, assertPositiveInt, assertRatio } from './numeric-
 
 export const FIXED_PROMPT_WAL_SCHEMA_VERSION = 1;
 export const BUDGET_EXHAUSTED_RUNTIME_UNAVAILABLE_REASON = 'budget_exhausted_before_cell_output';
+const LEGACY_TIMEOUT_MISSING_EXECUTION_IDENTITY_ERROR = 'Timed-out Harbor attempt did not produce execution identity attestation';
+type UnscoredCellFailureClass = 'infra_failed' | 'setup_failed' | 'verification_error';
 
 export interface FixedPromptTask {
   id: string;
@@ -56,6 +60,9 @@ export interface FixedPromptBudgetExhaustedArtifactRefs {
   runtimeEventsPath?: string;
   traceEventsPath?: string;
   runtimeEventsUnavailableReason?: string;
+  tokenSummary?: HarborCellTokenSummary;
+  cellOutput?: HarborTaskRunCellOutput;
+  executionIdentity?: HarborCellExecutionIdentity;
 }
 
 export class FixedPromptBudgetExhaustedError extends Error {
@@ -89,6 +96,7 @@ export interface FixedPromptTaskCompletedEvent {
   eligible: boolean;
   errorClass?: string;
   promptHash?: string;
+  executionIdentity?: HarborCellExecutionIdentity;
   tokenSummary: HarborCellTokenSummary;
   contextBudgetPolicy?: HarborCellContextBudgetPolicySnapshot;
   contextBudgetSummary?: HarborCellContextBudgetSummary;
@@ -117,7 +125,7 @@ export interface FixedPromptTaskInfraFailedEvent {
   passed: false;
   scored: false;
   eligible: false;
-  errorClass: 'infra_error';
+  errorClass: 'infra_error' | 'provider_billing' | 'auth' | 'rate_limit' | 'provider_unavailable' | 'network';
   error: string;
 }
 
@@ -133,13 +141,23 @@ export interface FixedPromptTaskBudgetExhaustedEvent {
   status: 'budget_exhausted';
   passed: false;
   scored: false;
-  eligible: true;
+  eligible: boolean;
   errorClass: 'budget_exhausted';
   error: string;
+  evidenceErrorClass?: FixedPromptTaskPlumbingFailedEvent['errorClass'] | UnscoredCellFailureClass | FixedPromptTaskInfraFailedEvent['errorClass'];
+  evidenceError?: string;
   expectedPromptHash: string;
   runtimeEventsPath?: string;
   traceEventsPath?: string;
   runtimeEventsUnavailableReason?: string;
+  tokenSummary?: HarborCellTokenSummary;
+  executionIdentity?: HarborCellExecutionIdentity;
+  contextBudgetPolicy?: HarborCellContextBudgetPolicySnapshot;
+  contextBudgetSummary?: HarborCellContextBudgetSummary;
+  continuationSummary?: HarborCellContinuationSummary;
+  taskToolSummary?: HarborCellTaskToolSummary;
+  steps?: number;
+  durationMs?: number;
 }
 
 export interface FixedPromptTaskPlumbingFailedEvent {
@@ -155,20 +173,20 @@ export interface FixedPromptTaskPlumbingFailedEvent {
   passed: false;
   scored: false;
   eligible: false;
-  errorClass: 'zero_cost_with_tokens' | 'prompt_hash_mismatch' | 'missing_prompt_hash';
+  errorClass: 'zero_cost_with_tokens' | 'prompt_hash_mismatch' | 'missing_prompt_hash' | 'missing_execution_identity' | 'execution_identity_mismatch';
   error: string;
   promptHash?: string;
   expectedPromptHash?: string;
-  tokenSummary: HarborCellTokenSummary;
+  tokenSummary?: HarborCellTokenSummary;
   contextBudgetPolicy?: HarborCellContextBudgetPolicySnapshot;
   contextBudgetSummary?: HarborCellContextBudgetSummary;
   continuationSummary?: HarborCellContinuationSummary;
   taskToolSummary?: HarborCellTaskToolSummary;
-  steps: number;
-  durationMs: number;
-  runtimeEventsPath: string;
+  steps?: number;
+  durationMs?: number;
+  runtimeEventsPath?: string;
   traceEventsPath?: string;
-  harbor: {
+  harbor?: {
     reward: number;
   };
 }
@@ -281,12 +299,15 @@ export interface RunFixedPromptControllerInput {
   config: Config;
   systemPromptPath: string;
   resultsJsonlPath: string;
-  resultsTsvPath: string;
+  resultsTsvPath?: string;
   tasks: readonly FixedPromptTask[];
   maxInfraFailureRate?: number;
   costCeilingUsd?: number;
   maxConcurrency?: number;
+  infraFailurePolicy?: 'retry-once' | 'terminal';
   resumeFingerprint?: string;
+  requireExecutionIdentity?: boolean;
+  expectedPricingProfile?: string;
   harborRunner: HarborTaskRunner;
   now?: () => number;
   newId?: () => string;
@@ -294,6 +315,7 @@ export interface RunFixedPromptControllerInput {
 
 export type FixedPromptControllerStopReason =
   | 'infra_failure_rate_exceeded'
+  | 'systemic_provider_failure'
   | 'cost_ceiling_exceeded';
 
 export interface FixedPromptControllerResult {
@@ -301,7 +323,7 @@ export interface FixedPromptControllerResult {
   events: FixedPromptTaskWalEvent[];
   totalTokens: number;
   totalCostUsd: number;
-  resultsTsvPath: string;
+  resultsTsvPath?: string;
   stopReason?: FixedPromptControllerStopReason;
 }
 
@@ -320,7 +342,14 @@ export async function runFixedPromptController(
   const expectedPromptHash = hashSystemPrompt(systemPrompt);
   const config = { ...input.config, systemPrompt };
   const events = await readFixedPromptWal(input.resultsJsonlPath);
-  const completed = terminalTaskEvents(events, input.runId, input.roundId, expectedPromptHash, input.resumeFingerprint);
+  const completed = terminalTaskEvents(
+    events,
+    input.runId,
+    input.roundId,
+    expectedPromptHash,
+    input.resumeFingerprint,
+    input.infraFailurePolicy === 'terminal',
+  );
   const stopEvidence = roundTaskEvents(events, input.runId, input.roundId, expectedPromptHash, input.resumeFingerprint);
   let stopReason = controllerStopReason({
     events: [...stopEvidence.values()],
@@ -365,6 +394,8 @@ export async function runFixedPromptController(
         config,
         systemPrompt,
         expectedPromptHash,
+        requireExecutionIdentity: input.requireExecutionIdentity,
+        expectedPricingProfile: input.expectedPricingProfile,
         resumeFingerprint: input.resumeFingerprint,
         id: newId(),
         ts: now(),
@@ -393,14 +424,16 @@ export async function runFixedPromptController(
   const resultEvents = input.tasks
     .map((task) => resultByTask.get(task.id))
     .filter((event): event is FixedPromptTaskWalEvent => event !== undefined);
-  await writeFixedPromptResultsTsv(input.resultsTsvPath, resultEvents);
+  if (input.resultsTsvPath !== undefined) {
+    await writeFixedPromptResultsTsv(input.resultsTsvPath, resultEvents);
+  }
 
   return {
     taskIds: resultEvents.map((event) => event.taskId),
     events: resultEvents,
-    totalTokens: sum(resultEvents.map((event) => eventHasRunArtifacts(event) ? event.tokenSummary.total : 0)),
-    totalCostUsd: sum(resultEvents.map((event) => eventHasRunArtifacts(event) ? event.tokenSummary.costUsd : 0)),
-    resultsTsvPath: input.resultsTsvPath,
+    totalTokens: sum(resultEvents.map((event) => eventTokenSummary(event)?.total ?? 0)),
+    totalCostUsd: sum(resultEvents.map((event) => eventTokenSummary(event)?.costUsd ?? 0)),
+    ...(input.resultsTsvPath !== undefined ? { resultsTsvPath: input.resultsTsvPath } : {}),
     ...(stopReason ? { stopReason } : {}),
   };
 }
@@ -437,7 +470,7 @@ export async function readFixedPromptWal(path: string): Promise<FixedPromptWalEv
       throw error;
     }
   }
-  return events;
+  return events.map(projectLegacyTimeoutOutcome);
 }
 
 export async function readHarborTaskRunOutput(
@@ -481,10 +514,10 @@ export async function writeFixedPromptResultsTsv(
     String(event.scored),
     String(event.eligible),
     event.errorClass ?? '',
-    eventHasRunArtifacts(event) ? event.promptHash ?? '' : '',
-    String(eventHasRunArtifacts(event) ? event.tokenSummary.total : 0),
-    String(eventHasRunArtifacts(event) ? event.tokenSummary.costUsd : 0),
-    eventHasRunArtifacts(event) ? event.runtimeEventsPath : '',
+    'promptHash' in event ? event.promptHash ?? '' : '',
+    String(eventTokenSummary(event)?.total ?? 0),
+    String(eventTokenSummary(event)?.costUsd ?? 0),
+    'runtimeEventsPath' in event ? event.runtimeEventsPath ?? '' : '',
   ]);
   const body = [header, ...rows].map((row) => row.map(tsvCell).join('\t')).join('\n');
   await writeFile(path, `${body}\n`, 'utf8');
@@ -496,6 +529,8 @@ async function runTaskAndBuildEvent(input: {
   config: Config;
   systemPrompt: string;
   expectedPromptHash: string;
+  requireExecutionIdentity?: boolean;
+  expectedPricingProfile?: string;
   resumeFingerprint?: string;
   id: string;
   ts: number;
@@ -518,6 +553,20 @@ async function runTaskAndBuildEvent(input: {
         runId: input.input.runId,
         roundId: input.input.roundId,
         expectedPromptHash: input.expectedPromptHash,
+        expectedConfig: input.config,
+        requireExecutionIdentity: input.requireExecutionIdentity,
+        expectedPricingProfile: input.expectedPricingProfile,
+        resumeFingerprint: input.resumeFingerprint,
+        id: input.id,
+        ts: input.ts,
+      });
+    }
+    if (input.input.infraFailurePolicy === 'terminal') {
+      return taskInfraFailedEvent({
+        error,
+        taskId: input.task.id,
+        runId: input.input.runId,
+        roundId: input.input.roundId,
         resumeFingerprint: input.resumeFingerprint,
         id: input.id,
         ts: input.ts,
@@ -541,6 +590,9 @@ async function runTaskAndBuildEvent(input: {
           runId: input.input.runId,
           roundId: input.input.roundId,
           expectedPromptHash: input.expectedPromptHash,
+          expectedConfig: input.config,
+          requireExecutionIdentity: input.requireExecutionIdentity,
+          expectedPricingProfile: input.expectedPricingProfile,
           resumeFingerprint: input.resumeFingerprint,
           id: input.id,
           ts: input.ts,
@@ -559,7 +611,10 @@ async function runTaskAndBuildEvent(input: {
   }
   return taskEventFromOutput({
     output,
+    expectedConfig: input.config,
     expectedPromptHash: input.expectedPromptHash,
+    requireExecutionIdentity: input.requireExecutionIdentity,
+    expectedPricingProfile: input.expectedPricingProfile,
     resumeFingerprint: input.resumeFingerprint,
     taskId: input.task.id,
     runId: input.input.runId,
@@ -571,15 +626,44 @@ async function runTaskAndBuildEvent(input: {
 
 function taskEventFromOutput(input: {
   output: HarborTaskRunOutput;
+  expectedConfig: Config;
   expectedPromptHash: string;
+  requireExecutionIdentity?: boolean;
+  expectedPricingProfile?: string;
   resumeFingerprint?: string;
   taskId: string;
   runId: string;
   roundId: string;
   id: string;
   ts: number;
-}): FixedPromptTaskCompletedEvent | FixedPromptTaskPlumbingFailedEvent {
-  const plumbingFailure = classifyPlumbingFailure(input.output, input.expectedPromptHash);
+}): FixedPromptTaskCompletedEvent | FixedPromptTaskPlumbingFailedEvent | FixedPromptTaskInfraFailedEvent {
+  const identityMismatch = classifyExplicitIdentityMismatch(
+    input.output.cell.executionIdentity,
+    input.expectedPromptHash,
+    input.expectedConfig,
+    input.expectedPricingProfile,
+  );
+  if (identityMismatch) {
+    return taskPlumbingFailedEvent({
+      ...input,
+      errorClass: identityMismatch.errorClass,
+      error: identityMismatch.error,
+    });
+  }
+  if (isProviderInfraFailure(input.output.cell.errorClass)) {
+    return taskInfraFailedEvent({
+      ...input,
+      errorClass: input.output.cell.errorClass,
+      error: `Harbor cell failed with ${input.output.cell.errorClass}`,
+    });
+  }
+  const plumbingFailure = classifyPlumbingFailure(
+    input.output,
+    input.expectedPromptHash,
+    input.expectedConfig,
+    input.requireExecutionIdentity ?? false,
+    input.expectedPricingProfile,
+  );
   if (plumbingFailure) {
     return taskPlumbingFailedEvent({
       ...input,
@@ -603,6 +687,7 @@ function taskCompletedEvent(input: {
   const passed = output.cell.status === 'completed' && output.harbor.reward > 0;
   const errorClass = output.cell.errorClass ?? (passed ? undefined : 'verification_failed');
   const scored = output.cell.status === 'completed' && !isUnscoredCellFailure(errorClass);
+  const agentFailure = output.cell.status === 'failed' && errorClass === 'tool_step_cap_reached';
   return {
     schemaVersion: FIXED_PROMPT_WAL_SCHEMA_VERSION,
     type: 'task_completed',
@@ -615,9 +700,10 @@ function taskCompletedEvent(input: {
     status: output.cell.status,
     passed,
     scored,
-    eligible: scored,
+    eligible: scored || agentFailure,
     ...(errorClass ? { errorClass } : {}),
     ...(output.cell.promptHash ? { promptHash: output.cell.promptHash } : {}),
+    ...(output.cell.executionIdentity ? { executionIdentity: output.cell.executionIdentity } : {}),
     tokenSummary: output.cell.tokenSummary,
     ...(output.cell.contextBudgetPolicy ? { contextBudgetPolicy: output.cell.contextBudgetPolicy } : {}),
     ...(output.cell.contextBudgetSummary ? { contextBudgetSummary: output.cell.contextBudgetSummary } : {}),
@@ -634,7 +720,7 @@ function taskCompletedEvent(input: {
   };
 }
 
-function isUnscoredCellFailure(errorClass: string | undefined): boolean {
+function isUnscoredCellFailure(errorClass: string | undefined): errorClass is UnscoredCellFailureClass {
   return errorClass === 'infra_failed' || errorClass === 'setup_failed' || errorClass === 'verification_error';
 }
 
@@ -690,10 +776,18 @@ function taskPlumbingFailedEvent(input: {
   };
 }
 
-function classifyPlumbingFailure(output: HarborTaskRunOutput, expectedPromptHash: string): {
+function classifyPlumbingFailure(output: HarborTaskRunOutput, expectedPromptHash: string, expectedConfig: Config, requireExecutionIdentity: boolean, expectedPricingProfile: string | undefined): {
   errorClass: FixedPromptTaskPlumbingFailedEvent['errorClass'];
   error: string;
 } | undefined {
+  const identityFailure = classifyExecutionIdentityFailure(
+    output.cell.executionIdentity,
+    expectedPromptHash,
+    expectedConfig,
+    requireExecutionIdentity,
+    expectedPricingProfile,
+  );
+  if (identityFailure) return identityFailure;
   if (output.cell.status === 'completed' && output.cell.promptHash === undefined) {
     return {
       errorClass: 'missing_prompt_hash',
@@ -715,8 +809,59 @@ function classifyPlumbingFailure(output: HarborTaskRunOutput, expectedPromptHash
   return undefined;
 }
 
+function classifyExecutionIdentityFailure(
+  identity: HarborCellExecutionIdentity | undefined,
+  expectedPromptHash: string,
+  expectedConfig: Config,
+  requireExecutionIdentity: boolean,
+  expectedPricingProfile: string | undefined,
+): {
+  errorClass: Extract<FixedPromptTaskPlumbingFailedEvent['errorClass'], 'missing_execution_identity' | 'execution_identity_mismatch'>;
+  error: string;
+} | undefined {
+  if (requireExecutionIdentity && !identity) {
+    return {
+      errorClass: 'missing_execution_identity',
+      error: 'Harbor cell did not attest the connection, model, prompt, and pricing profile that executed',
+    };
+  }
+  if (identity) {
+    const modelPrefix = `${expectedConfig.llmConnectionSlug}/`;
+    const expectedModel = expectedConfig.model?.startsWith(modelPrefix)
+      ? expectedConfig.model.slice(modelPrefix.length)
+      : expectedConfig.model;
+    if (
+      identity.llmConnectionSlug !== expectedConfig.llmConnectionSlug
+      || identity.model !== expectedModel
+      || identity.reasoningEffort !== expectedConfig.thinkingLevel
+      || identity.systemPromptHash !== expectedPromptHash
+      || (expectedPricingProfile !== undefined && identity.pricingProfile !== expectedPricingProfile)
+    ) {
+      return {
+        errorClass: 'execution_identity_mismatch',
+        error: 'Harbor cell execution identity did not match the configured connection, model, and prompt',
+      };
+    }
+  }
+  return undefined;
+}
+
+function classifyExplicitIdentityMismatch(
+  identity: HarborCellExecutionIdentity | undefined,
+  expectedPromptHash: string,
+  expectedConfig: Config,
+  expectedPricingProfile: string | undefined,
+): { errorClass: 'execution_identity_mismatch'; error: string } | undefined {
+  if (!identity) return undefined;
+  const failure = classifyExecutionIdentityFailure(identity, expectedPromptHash, expectedConfig, false, expectedPricingProfile);
+  return failure?.errorClass === 'execution_identity_mismatch'
+    ? { errorClass: failure.errorClass, error: failure.error }
+    : undefined;
+}
+
 function taskInfraFailedEvent(input: {
   error: unknown;
+  errorClass?: FixedPromptTaskInfraFailedEvent['errorClass'];
   taskId: string;
   runId: string;
   roundId: string;
@@ -737,7 +882,7 @@ function taskInfraFailedEvent(input: {
     passed: false,
     scored: false,
     eligible: false,
-    errorClass: 'infra_error',
+    errorClass: input.errorClass ?? 'infra_error',
     error: errorMessage(input.error),
   };
 }
@@ -748,11 +893,60 @@ function taskBudgetExhaustedEvent(input: {
   runId: string;
   roundId: string;
   expectedPromptHash: string;
+  expectedConfig: Config;
+  requireExecutionIdentity?: boolean;
+  expectedPricingProfile?: string;
   resumeFingerprint?: string;
   id: string;
   ts: number;
 }): FixedPromptTaskBudgetExhaustedEvent {
   const artifactRefs = budgetExhaustedArtifactRefs(input.error);
+  let evidenceFailure: {
+    errorClass: NonNullable<FixedPromptTaskBudgetExhaustedEvent['evidenceErrorClass']>;
+    error: string;
+  } | undefined;
+  if (artifactRefs.cellOutput) {
+    const output = { harbor: { reward: 0 }, cell: artifactRefs.cellOutput };
+    const identityMismatch = classifyExplicitIdentityMismatch(
+      output.cell.executionIdentity,
+      input.expectedPromptHash,
+      input.expectedConfig,
+      input.expectedPricingProfile,
+    );
+    evidenceFailure = identityMismatch ?? (isProviderInfraFailure(output.cell.errorClass)
+      ? {
+          errorClass: output.cell.errorClass,
+          error: `Harbor cell failed with ${output.cell.errorClass}`,
+        }
+      : isUnscoredCellFailure(output.cell.errorClass)
+        ? {
+            errorClass: output.cell.errorClass,
+            error: `Harbor cell failed with ${output.cell.errorClass}`,
+          }
+        : classifyPlumbingFailure(
+            output,
+            input.expectedPromptHash,
+            input.expectedConfig,
+            input.requireExecutionIdentity ?? false,
+            input.expectedPricingProfile,
+          ));
+  } else {
+    evidenceFailure = classifyExecutionIdentityFailure(
+      artifactRefs.executionIdentity,
+      input.expectedPromptHash,
+      input.expectedConfig,
+      input.requireExecutionIdentity ?? false,
+      input.expectedPricingProfile,
+    );
+    if (evidenceFailure?.errorClass === 'missing_execution_identity') {
+      evidenceFailure = { ...evidenceFailure, error: LEGACY_TIMEOUT_MISSING_EXECUTION_IDENTITY_ERROR };
+    }
+  }
+  const tokenSummary = artifactRefs.cellOutput?.tokenSummary ?? artifactRefs.tokenSummary;
+  const executionIdentity = artifactRefs.cellOutput?.executionIdentity ?? artifactRefs.executionIdentity;
+  const cellOutput = artifactRefs.cellOutput;
+  const runtimeEventsPath = artifactRefs.runtimeEventsPath ?? cellOutput?.runtimeEventsPath;
+  const traceEventsPath = artifactRefs.traceEventsPath ?? cellOutput?.traceEventsPath;
   return {
     schemaVersion: FIXED_PROMPT_WAL_SCHEMA_VERSION,
     type: 'task_budget_exhausted',
@@ -765,22 +959,82 @@ function taskBudgetExhaustedEvent(input: {
     status: 'budget_exhausted',
     passed: false,
     scored: false,
-    eligible: true,
+    eligible: evidenceFailure === undefined,
     errorClass: 'budget_exhausted',
     error: errorMessage(input.error),
+    ...(evidenceFailure ? {
+      evidenceErrorClass: evidenceFailure.errorClass,
+      evidenceError: evidenceFailure.error,
+    } : {}),
     expectedPromptHash: input.expectedPromptHash,
-    ...(artifactRefs.runtimeEventsPath ? { runtimeEventsPath: artifactRefs.runtimeEventsPath } : {}),
-    ...(artifactRefs.traceEventsPath ? { traceEventsPath: artifactRefs.traceEventsPath } : {}),
+    ...(executionIdentity ? { executionIdentity } : {}),
+    ...(runtimeEventsPath ? { runtimeEventsPath } : {}),
+    ...(traceEventsPath ? { traceEventsPath } : {}),
     ...(artifactRefs.runtimeEventsUnavailableReason
       ? { runtimeEventsUnavailableReason: artifactRefs.runtimeEventsUnavailableReason }
       : {}),
+    ...(tokenSummary ? { tokenSummary } : {}),
+    ...(cellOutput?.contextBudgetPolicy ? { contextBudgetPolicy: cellOutput.contextBudgetPolicy } : {}),
+    ...(cellOutput?.contextBudgetSummary ? { contextBudgetSummary: cellOutput.contextBudgetSummary } : {}),
+    ...(cellOutput?.continuationSummary ? { continuationSummary: cellOutput.continuationSummary } : {}),
+    ...(cellOutput?.taskToolSummary ? { taskToolSummary: cellOutput.taskToolSummary } : {}),
+    ...(cellOutput ? { steps: cellOutput.steps, durationMs: cellOutput.durationMs } : {}),
+  };
+}
+
+function projectLegacyTimeoutOutcome(event: FixedPromptWalEvent): FixedPromptWalEvent {
+  if (
+    event.type !== 'task_plumbing_failed'
+    || event.errorClass !== 'missing_execution_identity'
+    || event.error !== LEGACY_TIMEOUT_MISSING_EXECUTION_IDENTITY_ERROR
+    || event.expectedPromptHash === undefined
+  ) {
+    return event;
+  }
+  return {
+    schemaVersion: event.schemaVersion,
+    type: 'task_budget_exhausted',
+    id: event.id,
+    ts: event.ts,
+    runId: event.runId,
+    roundId: event.roundId,
+    ...(event.resumeFingerprint ? { resumeFingerprint: event.resumeFingerprint } : {}),
+    taskId: event.taskId,
+    status: 'budget_exhausted',
+    passed: false,
+    scored: false,
+    eligible: false,
+    errorClass: 'budget_exhausted',
+    error: 'Harbor attempt exhausted its configured time budget',
+    evidenceErrorClass: event.errorClass,
+    evidenceError: event.error,
+    expectedPromptHash: event.expectedPromptHash,
+    ...(event.tokenSummary ? { tokenSummary: event.tokenSummary } : {}),
+    ...(event.runtimeEventsPath ? { runtimeEventsPath: event.runtimeEventsPath } : {}),
+    ...(event.traceEventsPath ? { traceEventsPath: event.traceEventsPath } : {}),
+    ...(event.contextBudgetPolicy ? { contextBudgetPolicy: event.contextBudgetPolicy } : {}),
+    ...(event.contextBudgetSummary ? { contextBudgetSummary: event.contextBudgetSummary } : {}),
+    ...(event.continuationSummary ? { continuationSummary: event.continuationSummary } : {}),
+    ...(event.taskToolSummary ? { taskToolSummary: event.taskToolSummary } : {}),
+    ...(event.steps !== undefined ? { steps: event.steps } : {}),
+    ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
   };
 }
 
 function budgetExhaustedArtifactRefs(error: unknown): FixedPromptBudgetExhaustedArtifactRefs {
   if (isBudgetExhaustedError(error)) {
     const refs = (error as { artifactRefs?: FixedPromptBudgetExhaustedArtifactRefs }).artifactRefs;
-    if (refs && (refs.runtimeEventsPath || refs.traceEventsPath || refs.runtimeEventsUnavailableReason)) return refs;
+    if (
+      refs
+      && (
+        refs.runtimeEventsPath
+        || refs.traceEventsPath
+        || refs.runtimeEventsUnavailableReason
+        || refs.tokenSummary
+        || refs.cellOutput
+        || refs.executionIdentity
+      )
+    ) return refs;
   }
   return { runtimeEventsUnavailableReason: BUDGET_EXHAUSTED_RUNTIME_UNAVAILABLE_REASON };
 }
@@ -791,6 +1045,7 @@ function terminalTaskEvents(
   roundId: string,
   expectedPromptHash: string,
   resumeFingerprint: string | undefined,
+  includeInfraFailure: boolean,
 ): Map<string, FixedPromptTaskWalEvent> {
   const byTask = new Map<string, FixedPromptTaskWalEvent>();
   for (const event of events) {
@@ -801,6 +1056,7 @@ function terminalTaskEvents(
       event.type === 'task_completed'
       || event.type === 'task_budget_exhausted'
       || event.type === 'task_plumbing_failed'
+      || (includeInfraFailure && event.type === 'task_infra_failed')
     ) {
       byTask.set(event.taskId, event);
     }
@@ -823,6 +1079,16 @@ function roundTaskEvents(
     byTask.set(event.taskId, event);
   }
   return byTask;
+}
+
+export function selectFixedPromptRoundTaskEvents(
+  events: readonly FixedPromptWalEvent[],
+  runId: string,
+  roundId: string,
+  expectedPromptHash: string,
+  resumeFingerprint: string,
+): Map<string, FixedPromptTaskWalEvent> {
+  return roundTaskEvents(events, runId, roundId, expectedPromptHash, resumeFingerprint);
 }
 
 function eventMatchesResumeIdentity(
@@ -861,6 +1127,13 @@ function controllerStopReason(input: {
   maxInfraFailureRate?: number;
   costCeilingUsd?: number;
 }): FixedPromptControllerStopReason | undefined {
+  if (input.events.some((event) => (
+    event.type === 'task_infra_failed' && isSystemicProviderFailure(event.errorClass)
+  ) || (
+    event.type === 'task_budget_exhausted' && isSystemicProviderFailure(event.evidenceErrorClass)
+  ))) {
+    return 'systemic_provider_failure';
+  }
   if (
     input.maxInfraFailureRate !== undefined
     && infraFailureRate(input.events, input.taskCount) > input.maxInfraFailureRate
@@ -873,19 +1146,30 @@ function controllerStopReason(input: {
   return undefined;
 }
 
+function isSystemicProviderFailure(errorClass: string | undefined): errorClass is 'provider_billing' | 'auth' {
+  return errorClass === 'provider_billing' || errorClass === 'auth';
+}
+
+function isProviderInfraFailure(
+  errorClass: string | undefined,
+): errorClass is 'provider_billing' | 'auth' | 'rate_limit' | 'provider_unavailable' | 'network' {
+  return isSystemicProviderFailure(errorClass)
+    || errorClass === 'rate_limit'
+    || errorClass === 'provider_unavailable'
+    || errorClass === 'network';
+}
+
 function infraFailureRate(events: readonly FixedPromptTaskWalEvent[], taskCount: number): number {
   if (taskCount <= 0) return 0;
   return events.filter((event) => event.type === 'task_infra_failed').length / taskCount;
 }
 
 function taskEventsCostUsd(events: readonly FixedPromptTaskWalEvent[]): number {
-  return sum(events.map((event) => eventHasRunArtifacts(event) ? event.tokenSummary.costUsd : 0));
+  return sum(events.map((event) => eventTokenSummary(event)?.costUsd ?? 0));
 }
 
-function eventHasRunArtifacts(
-  event: FixedPromptTaskWalEvent,
-): event is FixedPromptTaskCompletedEvent | FixedPromptTaskPlumbingFailedEvent {
-  return event.type === 'task_completed' || event.type === 'task_plumbing_failed';
+function eventTokenSummary(event: FixedPromptTaskWalEvent): HarborCellTokenSummary | undefined {
+  return 'tokenSummary' in event ? event.tokenSummary : undefined;
 }
 
 function isBudgetExhaustedError(error: unknown): boolean {
@@ -913,7 +1197,7 @@ async function truncateTornWalTail(path: string): Promise<void> {
 }
 
 export function hashSystemPrompt(systemPrompt: string): string {
-  return `sha256:${createHash('sha256').update(JSON.stringify(systemPrompt)).digest('hex')}`;
+  return hashHarborSystemPrompt(systemPrompt);
 }
 
 async function readJsonObject(path: string): Promise<Record<string, unknown>> {

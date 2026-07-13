@@ -291,6 +291,7 @@ describe('PermissionEngine one-shot additional grants', () => {
       args: { command: 'curl https://example.test' },
       mode: 'execute',
       cwd: '/workspace',
+      sandbox: { requirement: 'command', status: 'available' },
       additionalPermissionProposal: proposal,
     });
     assert.equal(verdict.kind, 'prompt');

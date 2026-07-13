@@ -1,3 +1,4 @@
+import type { ShellPlan } from '@maka/runtime';
 import type { Config, Task } from './contracts.js';
 import type { HeavyTaskEvidenceRecorder } from './heavy-task-evidence.js';
 import type { HeavyTaskModeSelection } from './heavy-task-policy.js';
@@ -110,6 +111,15 @@ export interface IsolatedToolExecutor {
    */
   readonly supportsAdditionalPermissions?: false;
   exec(input: IsolatedCommandInput): Promise<IsolatedCommandResult>;
+  /**
+   * Shell dialect this executor's Bash commands run in, surfaced so
+   * buildIsolatedBashTool can DECLARE it in the tool description. Selection
+   * without declaration is the original Windows bug (shell-detect.ts): the local
+   * executor runs PowerShell on Windows, and the model must be told. Omitted =
+   * POSIX (remote container / Linux host), where the historical description is
+   * the contract and no dialect sentence is added.
+   */
+  shell?: ShellPlan;
   /**
    * Optional native file operations for executors that can address their
    * external workspace without shelling through exec. If omitted,

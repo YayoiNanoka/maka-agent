@@ -3,15 +3,19 @@ export * from './assistant-stream.js';
 export * from './chat-empty-hero.js';
 export * from './chat-model-helpers.js';
 export * from './clipboard-feedback.js';
+export * from './use-mounted-ref.js';
 export * from './components.js';
 export type { SessionHistoryStatusGroup } from './session-history-list.js';
+export * from './session-status-presentation.js';
 export * from './composer-helpers.js';
+export * from './chat-input-behavior.js';
 export * from './input-history.js';
 export * from './daily-review-helpers.js';
 export * from './locale-helpers.js';
 export * from './markdown.js';
 export * from './maka-uri.js';
 export * from './materialize.js';
+export * from './live-turn-projection.js';
 export * from './model-picker.js';
 export * from './permission-queue.js';
 export * from './redact.js';
@@ -32,15 +36,11 @@ export * from './bot-brand.js';
 export * from './bot-brand-logo.js';
 export * from './primitives/alert.js';
 export * from './primitives/card.js';
-// `markerVariants` / `streamVariants` / `toolVariants` / `LiveIndicator` are
-// deliberately NOT re-exported here: they are internal styling tables / a
-// single-consumer dot that the chat call sites apply via relative import, so
-// keeping them off the package
-// barrel preserves the governance goal — they stay renamable/removable without a
-// public-API break. (Contrast `buttonVariants`, which IS public because it has
-// external consumers.) `LiveIndicator` is exported to public only when the
-// reasoning / composer / onboarding live dots actually migrate onto it — not
-// speculatively before a second consumer exists.
+// `markerVariants` / `toolVariants` are deliberately NOT re-exported here:
+// they are internal styling tables that the chat call sites apply via relative
+// import, so keeping them off the package barrel preserves the governance goal
+// — they stay renamable/removable without a public-API break. (Contrast
+// `buttonVariants`, which IS public because it has external consumers.)
 //
 // `previewVariants` (#332 PR4) IS re-exported: its file-diff parts have a second,
 // cross-package consumer — `apps/desktop`'s `artifact-preview.tsx` — which is the
@@ -58,6 +58,10 @@ export * from './primitives/item.js';
 export * from './primitives/spinner.js';
 export * from './primitives/kbd.js';
 export * from './primitives/menu.js';
+export * from './primitives/dialog-header.js';
+export * from './primitives/stat-tile.js';
+export * from './primitives/section-header.js';
+export { EmptyState } from './empty-state.js';
 export * from './primitives/choice-card.js';
 export * from './primitives/settings-segmented.js';
 export * from './primitives/settings-select.js';
@@ -109,3 +113,42 @@ export type { BadgeProps } from './primitives/badge.js';
 // / destructive.
 export { Chip, chipVariants } from './primitives/chip.js';
 export type { ChipProps } from './primitives/chip.js';
+// PageHeader — the shared page-header shell (convergence round 3). One shell
+// for the module hero (as='h2': 技能 / 定时任务) and the settings intros
+// (as='h3': permission / health / voice / about). Wrapper class + per-slot
+// CSS stay at the call site; the primitive converges STRUCTURE only.
+export { PageHeader } from './primitives/page-header.js';
+export type { PageHeaderProps } from './primitives/page-header.js';
+// Streaming UI rework: Codex-style tool "trow" grouping helpers. Pure bucketing
+// + summary used by the timeline tool renderer (ToolTrow) and unit-tested.
+export {
+  summarizeTrowTools,
+  trowActivityKind,
+  isTrowRunning,
+  trowNeedsAttention,
+  type TrowActivityKind,
+} from './tool-activity/trow-summary.js';
+// #646 run→done seam: a tool row shimmers while running and settles by the
+// light band stopping (no opacity fade — parallel settles don't stack).
+// Unit-tested.
+export {
+  isToolRowRunning,
+  isToolRowSettled,
+} from './tool-activity/tool-row-motion.js';
+// Streaming UI rework: per-word fade-in for streamed text (replaces the ▎
+// caret). Pure append-record ring + tokenizer are unit-tested; the hook feeds
+// markdown-body's rehype pass.
+export {
+  useStreamFade,
+  tokenizeFade,
+  updateFadeRing,
+  createFadeRing,
+  fadeBoundary,
+  fadeAgeAt,
+  FADE_MS,
+  MAX_FADE_BATCHES,
+  type StreamFade,
+  type FadeToken,
+  type FadeRingState,
+  type FadeBatch,
+} from './stream-fade.js';

@@ -21,6 +21,7 @@ import type {
   SessionEvent,
   SessionListFilter,
   SessionSummary,
+  ShellRunUpdate,
   StoredMessage,
   ThinkingLevel,
   UpdateConnectionInput,
@@ -68,7 +69,8 @@ import type {
   UsageSummaryV2,
 } from '@maka/core/usage-stats/types';
 import type { BotStatus, WechatBridgeQrCodeResult } from '@maka/runtime';
-import type { SkillEntry } from '@maka/ui';
+import type { GoalState } from '@maka/runtime';
+import type { BundledSkillCatalogEntry, ManagedSkillSourceEntry, ManagedSkillUpdatePreview, SkillEntry, SkillGovernanceDetails } from '@maka/ui';
 import type { ConfigCategory } from '@maka/storage';
 import type { TestProxyInput } from '@maka/core/settings/network-settings';
 import type { Result } from '@maka/core/settings/result';
@@ -220,6 +222,24 @@ contextBridge.exposeInMainWorld('maka', {
     },
     remove(sessionId: string): Promise<void> {
       return ipcRenderer.invoke('sessions:remove', sessionId);
+    },
+  },
+  shellRuns: {
+    list(sessionId: string): Promise<ShellRunUpdate[]> {
+      return ipcRenderer.invoke('shell-runs:list', sessionId);
+    },
+    subscribeUpdates(handler: (update: ShellRunUpdate) => void): () => void {
+      const listener = (_event: Electron.IpcRendererEvent, update: ShellRunUpdate) => handler(update);
+      ipcRenderer.on('shell-runs:update', listener);
+      return () => ipcRenderer.off('shell-runs:update', listener);
+    },
+  },
+  goal: {
+    get(sessionId: string): Promise<GoalState | null> {
+      return ipcRenderer.invoke('goal:get', sessionId);
+    },
+    clear(sessionId: string): Promise<void> {
+      return ipcRenderer.invoke('goal:clear', sessionId);
     },
   },
   connections: {
@@ -650,6 +670,20 @@ contextBridge.exposeInMainWorld('maka', {
       },
     },
   },
+  notifications: {
+    // Fire-and-forget signal that an agent turn reached a terminal
+    // state. `title` is the session name, `body` the start of the reply
+    // (or the error message); main sanitizes both and falls back to
+    // generic copy when blank. Main gates on the product toggle + window
+    // focus before raising a native OS notification.
+    runEnded(payload: {
+      kind: 'completed' | 'errored';
+      title?: string;
+      body?: string;
+    }): Promise<void> {
+      return ipcRenderer.invoke('notifications:runEnded', payload);
+    },
+  },
   usage: {
     summary(query: UsageQuery): Promise<Result<UsageSummaryV2>> {
       return ipcRenderer.invoke('usage:summary', query);
@@ -745,6 +779,11 @@ contextBridge.exposeInMainWorld('maka', {
     // color/symbolColor to the current app theme. No-op on non-Windows.
     setTitleBarOverlayTheme(isDark: boolean): Promise<void> {
       return ipcRenderer.invoke('window:setTitleBarOverlayTheme', isDark);
+    },
+    // PR-SHOW-AFTER-FIRST-COMMIT: tell main the renderer finished its first
+    // React commit so the hidden window can be revealed. Fire-and-forget.
+    notifyRendererReady(): Promise<void> {
+      return ipcRenderer.invoke('window:notifyRendererReady');
     },
   },
   config: {
@@ -890,6 +929,58 @@ contextBridge.exposeInMainWorld('maka', {
   skills: {
     list(): Promise<SkillEntry[]> {
       return ipcRenderer.invoke('skills:list');
+    },
+    catalog: {
+      list(): Promise<BundledSkillCatalogEntry[]> {
+        return ipcRenderer.invoke('skills:catalog:list');
+      },
+      install(id: string): Promise<
+        | { ok: true; skill: SkillEntry }
+        | { ok: false; reason: 'not_found' | 'already_exists' | 'blocked_path' | 'write_failed' }
+      > {
+        return ipcRenderer.invoke('skills:catalog:install', id);
+      },
+    },
+    sources: {
+      list(): Promise<ManagedSkillSourceEntry[]> {
+        return ipcRenderer.invoke('skills:sources:list');
+      },
+      importLocalFile(): Promise<
+        | { ok: true; source: ManagedSkillSourceEntry }
+        | { ok: false; reason: 'cancelled' | 'invalid_skill' | 'already_exists' | 'blocked_path' | 'write_failed' }
+      > {
+        return ipcRenderer.invoke('skills:sources:importLocalFile');
+      },
+    },
+    installManaged(sourceId: string): Promise<
+      | { ok: true; skill: SkillEntry }
+      | { ok: false; reason: 'not_found' | 'already_exists' | 'blocked_path' | 'write_failed' }
+    > {
+      return ipcRenderer.invoke('skills:installManaged', sourceId);
+    },
+    details(skillId: string): Promise<
+      | { ok: true; details: SkillGovernanceDetails }
+      | { ok: false; reason: 'not_found' | 'invalid_id' }
+    > {
+      return ipcRenderer.invoke('skills:details', skillId);
+    },
+    previewUpdate(skillId: string): Promise<
+      | { ok: true; preview: ManagedSkillUpdatePreview }
+      | { ok: false; reason: 'not_managed' | 'source_missing' | 'metadata_error' | 'blocked_path' | 'read_failed' }
+    > {
+      return ipcRenderer.invoke('skills:previewUpdate', skillId);
+    },
+    updateManaged(skillId: string, options?: { force?: boolean; expectedCurrentSha256?: string; expectedSourceSha256?: string }): Promise<
+      | { ok: true; skill: SkillEntry }
+      | { ok: false; reason: 'not_managed' | 'source_missing' | 'local_modified' | 'metadata_error' | 'blocked_path' | 'write_failed' }
+    > {
+      return ipcRenderer.invoke('skills:updateManaged', skillId, options);
+    },
+    setEnabled(skillId: string, enabled: boolean): Promise<
+      | { ok: true; skill: SkillEntry }
+      | { ok: false; reason: 'not_found' | 'blocked_path' | 'state_error' | 'write_failed' }
+    > {
+      return ipcRenderer.invoke('skills:setEnabled', skillId, enabled);
     },
     createStarter(): Promise<
       | { ok: true; skill: SkillEntry; filePath: string }

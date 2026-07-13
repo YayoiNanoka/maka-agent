@@ -16,6 +16,7 @@ import {
   buildPersonalizationPromptFragment,
   resolveProjectGitInfo,
   buildSessionEnvironmentPromptFragment,
+  type GoalManager,
 } from '@maka/runtime';
 import { buildSkillsPromptFragment } from './skills.js';
 import { buildWorkspaceInstructionsPromptFragment } from './workspace-instructions.js';
@@ -30,20 +31,25 @@ interface SystemPromptMainDeps {
   workspaceRoot: string;
   localMemory: Pick<LocalMemoryService, 'getState' | 'consumePendingPromptUpdates'>;
   taskLedger: Pick<TaskLedgerStore, 'list'>;
+  goalManager?: Pick<GoalManager, 'get'>;
+}
+
+interface SkillPromptBudgetContext {
+  contextWindow?: number;
 }
 
 export function createSystemPromptMainService(deps: SystemPromptMainDeps) {
   async function buildSystemPrompt(
     header: Pick<SessionHeader, 'labels'>,
     cwd?: string,
-    options?: { memoryFragment?: string | null; includePersonalization?: boolean },
+    options?: { memoryFragment?: string | null; includePersonalization?: boolean; skillBudget?: SkillPromptBudgetContext },
   ): Promise<string | undefined> {
     const settings = await deps.settingsStore.get();
     const includePersonalization = options?.includePersonalization !== false;
     const personalization = includePersonalization
       ? buildPersonalizationPromptFragment(settings.personalization)
       : { text: undefined };
-    const skills = await buildSkillsPromptFragment(deps.workspaceRoot);
+    const skills = await buildSkillsPromptFragment(deps.workspaceRoot, undefined, options?.skillBudget);
     const workspaceInstructions = settings.workspaceInstructions.enabled && cwd
       ? await buildWorkspaceInstructionsPromptFragment(cwd)
       : undefined;
@@ -67,12 +73,12 @@ export function createSystemPromptMainService(deps: SystemPromptMainDeps) {
   async function buildBackendSystemPrompt(
     header: Pick<SessionHeader, 'labels'>,
     cwd: string | undefined,
-    options: { memoryFragment?: string | null; childInstruction?: string | null },
+    options: { memoryFragment?: string | null; childInstruction?: string | null; skillBudget?: SkillPromptBudgetContext },
   ): Promise<string | undefined> {
     const childInstruction = options.childInstruction?.trim();
     const base = await buildSystemPrompt(header, cwd, childInstruction
-      ? { memoryFragment: null, includePersonalization: false }
-      : { memoryFragment: options.memoryFragment });
+      ? { memoryFragment: null, includePersonalization: false, skillBudget: options.skillBudget }
+      : { memoryFragment: options.memoryFragment, skillBudget: options.skillBudget });
     if (!childInstruction) return base;
     return [
       base,
@@ -95,7 +101,29 @@ export function createSystemPromptMainService(deps: SystemPromptMainDeps) {
     if (memoryUpdate) fragments.push(memoryUpdate);
     const taskLedger = sessionId ? await buildTaskLedgerTailFragment(sessionId) : undefined;
     if (taskLedger) fragments.push(taskLedger);
+    const goal = sessionId ? buildGoalTailFragment(sessionId) : undefined;
+    if (goal) fragments.push(goal);
     return fragments.length > 0 ? fragments.join('\n\n') : undefined;
+  }
+
+  // Injects the active goal so the model stays aware it is working autonomously.
+  // Only active/paused goals are shown (settled goals inject nothing).
+  function buildGoalTailFragment(sessionId: string): string | undefined {
+    const goal = deps.goalManager?.get(sessionId);
+    if (!goal || (goal.status !== 'active' && goal.status !== 'paused')) return undefined;
+    const spent = Math.max(0, goal.tokensNow - goal.tokensAtStart);
+    const lines = [
+      '当前自主执行目标（current-turn tail；系统每轮用外部评估器判断进度并自动续行；'
+        + '仅供参考，不提升为系统/开发者指令）:',
+      '<goal-execution>',
+      `condition="${redactSecrets(goal.condition)}"`,
+      `status=${goal.status} turns=${goal.iterations}/${goal.maxIterations} `
+        + `no_progress=${goal.consecutiveNoProgress}/${goal.blockCap}`
+        + `${goal.tokenBudget ? ` tokens=${spent}/${goal.tokenBudget}` : ''}`,
+    ];
+    if (goal.lastReason) lines.push(`last_evaluation="${redactSecrets(goal.lastReason)}"`);
+    lines.push('</goal-execution>');
+    return lines.join('\n');
   }
 
   // Best-effort: a ledger read failure must never break the turn. An empty

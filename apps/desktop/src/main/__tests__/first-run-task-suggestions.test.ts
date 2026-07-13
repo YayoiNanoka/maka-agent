@@ -105,13 +105,14 @@ describe('FIRST_RUN_TASK_SUGGESTIONS', () => {
 
     assert.match(readyBlock, /const \[pendingImportAction, setPendingImportAction\] = useState<string \| null>\(null\)/);
     assert.match(readyBlock, /const readyHeroMountedRef = useRef\(true\)/);
-    assert.match(readyBlock, /const pendingImportActionRef = useRef<string \| null>\(null\)/);
+    assert.match(readyBlock, /const importActionOwnerRef = useRef<ChatInputActionOwner<string> \| null>\(null\)/);
+    assert.match(readyBlock, /importActionOwnerRef\.current = createChatInputActionOwner/);
     assert.match(readyBlock, /const importActionBusy = pendingImportAction !== null/);
     assert.match(readyBlock, /const appendImportedPrompt = useCallback\(\(prompt: string\) => \{[\s\S]*if \(!readyHeroMountedRef\.current\) return;[\s\S]*setDraft\(/);
     assert.match(
       gateBlock,
-      /if \(pendingImportActionRef\.current !== null \|\| quickChatBusy\) return;[\s\S]*pendingImportActionRef\.current = actionKey[\s\S]*setPendingImportAction\(actionKey\)[\s\S]*const prompt = await action\(\)[\s\S]*if \(prompt && readyHeroMountedRef\.current\) appendImportedPrompt\(prompt\)[\s\S]*pendingImportActionRef\.current = null[\s\S]*if \(readyHeroMountedRef\.current\) setPendingImportAction\(null\)/,
-      'first-run import actions must use a ref-backed pending gate and append only through one shared path',
+      /if \(quickChatBusy\) return;[\s\S]*const prompt = await importActionOwnerRef\.current\?\.run\(actionKey,[\s\S]*const prompt = await action\(\)[\s\S]*if \(prompt && readyHeroMountedRef\.current\) appendImportedPrompt\(prompt\)/,
+      'first-run import actions must use the shared synchronous pending owner and append only through one path',
     );
     assert.match(readyBlock, /runImportAction\('drop', async \(\) => props\.onImportDroppedTextFiles\?\.\(files\)\)/);
     assert.match(readyBlock, /runImportAction\('paste', async \(\) => props\.onImportDroppedTextFiles\?\.\(files\)\)/);
@@ -129,12 +130,12 @@ describe('FIRST_RUN_TASK_SUGGESTIONS', () => {
     const setupBlock = hero.match(/interface SetupHeroProps[\s\S]*?function assertNever/)?.[0] ?? '';
 
     assert.match(rootBlock, /const \[refreshConnectionsPending, setRefreshConnectionsPending\] = useState\(false\)/);
-    assert.match(rootBlock, /const onboardingMountedRef = useRef\(true\)/);
+    assert.match(rootBlock, /const onboardingMountedRef = useMountedRef\(\)/);
     assert.match(rootBlock, /const refreshConnectionsPendingRef = useRef\(false\)/);
     assert.match(
       rootBlock,
-      /useEffect\(\(\) => \{[\s\S]*onboardingMountedRef\.current = true;[\s\S]*return \(\) => \{[\s\S]*onboardingMountedRef\.current = false;[\s\S]*refreshConnectionsPendingRef\.current = false;[\s\S]*\};[\s\S]*\}, \[\]\)/,
-      'first-run setup refresh must release pending ownership on unmount and restore mounted state during StrictMode replay',
+      /useEffect\(\(\) => \{[\s\S]*return \(\) => \{[\s\S]*refreshConnectionsPendingRef\.current = false;[\s\S]*\};[\s\S]*\}, \[\]\)/,
+      'first-run setup refresh must release pending ownership on unmount; the mounted flag is owned by the shared useMountedRef hook',
     );
     assert.match(
       rootBlock,

@@ -6,12 +6,8 @@
  *   AgentBackend (AiSdkBackend etc) — SDK adapter
  *   PermissionEngine                  — policy + parking
  *
- * Source: V0.1_TECH_SPEC.md §6.1, §9 (Phase 1 vertical path)
- *
- * NOTE: Imports `SessionStore` from `@maka/storage`. Storage
- * package authored in parallel; the interface is committed per
- * thread message (appendMessage / appendMessages return Promise<void>,
- * updateHeader returns updated SessionHeader, same-session writes serialized).
+ * `SessionStore` comes from `@maka/storage`; its public interface owns
+ * persistence and same-session serialization semantics.
  */
 
 import type {
@@ -22,6 +18,7 @@ import type {
   AbortEvent,
   PermissionDecisionAckEvent,
   PermissionRequestEvent,
+  ShellRunUpdate,
 } from '@maka/core/events';
 import type {
   SessionHeader,
@@ -46,7 +43,11 @@ import type {
 } from '@maka/core/runtime-inputs';
 import type { PermissionResponse } from '@maka/core/permission';
 import type { PermissionMode } from '@maka/core/permission';
-import { DEEP_RESEARCH_SESSION_LABEL, isDeepResearchSession } from '@maka/core';
+import {
+  DEEP_RESEARCH_SESSION_LABEL,
+  failureClassFromCompleteStopReason,
+  isDeepResearchSession,
+} from '@maka/core';
 import type { AgentRunEvent, AgentRunHeader, AgentRunStore, ArtifactRecord, RuntimeEvent, RuntimeEventStore } from '@maka/core';
 import {
   type RuntimeEventTerminalFact,
@@ -62,11 +63,13 @@ import {
   terminalRunStatusFromRuntimeEvent,
 } from './terminal-run-commit.js';
 
-import type { AgentBackend, MakaTool } from './ai-sdk-backend.js';
+import type { AgentBackend } from '@maka/core/backend-types';
+import type { MakaTool } from './tool-runtime.js';
 import type { RunTraceRecorder } from './run-trace.js';
 import type { ShellRunProcessManager } from './shell-run-manager.js';
 import type { ActiveFullCompactBlock } from './active-full-compact.js';
 import type { SemanticCompactBlock } from './semantic-compact.js';
+import type { HistoryCompactCheckpoint } from './history-compact-checkpoint.js';
 import type { AgentRunLineage } from './agent-run.js';
 import { classifyAgentRunRecovery, type AgentRunRecoveryDecision } from './agent-run-recovery.js';
 import type {
@@ -74,6 +77,7 @@ import type {
   InvocationSource,
 } from './invocation-context.js';
 import { RuntimeKernel, type ChildToolFactory, type RuntimeKernelLike } from './runtime-kernel.js';
+import type { HistoryCompactCleanupRequest } from './runtime-kernel.js';
 import {
   buildStatusPatch,
   buildTurnStateMessage,
@@ -205,6 +209,8 @@ export interface BackendFactoryContext {
   systemPrompt?: string;
   tools?: readonly MakaTool[];
   recordRunTrace?: RunTraceRecorder;
+  loadHistoryCompactCheckpoint?: () => Promise<HistoryCompactCheckpoint | undefined>;
+  recordHistoryCompactCheckpoint?: (checkpoint: HistoryCompactCheckpoint, turnId: string) => Promise<void>;
   recordActiveFullCompactBlock?: (block: ActiveFullCompactBlock) => void;
   recordSemanticCompactBlock?: (block: SemanticCompactBlock) => void;
   shellRunContextSummary?: () => Promise<string | undefined>;
@@ -247,6 +253,7 @@ export interface SessionManagerDeps {
   runtimeInvocationObserver?: (result: InvocationResult) => void | Promise<void>;
   runtimeKernel?: RuntimeKernelLike;
   shellRuns?: ShellRunProcessManager;
+  cleanupHistoryCompactArtifacts?: (input: HistoryCompactCleanupRequest) => Promise<void>;
 }
 
 export class SessionManager {
@@ -293,6 +300,58 @@ export class SessionManager {
 
   async listTurns(sessionId: string): Promise<TurnRecord[]> {
     return (await this.getSessionView(sessionId)).turns;
+  }
+
+  async listShellRunUpdates(sessionId: string): Promise<ShellRunUpdate[]> {
+    const shellRuns = this.deps.shellRuns;
+    if (!shellRuns) return [];
+
+    const ownUpdates = await shellRuns.listSessionUpdates(sessionId);
+    const ownToolCalls = new Set(ownUpdates.map((update) => update.sourceToolCallId));
+    const messages = await this.getMessages(sessionId);
+    const bashToolCalls = new Set(messages.flatMap((message) =>
+      message.type === 'tool_call' && message.toolName === 'Bash' ? [message.id] : []
+    ));
+    const inherited = new Map<string, {
+      ref: string;
+      turnId: string;
+      toolUseId: string;
+      result: ShellRunUpdate['result'];
+    }>();
+    for (const message of messages) {
+      if (
+        message.type === 'tool_result'
+        && bashToolCalls.has(message.toolUseId)
+        && !ownToolCalls.has(message.toolUseId)
+        && message.content.kind === 'shell_run'
+        && message.content.status === 'running'
+      ) {
+        const { operation: _operation, ...result } = message.content;
+        inherited.set(message.toolUseId, {
+          ref: message.content.ref,
+          turnId: message.turnId,
+          toolUseId: message.toolUseId,
+          result,
+        });
+      }
+    }
+    if (inherited.size === 0) return ownUpdates;
+
+    const parentSessionId = (await this.deps.store.readHeader(sessionId)).parentSessionId;
+    if (!parentSessionId) return ownUpdates;
+    const inheritedUpdates = await Promise.all([...inherited.values()].map(async (candidate) => {
+      const owner = await this.resolveShellRunOwner(parentSessionId, candidate.ref);
+      return {
+        sessionId,
+        ownership: owner
+          ? { kind: 'source_owned', sourceSessionId: parentSessionId, ownerSessionId: owner.sessionId }
+          : { kind: 'source_unavailable', sourceSessionId: parentSessionId },
+        sourceTurnId: candidate.turnId,
+        sourceToolCallId: candidate.toolUseId,
+        result: owner?.result ?? candidate.result,
+      } satisfies ShellRunUpdate;
+    }));
+    return [...ownUpdates, ...inheritedUpdates];
   }
 
   async recoverInterruptedSessions(): Promise<string[]> {
@@ -382,13 +441,20 @@ export class SessionManager {
   }
 
   async archive(sessionId: string): Promise<void> {
-    await this.deps.shellRuns?.terminateSession(sessionId);
-    await this.deps.store.archive(sessionId);
+    const shellRunClose = await this.deps.shellRuns?.terminateSession(sessionId);
+    try {
+      await this.deps.store.archive(sessionId);
+    } catch (error) {
+      if (shellRunClose) this.deps.shellRuns?.rollbackSessionClose(shellRunClose);
+      throw error;
+    }
+    if (shellRunClose) await this.deps.shellRuns?.commitSessionClose(shellRunClose);
     await this.runtimeKernel.disposeBackend(sessionId);
   }
 
   async unarchive(sessionId: string): Promise<void> {
     await this.deps.store.unarchive(sessionId);
+    this.deps.shellRuns?.resumeSession(sessionId);
   }
 
   async setSessionStatus(
@@ -454,9 +520,15 @@ export class SessionManager {
   }
 
   async remove(sessionId: string): Promise<void> {
-    await this.deps.shellRuns?.terminateSession(sessionId);
-    await this.runtimeKernel.disposeBackend(sessionId);
-    await this.deps.store.remove(sessionId);
+    const shellRunClose = await this.deps.shellRuns?.terminateSession(sessionId);
+    try {
+      await this.runtimeKernel.disposeBackend(sessionId);
+      await this.deps.store.remove(sessionId);
+    } catch (error) {
+      if (shellRunClose) this.deps.shellRuns?.rollbackSessionClose(shellRunClose);
+      throw error;
+    }
+    if (shellRunClose) await this.deps.shellRuns?.commitSessionClose(shellRunClose);
   }
 
   // --------------------------------------------------------------------------
@@ -527,6 +599,7 @@ export class SessionManager {
 
     const completedAt = this.deps.now();
     const run = await this.findRunByTurnId(sessionId, turnId);
+    const failureClass = run?.failureClass ?? summary.failureClass;
     const artifacts = this.deps.listArtifactsForTurn
       ? await this.deps.listArtifactsForTurn(sessionId, turnId)
       : [];
@@ -543,7 +616,7 @@ export class SessionManager {
       completedAt,
       durationMs: Math.max(0, completedAt - startedAt),
       eventCount: summary.eventCount,
-      ...(run?.failureClass ? { failureClass: run.failureClass } : {}),
+      ...(failureClass ? { failureClass } : {}),
     };
   }
 
@@ -645,11 +718,35 @@ export class SessionManager {
     sessionId: string,
     input: BranchFromTurnInput,
   ): Promise<SessionSummary> {
-    const header = await this.deps.store.readHeader(sessionId);
     const sourceView = await this.getSessionView(sessionId);
-    const { messages } = sourceView;
-    const copied = copyMessagesThroughTurnBoundary(messages, input.sourceTurnId);
+    // Inclusive: keep everything up to and including the chosen turn. A found
+    // turn always has at least its own messages, so an empty copy means the
+    // turn does not exist.
+    const copied = copyMessagesThroughTurnBoundary(sourceView.messages, input.sourceTurnId);
     if (copied.length === 0) throw new Error(`Cannot branch from unknown turn ${input.sourceTurnId}`);
+    return this.createBranchSession(sessionId, sourceView, copied, input);
+  }
+
+  async branchBeforeTurn(
+    sessionId: string,
+    input: BranchFromTurnInput,
+  ): Promise<SessionSummary> {
+    const sourceView = await this.getSessionView(sessionId);
+    // Exclusive dual of branchFromTurn: keep everything strictly before the
+    // chosen turn, dropping it and every later turn. An empty copy is valid
+    // here (the turn is the first one) — it branches to a fresh, empty context.
+    const copied = copyMessagesBeforeTurn(sourceView.messages, input.sourceTurnId);
+    if (copied === null) throw new Error(`Cannot branch before unknown turn ${input.sourceTurnId}`);
+    return this.createBranchSession(sessionId, sourceView, copied, input);
+  }
+
+  private async createBranchSession(
+    sessionId: string,
+    sourceView: RuntimeReadModelSessionView,
+    copied: StoredMessage[],
+    input: BranchFromTurnInput,
+  ): Promise<SessionSummary> {
+    const header = await this.deps.store.readHeader(sessionId);
     const next = await this.deps.store.create({
       cwd: header.cwd,
       backend: header.backend,
@@ -664,7 +761,7 @@ export class SessionManager {
       status: 'active',
     });
     await this.cloneBranchRuntimeLedger(next.id, sourceView, copied);
-    await this.deps.store.appendMessages(next.id, copied);
+    if (copied.length > 0) await this.deps.store.appendMessages(next.id, copied);
     await this.deps.store.appendMessage(next.id, {
       type: 'system_note',
       id: this.deps.newId(),
@@ -694,6 +791,34 @@ export class SessionManager {
     const runs = await this.deps.runStore.listSessionRuns(sessionId).catch(() => []);
     const run = runs.find((candidate) => candidate.turnId === turnId);
     return run ? this.effectiveRunHeaderFromRuntimeLedger(run) : undefined;
+  }
+
+  private async resolveShellRunOwner(
+    firstParentSessionId: string,
+    ref: string,
+  ): Promise<{ sessionId: string; result: ShellRunUpdate['result'] } | undefined> {
+    const shellRuns = this.deps.shellRuns;
+    if (!shellRuns) return undefined;
+    let ownerSessionId: string | undefined = firstParentSessionId;
+    const visited = new Set<string>();
+    while (ownerSessionId && !visited.has(ownerSessionId)) {
+      visited.add(ownerSessionId);
+      try {
+        return {
+          sessionId: ownerSessionId,
+          result: await shellRuns.inspectResource(ownerSessionId, ref),
+        };
+      } catch (error) {
+        if (!isNotFoundError(error)) throw error;
+        try {
+          ownerSessionId = (await this.deps.store.readHeader(ownerSessionId)).parentSessionId;
+        } catch (headerError) {
+          if (isNotFoundError(headerError)) return undefined;
+          throw headerError;
+        }
+      }
+    }
+    return undefined;
   }
 
   private async findChildRunForOutput(
@@ -1022,6 +1147,10 @@ export function headerToSummary(h: SessionHeader): SessionSummary {
   return summary;
 }
 
+function isNotFoundError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT';
+}
+
 export function changesBackendConfig(patch: Partial<SessionHeader>): boolean {
   return 'backend' in patch || 'llmConnectionSlug' in patch || 'model' in patch || 'thinkingLevel' in patch;
 }
@@ -1043,6 +1172,7 @@ function trimSummary(text: string): string {
 
 class ChildAgentSummaryAccumulator {
   eventCount = 0;
+  failureClass: string | undefined;
   private terminalStatus: SpawnChildAgentResult['status'] | undefined;
   private lastTextComplete = '';
   private textDeltaTail = '';
@@ -1066,7 +1196,8 @@ class ChildAgentSummaryAccumulator {
         this.terminalStatus = 'cancelled';
         break;
       case 'complete':
-        if (event.stopReason === 'error') this.terminalStatus = 'failed';
+        this.failureClass = failureClassFromCompleteStopReason(event.stopReason);
+        if (this.failureClass) this.terminalStatus = 'failed';
         else if (event.stopReason === 'user_stop') this.terminalStatus = 'cancelled';
         else this.terminalStatus = 'completed';
         break;
@@ -1208,6 +1339,35 @@ function copyMessagesThroughTurnBoundary(messages: readonly StoredMessage[], tur
   return messages
     .slice(0, lastIndex + 1)
     .filter((message) => message.type !== 'turn_state');
+}
+
+// Exclusive dual of copyMessagesThroughTurnBoundary: every message belonging to
+// a turn strictly before the chosen one, dropping it and every later turn.
+// Returns null when the turn is absent (so the caller can reject an unknown
+// turn), and an empty array when the turn is the first one (a valid branch into
+// empty context). Membership, not array position, decides what to keep: the read
+// model does not guarantee a turn's messages are contiguous or that a user
+// prompt precedes its turn_state in array order, so a positional slice could
+// drop an earlier turn's prompt. turn_state is dropped for the same reason as in
+// the inclusive copy — lineage lives on the child header, not copied metadata.
+function copyMessagesBeforeTurn(messages: readonly StoredMessage[], turnId: string): StoredMessage[] | null {
+  const turnOrder: string[] = [];
+  const seen = new Set<string>();
+  for (const message of messages) {
+    const messageTurnId = (message as { turnId?: string }).turnId;
+    if (messageTurnId && !seen.has(messageTurnId)) {
+      seen.add(messageTurnId);
+      turnOrder.push(messageTurnId);
+    }
+  }
+  const cut = turnOrder.indexOf(turnId);
+  if (cut < 0) return null;
+  const keep = new Set(turnOrder.slice(0, cut));
+  return messages.filter((message) => {
+    if (message.type === 'turn_state') return false;
+    const messageTurnId = (message as { turnId?: string }).turnId;
+    return messageTurnId !== undefined && keep.has(messageTurnId);
+  });
 }
 
 function isTerminalRunStatus(status: AgentRunHeader['status']): boolean {

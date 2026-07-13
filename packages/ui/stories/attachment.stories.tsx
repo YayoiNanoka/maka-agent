@@ -95,15 +95,12 @@ const baseComposer: ComposerProps = {
 
 const baseChat: ChatViewProps = {
   messages: [],
-  streamingText: '',
-  tools: [],
   activeSession: session(),
   activeConnectionLabel: 'Anthropic',
   activeModel: 'claude-sonnet-4-5',
   activeModelLabel: 'Claude Sonnet 4.5',
   modelChoices,
   userLabel: '你',
-  mode: 'sessions',
   onNew: noop,
   onPromptSuggestion: noop,
 };

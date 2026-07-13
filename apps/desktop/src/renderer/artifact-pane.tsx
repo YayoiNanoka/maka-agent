@@ -1,5 +1,5 @@
 /**
- * Right-side ArtifactPane for the chat shell (design-system §9.1.3).
+ * Right-side ArtifactPane for the chat shell.
  *
  * Responsibilities — and the five review gates that drive them:
  *
@@ -16,8 +16,8 @@
  *     `ArtifactReadFailureReason`s have explicit Chinese copy.
  *
  *  4. **Smoke fixture compatibility**: the pane mounts when `sessionId` is
- *     defined AND at least one live artifact exists — per §9.1.3 default
- *     hidden. The `MAKA_VISUAL_SMOKE_FIXTURE=artifact-pane` scenario seeds
+ *     defined AND at least one live artifact exists. The
+ *     `MAKA_VISUAL_SMOKE_FIXTURE=artifact-pane` scenario seeds
  *     3 artifacts, so the pane is visible during the smoke.
  *
  *  5. **Copy/export policy**: only the text-based kinds (`file`, `diff`,
@@ -77,6 +77,7 @@ import {
 } from '@maka/ui';
 import { ArtifactPreview } from './artifact-preview';
 import { nextArtifactListAction } from './artifact-list-keyboard';
+import { filterUserVisibleArtifacts } from './artifact-visibility';
 import { safeLocalStorageGet, safeLocalStorageSet } from './browser-storage';
 import { openPathFailureCopy } from './open-path';
 
@@ -148,7 +149,7 @@ export function ArtifactPane(props: { sessionId: string | undefined }) {
   useEffect(() => {
     void refresh();
     if (!sessionId) return;
-    // §9.1.2 subscribeChanges: keep the list in sync without polling. The
+    // Keep the list in sync without polling. The
     // backend emits `{ reason: 'created' | 'deleted' | 'purged' }` on the
     // `artifacts:changed` channel; we just re-list since the list is bounded
     // (one session's worth) and the metadata is already in memory on main.
@@ -168,7 +169,7 @@ export function ArtifactPane(props: { sessionId: string | undefined }) {
   }, [collapsed]);
 
   const activeRecords = useMemo(
-    () => (recordsSessionId === sessionId ? records.filter((record) => record.source !== 'user_upload') : []),
+    () => (recordsSessionId === sessionId ? filterUserVisibleArtifacts(records) : []),
     [records, recordsSessionId, sessionId],
   );
 
@@ -193,7 +194,7 @@ export function ArtifactPane(props: { sessionId: string | undefined }) {
   const hasLiveArtifact = activeRecords.some((record) => record.status !== 'deleted');
   const artifactActionBusy = pendingArtifactAction !== null;
 
-  // §9.1.3: "默认隐藏；当 session 内至少 1 个 live artifact 时显示". Returning
+  // Default hidden until the session has a live artifact. Returning
   // `null` keeps the chat surface flush with the right window edge until
   // the runtime actually produces an artifact. A current-session list error is
   // also visible; otherwise "list failed" is indistinguishable from "no files".
@@ -356,7 +357,7 @@ export function ArtifactPane(props: { sessionId: string | undefined }) {
         break;
       case 'activate':
         setSelectedId(action.targetId);
-        // §9.1.3 Enter on selected row → focus preview surface so the
+        // Enter on selected row → focus preview surface so the
         // screen reader announces the artifact contents.
         requestAnimationFrame(() => previewRef.current?.focus());
         break;
@@ -414,7 +415,7 @@ export function ArtifactPane(props: { sessionId: string | undefined }) {
         <>
           {activeListError && (
             <Alert variant="error" className="maka-artifact-list-error">
-              <AlertTriangle size={14} strokeWidth={1.75} aria-hidden="true" />
+              <AlertTriangle size={14} aria-hidden="true" />
               <AlertTitle>生成文件列表载入失败</AlertTitle>
               <AlertDescription>{activeListError}</AlertDescription>
               <AlertAction>
@@ -428,7 +429,7 @@ export function ArtifactPane(props: { sessionId: string | undefined }) {
                   aria-busy={pendingArtifactListRetry ? 'true' : undefined}
                   data-pending={pendingArtifactListRetry ? 'true' : undefined}
                 >
-                  <RefreshCcw size={13} strokeWidth={1.75} aria-hidden="true" />
+                  <RefreshCcw size={13} aria-hidden="true" />
                   <span>{pendingArtifactListRetry ? '重试中…' : '重试'}</span>
                 </Button>
               </AlertAction>

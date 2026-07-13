@@ -19,12 +19,10 @@ import {
   resolveModelVisionSupport,
   DEEP_RESEARCH_SESSION_LABEL,
   botDisplayLabel,
-  humanizeBotStatusReason,
 } from '@maka/core';
 import type {
   AppSettings,
   BotProvider,
-  BotReadinessState,
   ConnectionEvent,
   CreateSessionInput,
   PermissionMode,
@@ -39,6 +37,7 @@ import type {
   UpdateAppSettingsResult,
   UpdateAppSettingsInput,
 } from '@maka/core';
+import { deriveBotStatusPersistenceUpdate } from './bot-status-persistence.js';
 import { buildWebSearchAgentTool, WEB_SEARCH_TOOL_NAME } from './web-search/agent-tool.js';
 import { buildRiveWorkflowTool } from './rive-workflow-tool.js';
 import { runThreadSearch } from './search/thread-search.js';
@@ -53,6 +52,7 @@ import {
   normalizeSessionSendCommand,
   normalizeStopSessionInput,
 } from './permission-response-guard.js';
+import { turnFailureMessageFromSessionEvent } from './turn-stream-outcome.js';
 import { ClaudeSubscriptionService } from './oauth/claude-subscription-service.js';
 import { CodexSubscriptionService } from './oauth/codex-subscription-service.js';
 import { CursorSubscriptionService } from './oauth/cursor-subscription-service.js';
@@ -74,7 +74,6 @@ import {
   buildPermissionAwareBuiltinTools,
   buildSandboxDiagnosticsSnapshot,
   createDefaultSandboxManager,
-  createSessionSandboxContextProvider,
   createPermissionAwareChildToolFactory,
   probeActiveSandboxCapabilities,
   buildSubagentProjectionTools,
@@ -140,7 +139,6 @@ import { createDailyReviewArchiveStore } from './daily-review-archive-store.js';
 import { botTestErrorMessage, buildSettingsUpdateResult, maskAppSettings, preserveSensitivePlaceholders, toSettingsTestResult } from './settings-ipc-helpers.js';
 import {
   buildSkillAgentTool,
-  ensureBundledOfficeSkills,
 } from './skills.js';
 import {
   createWorkspaceInstructionFile,
@@ -168,8 +166,8 @@ import { buildExploreAgentTool } from './explore-agent-tool.js';
 import { buildOfficeDocumentEditTool, buildOfficeDocumentTool } from './office-document-tool.js';
 import {
   buildLlmHistorySummarizer,
+  cleanupLegacyHistoryCompactArtifacts,
   loadHistoryCompactBlocksFromArtifacts,
-  persistHistoryCompactBlocksToArtifacts,
 } from '@maka/runtime';
 import {
   loadSynthesisCacheBlocksFromArtifacts,
@@ -182,9 +180,12 @@ import { createDailyReviewMainService } from './daily-review-main.js';
 import { createPlanReminderMainService } from './plan-reminders-main.js';
 import { createBotIncomingMainService } from './bot-incoming-main.js';
 import { createSubscriptionModelFetch } from './subscription-model-fetch.js';
-import { buildDefaultContextBudgetPolicy } from '@maka/runtime';
+import { buildDefaultContextBudgetPolicy, resolveSelectedModelContextWindow } from '@maka/runtime';
 import { createSystemPromptMainService } from './system-prompt-main.js';
 import { createMainTaskLedgerWiring } from './task-ledger-wiring.js';
+import { createMainAutomationWiring, evaluateAutomationCanFire } from './automation-wiring.js';
+import { createMainGoalWiring } from './goal-wiring.js';
+import { handleGoalContinuation } from '@maka/runtime';
 import { createOAuthModelConnectionsMainService } from './oauth-model-connections-main.js';
 import {
   applyNetworkPatch,
@@ -202,6 +203,7 @@ import { registerWorkspaceResourcesIpc } from './workspace-resources-ipc-main.js
 import { registerDailyReviewIpc } from './daily-review-ipc-main.js';
 import { registerUsageIpc } from './usage-ipc-main.js';
 import { registerWebSearchIpc } from './web-search-ipc-main.js';
+import { registerNotificationsIpc } from './notifications-ipc-main.js';
 
 // E2E switches must never fire in a packaged build, and must never run against
 // the real user data: a stray MAKA_E2E on a build/dev machine would otherwise
@@ -343,6 +345,114 @@ const planReminderStore = createPlanReminderStore(workspaceRoot);
 const taskLedgerWiring = createMainTaskLedgerWiring(workspaceRoot);
 const taskLedgerStore = taskLedgerWiring.store;
 
+// Unified Automation — single "Automation" tool for heartbeat + cron.
+// Deps are resolved lazily since runtime/store aren't ready at this point.
+const automationWiring = createMainAutomationWiring({
+  workspaceRoot,
+  async canFire(automation): Promise<boolean> {
+    // Kind-aware fire gate (see evaluateAutomationCanFire): incognito blocks all;
+    // cron is never gated on its creator session; heartbeat needs an idle session.
+    return evaluateAutomationCanFire(automation, {
+      isIncognitoActive: async () => (await getWorkspacePrivacyContext()).incognitoActive,
+      readSessionHeader: (sessionId) => store.readHeader(sessionId),
+    });
+  },
+  // Heartbeat: inject into the automation's own session; resolve after the stream.
+  async injectTurn(sessionId: string, prompt: string, automationId: string) {
+    const turnId = randomUUID();
+    const iterator = runtime.sendMessage(sessionId, {
+      turnId, text: prompt, origin: { kind: 'automation', automationId },
+    });
+    const r = await streamEvents(sessionId, iterator, turnId);
+    return { runId: r.turnId, ok: r.ok, ...(r.error ? { error: r.error } : {}) };
+  },
+  // Cron: spawn a FRESH session (explore mode — no unapproved side effects) and
+  // run the prompt there, so each fire is a first-class session + run.
+  async createFreshRun(prompt: string, automationId: string) {
+    const slug = await connectionStore.getDefault();
+    const { connection, model } = await getReadyConnection(slug, undefined);
+    const cwd = await resolveCurrentProjectRoot();
+    const session = await runtime.createSession({
+      cwd,
+      backend: 'ai-sdk',
+      llmConnectionSlug: connection.slug,
+      model,
+      permissionMode: 'explore',
+      name: `Automation: ${prompt.slice(0, 32)}`,
+      labels: ['automation', 'cron'],
+    });
+    emitSessionsChanged('created', session.id);
+    const turnId = randomUUID();
+    const iterator = runtime.sendMessage(session.id, {
+      turnId, text: prompt, origin: { kind: 'automation', automationId },
+    });
+    const r = await streamEvents(session.id, iterator, turnId);
+    // Archive the fresh cron session after its run finalizes so recurring crons
+    // do not accumulate an unbounded pile of active sessions. The session (with
+    // its run/trace) is preserved under the archive, labelled automation/cron.
+    await runtime.archive(session.id).catch(() => {});
+    emitSessionsChanged('archived', session.id);
+    return { runId: r.turnId, ok: r.ok, ...(r.error ? { error: r.error } : {}) };
+  },
+});
+
+// Load durable automations from disk on startup (fire-and-forget; errors are logged inside).
+void automationWiring.loadDurableAutomations();
+
+// Goal execution — autonomous turn-boundary continuation with an external
+// evaluator (CC-style). Self-contained: no automation coupling (a goal is
+// bounded by its own caps; a waiting goal re-checks via normal continuation).
+const goalWiring = createMainGoalWiring({
+  getDefaultConnectionSlug: () => connectionStore.getDefault(),
+  getConnection: (slug) => connectionStore.get(slug),
+  getSessionModel: async (sessionId) => {
+    const header = await store.readHeader(sessionId);
+    if (!header) return null;
+    return { connectionSlug: header.llmConnectionSlug, model: header.model };
+  },
+  resolveConnectionSecret,
+  buildSubscriptionModelFetch,
+  getAIModel: (input) => getAIModel(input),
+  buildProviderOptions: (connection, modelId) => buildProviderOptions(connection, modelId),
+  getRecentMessages: async (sessionId) => {
+    const messages = await runtime.getMessages(sessionId);
+    return messages.slice(-10).map((m) => ({
+      type: m.type,
+      text: m.type === 'user' || m.type === 'assistant' ? m.text : undefined,
+    }));
+  },
+  getTokenCount: async (sessionId) => {
+    const messages = await runtime.getMessages(sessionId);
+    let total = 0;
+    for (const m of messages) {
+      if (m.type === 'token_usage') total += (m.total ?? (m.input + m.output));
+    }
+    return total;
+  },
+  injectTurn: (sessionId, text) => {
+    const turnId = randomUUID();
+    const iterator = runtime.sendMessage(sessionId, { turnId, text });
+    void streamEvents(sessionId, iterator, turnId);
+  },
+  canContinue: async (sessionId) => {
+    const header = await store.readHeader(sessionId);
+    if (!header || header.archivedAt) return false;
+    // Never auto-continue into a session that is running (mid-turn), aborted,
+    // blocked, or parked waiting on the user — injecting a turn there would
+    // race the live turn or override the human the agent is waiting on.
+    if (
+      header.status === 'running' ||
+      header.status === 'blocked' ||
+      header.status === 'aborted' ||
+      header.status === 'waiting_for_user'
+    ) return false;
+    return true;
+  },
+  // Surface every goal transition to the renderer so an active autonomous loop
+  // is visible (badge + clear affordance) — never a silent token burn.
+  onGoalChange: (goal) => emitSessionsChanged('goal-change', goal.sessionId),
+});
+
 async function getWorkspacePrivacyContext(): Promise<WorkspacePrivacyContext> {
   const settings = await settingsStore.get();
   return { incognitoActive: settings.privacy.incognitoActive === true };
@@ -359,11 +469,18 @@ const systemPromptService = createSystemPromptMainService({
   workspaceRoot,
   localMemory,
   taskLedger: taskLedgerStore,
+  goalManager: goalWiring.manager,
 });
 // Window is created hidden for E2E and visual-smoke runs so it never steals
 // focus. Derived from the same isE2e gate as userData/fake-backend so the
 // hidden-window switch stays in lockstep with the rest of the E2E isolation.
-const startHidden = Boolean(visualSmokeFixture) || isE2e;
+// MAKA_E2E_SHOW_WINDOW opts back into a visible window where there is no
+// focus to steal (CI under xvfb): hidden windows only get ~1fps compositor
+// BeginFrames on Linux, which stalls content-visibility inflation and any
+// frame-paced E2E protocol (measured in the scroll-geometry climb: 38 frames
+// over 31s). The E2E harness sets it, not the workflow — see fixtures.ts.
+const startHidden = (Boolean(visualSmokeFixture) || isE2e)
+  && process.env.MAKA_E2E_SHOW_WINDOW !== '1';
 const mainWindowController = createMainWindowController({
   workspaceRoot,
   visualSmokeFixture,
@@ -423,11 +540,9 @@ const shellRuns = new ShellRunProcessManager({
   store: shellRunStore,
   newId: randomUUID,
   now: Date.now,
-  getSandboxContext: createSessionSandboxContextProvider({
-    readHeader: (sessionId) => store.readHeader(sessionId),
-    canonicalizeCwd: normalizedExistingPath,
-    sandboxManager,
-  }),
+  onShellRunUpdate: (update) => {
+    safeSendToRenderer('shell-runs:update', update);
+  },
 });
 // Unified tool availability (issue #37). Deferred capability groups (Rive,
 // Office, browser, agent orchestration) are withheld from the
@@ -474,6 +589,10 @@ const sharedRuntimeTools: MakaTool[] = [
   // Session task ledger: model manages a flat task list; the current list is
   // re-injected each turn tail. Pure local state, so no permission gate.
   ...taskLedgerWiring.tools,
+  // Unified Automation: heartbeat (session-internal polling) + cron (standalone scheduled runs).
+  ...automationWiring.tools,
+  // Goal execution: GoalSet/Clear/Status/Pause/Resume — autonomous turn-boundary continuation.
+  ...goalWiring.tools,
   // The `load_tools` connector is built by ToolAvailabilityRuntime; deferred
   // group tools just need to be present so they are dispatchable once loaded.
   ...deferredTools,
@@ -490,6 +609,9 @@ async function buildSessionToolAssembly(
     sandboxManager,
     filesystemWorkerClient,
     shellRuns,
+    runtimeResources: shellRuns,
+    backgroundTasks: shellRuns,
+    ptyControls: shellRuns,
   });
   const sandboxCapabilities = await probeActiveSandboxCapabilities({
     context: permissionAware.sandboxContext,
@@ -514,11 +636,10 @@ const buildDesktopChildTools = createPermissionAwareChildToolFactory({
   extraTools: [webSearchTool],
 });
 let lookupPricing = buildPricingLookup();
-// PR-BOT-LASTERROR-FROM-SEND-0: per-platform last-observed readiness so
-// we only persist `lastError` on transitions, not on every status emit
-// (avoids thrashing the settings file when the live bridge re-emits the
-// same readiness during reconnect attempts).
-const previousBotReadiness = new Map<BotProvider, BotReadinessState>();
+// Track the last status fields that affect persisted diagnostics. The reason
+// is part of the key because a running bridge can remain degraded while a
+// newer, more useful failure replaces the previous one.
+const previousBotStatus = new Map<BotProvider, Pick<BotStatus, 'readiness' | 'reason'>>();
 let botIncoming: ReturnType<typeof createBotIncomingMainService>;
 // botIncoming is wired at module load, before registerIpc() defines the
 // current-project-root resolver. registerIpc reassigns this once the resolver
@@ -542,32 +663,18 @@ const botRegistry = new BotRegistry({
     // existing connection-test path writes `lastError` only on test
     // failures; without this hook, a runtime 429 / timeout would
     // disappear the moment the renderer status panel closed.
-    const prev = previousBotReadiness.get(status.platform);
-    previousBotReadiness.set(status.platform, status.readiness);
-    if (prev === status.readiness) return;
-    if (status.readiness === 'degraded') {
-      const humanized = humanizeBotStatusReason(status.reason);
-      if (humanized) {
-        void settingsStore.update({
-          botChat: {
-            channels: {
-              [status.platform]: {
-                lastError: humanized,
-                readinessUpdatedAt: Date.now(),
-              },
-            },
-          },
-        }).catch(() => {});
-      }
-    } else if (status.readiness === 'operational' && prev === 'degraded') {
-      // Clear `lastError` once the bridge recovers; otherwise the
-      // Settings page would keep surfacing a stale failure description
-      // even though sends are succeeding.
+    const previous = previousBotStatus.get(status.platform);
+    previousBotStatus.set(status.platform, {
+      readiness: status.readiness,
+      reason: status.reason,
+    });
+    const update = deriveBotStatusPersistenceUpdate(previous, status);
+    if (update) {
       void settingsStore.update({
         botChat: {
           channels: {
             [status.platform]: {
-              lastError: undefined,
+              ...update,
               readinessUpdatedAt: Date.now(),
             },
           },
@@ -709,10 +816,14 @@ backends.register('ai-sdk', async (ctx) => {
     listChildAgents: () => runtime.listChildAgents(ctx.sessionId),
     readChildAgentOutput: (input) => runtime.readChildAgentOutput(ctx.sessionId, input),
     providerOptions: buildProviderOptions(connection, model, ctx.header.thinkingLevel),
-    contextBudget: buildDefaultContextBudgetPolicy(connection, { name: 'desktop-default-history-budget' }),
+    contextBudget: buildDefaultContextBudgetPolicy(connection, {
+      name: 'desktop-default-history-budget',
+      modelId: model,
+    }),
     systemPrompt: ({ cwd }) => systemPromptService.buildBackendSystemPrompt(ctx.header, cwd, {
       memoryFragment: memoryPromptSnapshot,
       childInstruction: ctx.systemPrompt,
+      skillBudget: { contextWindow: resolveSelectedModelContextWindow(connection, model) },
     }),
     turnTailPrompt: ({ cwd, sessionId }) => systemPromptService.buildTurnTailPrompt(cwd, sessionId),
     shellRunContextSummary: ctx.shellRunContextSummary,
@@ -735,22 +846,13 @@ backends.register('ai-sdk', async (ctx) => {
     readAttachmentBytes: createAttachmentByteReader({ artifactStore, sessionId: ctx.sessionId }),
     supportsVision,
     loadHistoryCompact: (event) => loadHistoryCompactBlocksFromArtifacts(artifactStore, event),
-    writeHistoryCompact: (event) => persistHistoryCompactBlocksToArtifacts(artifactStore, event, {
-      summarize: buildLlmHistorySummarizer({
-        // Reuse the same connection/model the session already drives, so the
-        // summary stays consistent with the model that will consume it.
-        resolveModel: () =>
-          getAIModel({ connection, apiKey: apiKey ?? '', modelId: model, fetch: modelFetch }),
-        maxOutputTokens: 4096,
-      }),
-      onArtifactCreated: (artifact) => {
-        safeSendToRenderer('artifacts:changed', {
-          reason: 'created',
-          artifactId: artifact.id,
-          sessionId: artifact.sessionId,
-          ts: Date.now(),
-        });
-      },
+    loadHistoryCompactCheckpoint: ctx.loadHistoryCompactCheckpoint,
+    summarizeHistoryCompact: buildLlmHistorySummarizer({
+      // Reuse the same connection/model the session already drives, so the
+      // summary stays consistent with the model that will consume it.
+      resolveModel: () =>
+        getAIModel({ connection, apiKey: apiKey ?? '', modelId: model, fetch: modelFetch }),
+      maxOutputTokens: 4096,
     }),
     loadSynthesisCache: (event) => loadSynthesisCacheBlocksFromArtifacts(artifactStore, event),
     writeSynthesisCache: (event) => persistSynthesisCacheBlocksToArtifacts(artifactStore, event, {
@@ -764,6 +866,7 @@ backends.register('ai-sdk', async (ctx) => {
       },
     }),
     recordRunTrace: ctx.recordRunTrace,
+    recordHistoryCompactCheckpoint: ctx.recordHistoryCompactCheckpoint,
     recordActiveFullCompactBlock: ctx.recordActiveFullCompactBlock,
     recordSemanticCompactBlock: ctx.recordSemanticCompactBlock,
     newId: randomUUID,
@@ -809,6 +912,13 @@ const runtime = new SessionManager({
     (await artifactStore.list(sessionId)).filter((artifact) =>
       artifact.turnId === turnId && artifact.status !== 'deleted'
     ),
+  cleanupHistoryCompactArtifacts: async (input) => {
+    await cleanupLegacyHistoryCompactArtifacts({
+      ...input,
+      artifactStore,
+      onDiagnostic: (diagnostic) => console.warn('[history-compact-cleanup]', diagnostic),
+    });
+  },
   newId: randomUUID,
   now: Date.now,
 });
@@ -951,6 +1061,12 @@ function registerIpc(): void {
   ipcMain.handle('window:setTitlebarControlsVisible', (event, visible: unknown): void => {
     mainWindowController.setTitlebarControlsVisible(event.sender, visible);
   });
+  // PR-SHOW-AFTER-FIRST-COMMIT: the renderer signals its first React commit so
+  // the hidden window (main-window.ts show: false) is revealed only once real
+  // content can paint. Idempotent + visual-smoke-safe inside the controller.
+  ipcMain.handle('window:notifyRendererReady', (): void => {
+    mainWindowController.notifyRendererReady();
+  });
   ipcMain.handle('window:setThemeSource', (event, themePref: unknown): void => {
     mainWindowController.setThemeSource(event.sender, themePref);
   });
@@ -1060,6 +1176,7 @@ function registerIpc(): void {
   );
   registerMemoryIpc({ localMemory });
   registerConfigIpc({ connectionStore, settingsStore, credentialStore, workspaceRoot });
+  registerNotificationsIpc({ settingsStore, mainWindowController, e2e: isE2e });
   ipcMain.handle('workspaceInstructions:getState', async () => getWorkspaceInstructionsState(await currentProjectRoot()));
   ipcMain.handle(
     'workspaceInstructions:openFile',
@@ -1083,7 +1200,6 @@ function registerIpc(): void {
     artifactStore,
     mainWindowController,
     sendToRenderer: safeSendToRenderer,
-    bundledSkillsReady: bundledSkillsReady.promise,
   });
   ipcMain.handle('visualSmoke:getState', () => getVisualSmokeState(visualSmokeFixture));
   /**
@@ -1144,6 +1260,7 @@ function registerIpc(): void {
     },
   );
   registerPlanReminderIpc({ planReminders, getWorkspacePrivacyContext });
+  ipcMain.handle('shell-runs:list', (_event, sessionId: string) => runtime.listShellRunUpdates(sessionId));
   ipcMain.handle('sessions:list', (_event, filter?: SessionListFilter) => runtime.listSessions(filter));
   ipcMain.handle('sessions:create', async (_event, input?: Partial<CreateSessionInput>) => {
     const cwd = input?.cwd ?? (await currentProjectRoot());
@@ -1198,6 +1315,14 @@ function registerIpc(): void {
     return messages;
   });
   ipcMain.handle('sessions:listTurns', (_event, sessionId: string) => runtime.listTurns(sessionId));
+  // Goal kill-switch surface: the renderer reads the active goal to badge a
+  // session running an autonomous loop, and clears it to stop the loop. `get`
+  // returns null when no goal is set; `clear` settles it (continuation stops
+  // after the current turn). Both are pure local state, so no permission gate.
+  ipcMain.handle('goal:get', (_event, sessionId: string) => goalWiring.manager.get(sessionId) ?? null);
+  ipcMain.handle('goal:clear', (_event, sessionId: string) => {
+    goalWiring.manager.clear(sessionId);
+  });
   // PR-SEARCH-2: local thread search. Renderer-facing channel; the pure
   // helper in `./search/thread-search.ts` enforces all gates (G1 snippet
   // redaction, G2 fake-backend exclude, G4 caps, G5 case-fold + NFC,
@@ -1339,6 +1464,9 @@ function registerIpc(): void {
     // An archived conversation is no longer shown: drop its browser connection
     // and view so it does not keep a live Chromium page in the background.
     await releaseBrowserSession(sessionId);
+    // Stop any autonomous loops tied to the session (goal + polling heartbeats).
+    goalWiring.manager.remove(sessionId);
+    automationWiring.manager.removeAllForSession(sessionId);
     emitSessionsChanged('archived', sessionId);
   });
   ipcMain.handle('sessions:unarchive', async (_event, sessionId: string) => {
@@ -1412,6 +1540,9 @@ function registerIpc(): void {
     // if it never opened one). releaseBrowserSession disposes the view via the
     // host, covering both agent-driven and hand-opened views.
     await releaseBrowserSession(sessionId);
+    // Stop any autonomous loops tied to the session (goal + polling heartbeats).
+    goalWiring.manager.remove(sessionId);
+    automationWiring.manager.removeAllForSession(sessionId);
     emitSessionsChanged('deleted', sessionId);
   });
 
@@ -1428,7 +1559,7 @@ function registerIpc(): void {
   // PR110b: Onboarding snapshot + milestone IPCs. Renderer polls via
   // these on app load and whenever `sessions:changed` /
   // `connections:changed` / settings change events fire. No push from
-  // main; see smoke.md Path 16.
+  // main.
   ipcMain.handle('onboarding:getSnapshot', async () => onboardingService.getSnapshot());
   ipcMain.handle('onboarding:setMilestone', async (_event, id: unknown, status: unknown) => {
     // Service throws INVALID_MILESTONE_ID / INVALID_MILESTONE_STATUS
@@ -1663,15 +1794,22 @@ async function streamEvents(
   sessionId: string,
   iterator: AsyncIterable<SessionEvent>,
   fallbackTurnId?: string,
-): Promise<void> {
+): Promise<{ turnId: string; ok: boolean; error?: string }> {
   let userAppendBroadcasted = false;
   let finalAppendBroadcasted = false;
+  let turnAborted = false;
+  let turnError: string | undefined;
+  const turnId = fallbackTurnId ?? randomUUID();
   try {
     for await (const event of iterator) {
       if (!userAppendBroadcasted) {
         emitSessionsChanged('message-appended', sessionId);
         userAppendBroadcasted = true;
       }
+      if (event.type === 'abort' || (event.type === 'complete' && event.stopReason === 'user_stop')) {
+        turnAborted = true;
+      }
+      turnError = turnError ?? turnFailureMessageFromSessionEvent(event);
       safeSendToRenderer(`sessions:event:${sessionId}`, event);
       openGateway.publishSessionEvent(sessionId, event);
       if (isStatusChangingSessionEvent(event)) {
@@ -1685,6 +1823,15 @@ async function streamEvents(
       emitSessionsChanged('message-appended', sessionId);
       finalAppendBroadcasted = true;
     }
+    // Goal auto-continuation: after a turn completes cleanly, evaluate the
+    // active goal and continue, hand off to polling, or stop. Skip on a
+    // user-abort (the Stop button must halt the loop) OR an errored turn —
+    // re-injecting into a failing connection would spin ~maxIterations failing
+    // turns. Failures never surface to the turn.
+    if (!turnAborted && !turnError) {
+      void handleGoalContinuation(goalWiring.continuationDeps, sessionId).catch(() => {});
+    }
+    return { turnId, ok: !turnAborted && !turnError, ...(turnError ? { error: turnError } : {}) };
   } catch (error) {
     const event = {
       type: 'error',
@@ -1704,6 +1851,7 @@ async function streamEvents(
       emitSessionsChanged('message-appended', sessionId);
       finalAppendBroadcasted = true;
     }
+    return { turnId, ok: false, error: errorMessage(error) };
   }
 }
 
@@ -1871,17 +2019,6 @@ function normalizeSessionModelSelection(input: unknown): { llmConnectionSlug: st
   return { llmConnectionSlug, model };
 }
 
-/**
- * Deferred handle for the bundled-Office-skills copy that now runs in
- * background startup (#456): skills:list awaits it so an early Skills
- * page open cannot see a half-bundled workspace.
- */
-const bundledSkillsReady: { promise: Promise<void>; resolve: () => void } = (() => {
-  let resolve!: () => void;
-  const promise = new Promise<void>((r) => { resolve = r; });
-  return { promise, resolve };
-})();
-
 async function recoverInterruptedSessionsOnStartup(): Promise<void> {
   try {
     await runtime.recoverInterruptedSessions();
@@ -2002,13 +2139,6 @@ async function runBackgroundStartup(): Promise<void> {
   setActiveProxy(toContractNetworkSettings(settings.network).proxy);
   await telemetryRepo.load();
   lookupPricing = buildPricingLookup(telemetryRepo.listPricingOverrides());
-  try {
-    await ensureBundledOfficeSkills(workspaceRoot);
-  } catch (error) {
-    console.error('[skills] ensureBundledOfficeSkills failed:', error);
-  } finally {
-    bundledSkillsReady.resolve();
-  }
   await recoverInterruptedSessionsOnStartup();
   await botRegistry.applySettings(settings.botChat);
   await openGateway.sync(settings.openGateway);
@@ -2018,6 +2148,7 @@ async function runBackgroundStartup(): Promise<void> {
     onConnectionsChanged: () => emitConnectionListChanged(),
     onSettingsChanged: () => void handleExternalSettingsChange(),
   });
+  automationWiring.scheduler.start();
 }
 
 app.on('window-all-closed', () => {
@@ -2039,6 +2170,8 @@ app.on('before-quit', (event) => {
 });
 
 async function runBeforeQuitCleanup(): Promise<void> {
+  automationWiring.scheduler.dispose();
+  goalWiring.manager.dispose();
   configWatcher?.stop();
   planReminders.stopTimers();
   dailyReview.stopScheduler();

@@ -1,10 +1,8 @@
 import type { PermissionMode } from '@maka/core/permission';
 
-import type {
-  ShellRunSandboxContextProvider,
-  ShellRunSandboxContextResult,
-} from '../shell-run-manager.js';
+import type { ShellRunBashInput } from '../shell-run-contract.js';
 import { createPermissionAwareSandboxContext } from './permission-aware-context.js';
+import type { PermissionAwareSandboxContext } from './permission-aware-context.js';
 import type { SandboxManager } from './sandbox-manager.js';
 import type {
   SandboxPathContext,
@@ -25,6 +23,23 @@ export interface CreateSessionSandboxContextProviderInput {
   platform?: SandboxPlatform;
   pathContext?: Partial<Omit<SandboxPathContext, 'workspaceRoots'>>;
 }
+
+export type ShellRunSandboxContextFailureReason =
+  | 'session_not_found'
+  | 'invalid_cwd'
+  | 'profile_compile_failed';
+
+export type ShellRunSandboxContextResult =
+  | { ok: true; context: PermissionAwareSandboxContext }
+  | {
+      ok: false;
+      reason: ShellRunSandboxContextFailureReason;
+      message: string;
+    };
+
+export type ShellRunSandboxContextProvider = (
+  input: Pick<ShellRunBashInput, 'sessionId'>,
+) => Promise<ShellRunSandboxContextResult>;
 
 export function createSessionSandboxContextProvider(
   input: CreateSessionSandboxContextProviderInput,
@@ -64,7 +79,7 @@ export function createSessionSandboxContextProvider(
 }
 
 function failure(
-  reason: 'session_not_found' | 'invalid_cwd' | 'profile_compile_failed',
+  reason: ShellRunSandboxContextFailureReason,
   error: unknown,
 ): ShellRunSandboxContextResult {
   return {

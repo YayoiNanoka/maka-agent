@@ -1,77 +1,35 @@
-import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useMemo, useRef, type ReactNode } from 'react';
 import {
-  AlertOctagon,
   AlertTriangle,
   ArrowDown,
-  Ban,
   BookOpen,
-  CalendarDays,
-  Check,
-  Copy,
   GitBranch,
-  Info,
-  Loader2,
-  RefreshCcw,
+  Target,
   Sparkles,
 } from './icons.js';
 import { DeepResearchEmptyHero, EmptyChatHero } from './chat-empty-hero.js';
-import { type ClipboardCopyPhase, useClipboardCopyFeedback } from './clipboard-feedback.js';
-import { Markdown } from './markdown.js';
-import { formatAbsoluteTimestamp, turnAbortMarkerLabel } from './chat-display-helpers.js';
 import type { ChatModelChoice } from './chat-model-helpers.js';
-import { prepareSmoothStreamText, useSmoothStreamContent } from './smooth-stream.js';
 import { OverlayScrollArea } from './overlay-scroll-area.js';
-import { DialogContent, DialogRoot } from './ui.js';
 import { PromptAnchorRail } from './prompt-anchor-rail.js';
-import type { AttachmentRef, PlanReminder, ProviderType, SessionSummary, StoredMessage } from '@maka/core';
-import { deriveCapabilityAuditReport, isDeepResearchSession } from '@maka/core';
-import { materializeChat, materializeTools, materializeTurns, type ToolActivityItem, type TurnViewModel } from './materialize.js';
+import type { ProviderType, SessionSummary, ShellRunUpdate, StoredMessage } from '@maka/core';
+import { isDeepResearchSession } from '@maka/core';
+import { materializeChat, materializeTurns, overlayLiveTurn, overlayShellRunUpdates } from './materialize.js';
+import type { LiveTurnProjection } from './live-turn-projection.js';
 import { Button as UiButton } from './ui.js';
-import { AttachmentFileCard } from './attachment-file-card.js';
 import { Alert, AlertDescription } from './primitives/alert.js';
-import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from './primitives/collapsible.js';
-import { Bubble, Marker, markerVariants, Message } from './primitives/chat.js';
-import { Tooltip, TooltipTrigger, TooltipContent } from './primitives/tooltip.js';
-import type { NavSelection } from './nav-selection.js';
+import { Message } from './primitives/chat.js';
 import { EmptyState } from './empty-state.js';
-import type {
-  DailyReviewBridge,
-  DailyReviewMarkdownActionInput,
-  PlanReminderDraftInput,
-  PlanReminderUpdatePatch,
-  SkillEntry,
-} from './module-panel-types.js';
-// The Skills / Automations / Daily-Review surfaces are whole nav sections of
-// their own — they only render when `mode` flips to `skills` / `automations` /
-// `daily-review`, never on the default chat first paint. Loading them lazily
-// keeps their code (incl. the base-ui Select primitive they pull in) out of
-// the initial chunk so the chat shell mounts faster.
-const SkillsModuleMain = lazy(() => import('./skills-panel.js').then((m) => ({ default: m.SkillsModuleMain })));
-const DailyReviewPanel = lazy(() => import('./daily-review-panel.js').then((m) => ({ default: m.DailyReviewPanel })));
-const PlanReminderPanel = lazy(() => import('./plan-reminder-panel.js').then((m) => ({ default: m.PlanReminderPanel })));
-
-function ModulePageFallback(props: { label: string; message: string }) {
-  return (
-    <main className="maka-main detailPane maka-module-main agents-chat-panel" aria-label={props.label}>
-      <div className="maka-lazy-fallback" data-surface="module" role="status" aria-busy="true">
-        {props.message}
-      </div>
-    </main>
-  );
-}
-
-function ModulePanelFallback(props: { message: string }) {
-  return (
-    <div className="maka-lazy-fallback" data-surface="module" role="status" aria-busy="true">
-      {props.message}
-    </div>
-  );
-}
-import { RelativeTime } from './relative-time.js';
-import { ToolActivity } from './tool-activity.js';
+import {
+  ModelContinuingIndicator,
+  ModelProcessingIndicator,
+  TurnView,
+  type TurnFooterActionMeta,
+  type TurnLineageBadge,
+} from './chat-turn.js';
+import { useChatScroll } from './use-chat-scroll.js';
 
 /**
- * Lifecycle status badge in the chat header (PR109b §9.8). Visual
+ * Lifecycle status badge in the chat header. Visual
  * tone matches the SessionStatusIcon mapping so the sidebar row icon
  * and the header badge read as the same status.
  */
@@ -101,8 +59,6 @@ function SessionStatusBadge(props: {
 
 
 
-const SCROLL_BOTTOM_THRESHOLD = 64; // px
-
 export interface ChatHeaderAlert {
   /** Visual tone — drives badge color in the chat header. */
   tone: 'info' | 'warning' | 'destructive';
@@ -122,38 +78,24 @@ export interface ChatHeaderAlert {
 export function ChatView(props: {
   messages: StoredMessage[];
   messageLoading?: boolean;
-  streamingText: string;
-  /** True after upstream emitted the final assistant text, while the UI is draining the smoother. */
-  streamingComplete?: boolean;
-  /** Assistant message id hidden while the matching streaming bubble drains. */
-  streamingMessageId?: string;
+  liveTurn?: LiveTurnProjection;
+  shellRunUpdates?: readonly ShellRunUpdate[];
   /** Called once the streaming bubble has displayed the final text and can hand off to history. */
-  onStreamingSettled?(): void;
+  onStreamingSettled?(messageId?: string): void;
   /**
-   * PR-UI-LAYOUT-42: Anthropic extended-thinking stream from
-   * `ThinkingDeltaEvent` (`@maka/core/events`). When non-empty, a
-   * collapsible "Reasoning" panel renders above the streaming text
-   * so users with thinking models see the live reasoning while the
-   * answer is being composed. Empty string = no thinking active.
+   * #646: true while the first-token wait indicator ("正在处理…") should show —
+   * the turn is armed at send with no content event yet. Rendered as a transient
+   * trailing entry of the tail turn, covering only the connect-to-first-token gap.
    */
-  thinkingText?: string;
+  processingIndicator?: boolean;
   /**
-   * PR-UI-C0 review fixup (@kenji msg 7885a347): true when the
-   * renderer's `applyThinkingDelta` / `applyThinkingComplete` helper
-   * dropped or truncated content (per-delta cap, per-session total
-   * cap). `<ReasoningPanel>` renders a "已截断" pill in the header
-   * when true so the user knows the visible reasoning is bounded.
+   * #646: true while the calm mid-turn hint ("继续中…") should show — the turn has
+   * already produced content and is in a step-to-step lull (a tool settled / a
+   * step's text finished) with nothing streaming while the model works on the next
+   * step. Deliberately quieter than the first-token indicator so it never reads as
+   * the live thinking being swallowed.
    */
-  thinkingTruncated?: boolean;
-  /**
-   * PR-UI-Cx (@kenji msg cd09bcac): true when the renderer's
-   * `applyAssistantDelta` chokepoint either tail-kept a single
-   * oversize delta or head-capped the per-session total. The
-   * streaming bubble renders a small "已截断" affordance so the
-   * user knows the visible answer is bounded.
-   */
-  streamingTruncated?: boolean;
-  tools: ToolActivityItem[];
+  continuingIndicator?: boolean;
   activeSession?: SessionSummary;
   activeConnectionLabel?: string;
   activeModel?: string;
@@ -179,7 +121,6 @@ export function ChatView(props: {
   memoryActive?: boolean;
   /** Click target for the memory pill — usually opens Settings · 记忆. */
   onOpenMemorySettings?(): void;
-  mode: NavSelection['section'];
   /**
    * When the user has no real LLM connection configured, the empty state
    * defers to this slot. App renders `<OnboardingHero>` here; if undefined,
@@ -199,13 +140,26 @@ export function ChatView(props: {
    * from persisted messages/session state.
    */
   eventStreamAlert?: ChatHeaderAlert;
+  /**
+   * Active autonomous-goal indicator for the session, or undefined when no
+   * goal is running. Surfaces the loop (turn counter) with a one-click clear
+   * affordance so a token-burning goal is never invisible or unstoppable —
+   * this IS the desktop kill switch. `onClear` stops autonomous continuation.
+   */
+  goalIndicator?: {
+    condition: string;
+    status: string;
+    iterations: number;
+    maxIterations: number;
+    onClear: () => void;
+  };
   /** Error from loading the active session's persisted message log. */
   messageLoadError?: string;
   messageLoadRetryPending?: boolean;
   onRetryMessages?(): void;
   /**
-   * Lifecycle status badge for the active session (PR109b, design-system
-   * §9.8). Separate from `connectionAlert` because the alert is an
+   * Lifecycle status badge for the active session. Separate from
+   * `connectionAlert` because the alert is an
    * ephemeral fault signal while status is the session's settled
    * lifecycle position. Hidden for `active` (default) to reduce noise.
    */
@@ -234,25 +188,6 @@ export function ChatView(props: {
   turnFailedRecoveryLabels?: Record<string, string>;
   turnLineageBadgesByTurn?: Record<string, TurnLineageBadge[]>;
   onLineageBadgeClick?: (targetTurnId: string) => void;
-  skills?: SkillEntry[];
-  onRefreshSkills?(): void | Promise<void>;
-  onCreateSkillTemplate?(): void | Promise<void>;
-  onOpenSkill?(skillId: string): void | Promise<void>;
-  onOpenSkillsFolder?(): void | Promise<void>;
-  planReminders?: PlanReminder[];
-  onRefreshPlanReminders?: () => void | Promise<void>;
-  onCreatePlanReminder?(input: PlanReminderDraftInput): boolean | Promise<boolean> | void | Promise<void>;
-  onUpdatePlanReminder?(id: string, patch: PlanReminderUpdatePatch): boolean | Promise<boolean> | void | Promise<void>;
-  onTogglePlanReminder?: (id: string, enabled: boolean) => void | Promise<void>;
-  onTriggerPlanReminderNow?: (id: string) => void | Promise<void>;
-  onSnoozePlanReminder?: (id: string) => void | Promise<void>;
-  onClearPlanReminderRunHistory?: (id: string) => void | Promise<void>;
-  onDeletePlanReminder?: (id: string) => void | Promise<void>;
-  dailyReviewBridge?: DailyReviewBridge;
-  onCopyDailyReviewMarkdown?: (input: DailyReviewMarkdownActionInput) => Promise<void> | void;
-  onAppendDailyReviewMarkdown?: (input: DailyReviewMarkdownActionInput) => Promise<void> | void;
-  onSaveDailyReviewMarkdown?: (input: DailyReviewMarkdownActionInput) => Promise<void> | void;
-  onSelectSession?: (sessionId: string) => void;
   /**
    * Search-result navigation target. The desktop shell owns session
    * switching and hands the matched turn id here after selection; the
@@ -286,22 +221,67 @@ export function ChatView(props: {
   // chat + storedTools survive for the empty-state and streaming-bubble
   // paths; the main message log is now driven by `turns` (per @kenji UI-04
   // turn-grouping projection).
-  // Memoized derivation chain (vercel rerender rules): during PLAIN-TEXT
-  // streaming — the hottest path, dozens of state updates per second —
-  // `messages` and `tools` don't change, so every turn object keeps its
-  // identity and the memoized TurnViews below skip re-rendering entirely.
-  // Tool-activity updates legitimately invalidate the chain.
+  // Persisted history and the live overlay are separate projections. Plain-text
+  // deltas only clone the active turn; settled turn identities stay stable so
+  // memoized TurnViews skip reconciliation on the hottest update path.
+  const drainingMessageIdsKey = JSON.stringify(
+    props.liveTurn?.steps.flatMap((step) => step.text ? [step.stepId] : []) ?? [],
+  );
+  const drainingMessageIds = useMemo(
+    () => new Set<string>(JSON.parse(drainingMessageIdsKey) as string[]),
+    [drainingMessageIdsKey],
+  );
   const visibleMessages = useMemo(
-    () =>
-      props.streamingComplete && props.streamingMessageId
-        ? props.messages.filter((message) => !(message.type === 'assistant' && message.id === props.streamingMessageId))
-        : props.messages,
-    [props.messages, props.streamingComplete, props.streamingMessageId],
+    () => drainingMessageIds.size > 0
+      ? props.messages.filter((message) => !(message.type === 'assistant' && drainingMessageIds.has(message.id)))
+      : props.messages,
+    [drainingMessageIds, props.messages],
   );
   const chat = useMemo(() => materializeChat(visibleMessages), [visibleMessages]);
-  const storedTools = useMemo(() => materializeTools(visibleMessages), [visibleMessages]);
-  const tools = useMemo(() => mergeTools(storedTools, props.tools), [storedTools, props.tools]);
-  const turns = useMemo(() => materializeTurns(visibleMessages, props.tools), [visibleMessages, props.tools]);
+  const settledTurns = useMemo(
+    () => materializeTurns(visibleMessages),
+    [visibleMessages],
+  );
+  const liveTurns = useMemo(
+    () => overlayLiveTurn(settledTurns, props.liveTurn),
+    [settledTurns, props.liveTurn],
+  );
+  const turns = useMemo(
+    () => overlayShellRunUpdates(liveTurns, props.shellRunUpdates ?? []),
+    [liveTurns, props.shellRunUpdates],
+  );
+  // #642 single render path: the in-flight answer is injected into the tail
+  // turn's TurnView (the SAME node as the eventual committed turn) instead of a
+  // separate streaming <section>, so live→settled is a data-source swap, not an
+  // unmount/mount. The streaming turn is always the last turn: the user message
+  // is committed optimistically (showOptimisticUserMessage) before streaming
+  // starts, so `materializeTurns` already emits it — with an empty assistant
+  // timeline — as `turns[last]`. Only the tail TurnView gets a fresh
+  // `liveStreaming` object per delta (→ it alone re-renders); every sibling
+  // gets a stable `undefined` and its memo skips (the plain-text perf path).
+  // A turn is "still live" — and must keep its non-actionable footer placeholder
+  // instead of a clickable regenerate/branch — while ANY of text, thinking, OR a
+  // tool is in flight. Deriving liveness from streamingText/thinkingText alone
+  // let a tool-only step (tool_start with no answer text yet) fall through to the
+  // settled branch, whose derived status is `completed`, rendering an actionable
+  // footer on a still-running answer (review P2-B). A tool-only tail renders the
+  // running tool from its timeline with no empty live bubble.
+  // The model-wait indicator keeps the tail turn "live" too, so its footer stays
+  // the non-actionable placeholder and the indicator injects into the tail turn
+  // (not the fallback section) — it is, by derivation, only ever true when text /
+  // thinking / tools are all absent.
+  //
+  // Terminal liveTurn is evidence overlay only (e.g. empty shell_run still needs
+  // pre-handoff chunks). It must NOT block footer actions — keeping evidence and
+  // being in-flight are separate signals. Wait indicators alone still mark
+  // streaming, but delayed flags can lag one frame past complete; terminal
+  // evidence must outrank them so copy/regenerate stay actionable.
+  const liveInFlight = !!(props.liveTurn && !props.liveTurn.terminal);
+  const waitIndicators = !!(props.processingIndicator || props.continuingIndicator);
+  const streamingActive = liveInFlight || (!props.liveTurn?.terminal && waitIndicators);
+  const tailTurnId = liveInFlight
+    ? props.liveTurn!.turnId
+    : (streamingActive ? turns[turns.length - 1]?.turnId : undefined);
   // One rail tick per turn that carries a user prompt (Codex-style prompt
   // navigation). Memoized so the rail's IntersectionObserver isn't rebuilt
   // on every render.
@@ -332,144 +312,19 @@ export function ChatView(props: {
     (targetTurnId: string) => onLineageBadgeClickRef.current?.(targetTurnId),
     [],
   );
-  const capabilityAuditReport = useMemo(
-    () => deriveCapabilityAuditReport({
-      skills: props.skills ?? [],
-      planReminders: props.planReminders ?? [],
-    }),
-    [props.skills, props.planReminders],
-  );
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [pinnedToBottom, setPinnedToBottom] = useState(true);
-  const [highlightedTurnId, setHighlightedTurnId] = useState<string | null>(null);
-
-  // Reset to "pinned at bottom" whenever the active session changes. Without
-  // this, switching from a long history to a fresh chat would keep the
-  // previous scrollTop and the user wouldn't see their last message.
-  useEffect(() => {
-    setPinnedToBottom(true);
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [props.activeSession?.id]);
-
-  // Auto-scroll on new content if the user is already at (or near) the
-  // bottom. If they've scrolled up to read history we don't yank them back.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || !pinnedToBottom) return;
-    el.scrollTop = el.scrollHeight;
-  }, [chat.length, props.streamingText, tools.length, pinnedToBottom]);
-
-  useEffect(() => {
-    const target = props.scrollTargetTurn;
-    if (!target?.turnId) return;
-    const frame = window.requestAnimationFrame(() => {
-      const root = scrollRef.current;
-      if (!root) return;
-      const el = root.querySelector(`[data-turn-id="${CSS.escape(target.turnId)}"]`);
-      if (!el || !('scrollIntoView' in el)) return;
-      const targetEl = el as HTMLElement;
-      targetEl.setAttribute('tabindex', '-1');
-      targetEl.scrollIntoView({
-        behavior: props.scrollBehavior ?? 'smooth',
-        block: 'center',
-      });
-      targetEl.focus({ preventScroll: true });
-      setPinnedToBottom(false);
-      setHighlightedTurnId(target.turnId);
-    });
-    const clear = window.setTimeout(() => {
-      setHighlightedTurnId((current) => (current === target.turnId ? null : current));
-    }, 2200);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      window.clearTimeout(clear);
-    };
-  }, [props.scrollTargetTurn?.turnId, props.scrollTargetTurn?.nonce, props.scrollBehavior, props.activeSession?.id, props.messages]);
-
-  function onScroll() {
-    const el = scrollRef.current;
-    if (!el) return;
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    setPinnedToBottom(distanceFromBottom <= SCROLL_BOTTOM_THRESHOLD);
-  }
-
-  function scrollToBottom() {
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior: props.scrollBehavior ?? 'smooth' });
-    setPinnedToBottom(true);
-  }
-
-  if (props.mode === 'skills') {
-    return (
-      <Suspense fallback={<ModulePageFallback label="技能" message="正在加载技能…" />}>
-        <SkillsModuleMain
-          skills={props.skills}
-          auditReport={capabilityAuditReport}
-          onRefreshSkills={props.onRefreshSkills}
-          onCreateSkillTemplate={props.onCreateSkillTemplate}
-          onOpenSkill={props.onOpenSkill}
-          onOpenSkillsFolder={props.onOpenSkillsFolder}
-        />
-      </Suspense>
-    );
-  }
-
-  if (props.mode === 'automations') {
-    return (
-      <Suspense fallback={<ModulePageFallback label="定时任务" message="正在加载定时任务…" />}>
-        <main className="maka-main detailPane maka-module-main agents-chat-panel" aria-label="定时任务">
-          <PlanReminderPanel
-            reminders={props.planReminders ?? []}
-            auditReport={capabilityAuditReport}
-            onRefresh={props.onRefreshPlanReminders}
-            onCreate={props.onCreatePlanReminder}
-            onUpdate={props.onUpdatePlanReminder}
-            onToggle={props.onTogglePlanReminder}
-            onTriggerNow={props.onTriggerPlanReminderNow}
-            onSnooze={props.onSnoozePlanReminder}
-            onClearRunHistory={props.onClearPlanReminderRunHistory}
-            onDelete={props.onDeletePlanReminder}
-          />
-        </main>
-      </Suspense>
-    );
-  }
-
-  if (props.mode === 'daily-review') {
-    return (
-      <main
-        className="maka-main detailPane maka-module-main agents-chat-panel"
-        data-module="daily-review"
-        aria-label="每日回顾"
-      >
-        <header className="maka-module-main-header">
-          <div>
-            <h2>每日回顾</h2>
-            <p>自动汇总本机对话，生成摘要、遗漏提醒与深度分析；可在设置中开启定时执行。</p>
-          </div>
-        </header>
-        {props.dailyReviewBridge ? (
-          <Suspense fallback={<ModulePanelFallback message="正在加载每日回顾…" />}>
-            <DailyReviewPanel
-              bridge={props.dailyReviewBridge}
-              onSelectSession={props.onSelectSession}
-              onCopyMarkdown={props.onCopyDailyReviewMarkdown}
-              onAppendMarkdown={props.onAppendDailyReviewMarkdown}
-              onSaveMarkdown={props.onSaveDailyReviewMarkdown}
-            />
-          </Suspense>
-        ) : (
-          <EmptyState
-            Icon={CalendarDays}
-            title="等待连接每日回顾数据"
-            body="桌面端数据桥当前未连接。"
-          />
-        )}
-      </main>
-    );
-  }
+  const {
+    highlightedTurnId,
+    onScroll,
+    pinnedToBottom,
+    scrollToBottom,
+    viewportRef: scrollRef,
+  } = useChatScroll({
+    sessionId: props.activeSession?.id,
+    hasTurns: turns.length > 0,
+    messages: props.messages,
+    target: props.scrollTargetTurn,
+    behavior: props.scrollBehavior,
+  });
 
   if (!props.activeSession) {
     return (
@@ -528,7 +383,7 @@ export function ChatView(props: {
             title="本地 MEMORY.md 已加入 agent 系统提示。点击进入设置 · 记忆 管理。"
             aria-label="本地记忆已启用"
           >
-            <BookOpen size={12} strokeWidth={1.75} aria-hidden="true" />
+            <BookOpen size={12} aria-hidden="true" />
             <span>记忆</span>
           </UiButton>
         )}
@@ -539,27 +394,46 @@ export function ChatView(props: {
             title="深度研究会话使用只读探索边界：先阅读和分析，默认不改文件。"
             aria-label="深度研究，只读探索"
           >
-            <Sparkles size={12} strokeWidth={1.75} aria-hidden="true" />
+            <Sparkles size={12} aria-hidden="true" />
             <span>深度研究</span>
           </span>
+        )}
+        {props.goalIndicator && (
+          /* Goal kill-switch pill: an active autonomous loop must be visible and
+             stoppable. Reuses the mode-pill styling; clicking it clears the goal
+             (the shell confirms), so the user always has a one-click stop. */
+          <UiButton
+            type="button"
+            variant="quiet"
+            className="maka-chat-header-mode-pill"
+            data-mode="goal"
+            onClick={() => props.goalIndicator?.onClear()}
+            title={`自主执行目标进行中：「${props.goalIndicator.condition}」（第 ${props.goalIndicator.iterations}/${props.goalIndicator.maxIterations} 轮，${props.goalIndicator.status}）。系统每轮后自动续行；点击可清除目标、停止续行。`}
+            aria-label={`清除自主执行目标（已进行 ${props.goalIndicator.iterations}/${props.goalIndicator.maxIterations} 轮）`}
+          >
+            <Target size={12} aria-hidden="true" />
+            <span>目标 {props.goalIndicator.iterations}/{props.goalIndicator.maxIterations} · 清除</span>
+          </UiButton>
         )}
         {/* PR-MOVE-PERMISSION-MODE: switcher relocated into the
             composer left-controls. Header keeps the per-session status
             chips only. */}
       </header>
-      {(props.sessionStatusBadge || props.connectionAlert || props.eventStreamAlert) && (
-        /* In normal flow below the header (see .maka-chat-status-cluster)
-           so wrapped multi-badge rows reserve space before banners and
-           messages. */
-        <div className="maka-chat-status-cluster">
-          {props.sessionStatusBadge && <SessionStatusBadge badge={props.sessionStatusBadge} />}
-          {props.connectionAlert && <ChatHeaderAlertBadge alert={props.connectionAlert} />}
-          {props.eventStreamAlert && <ChatHeaderAlertBadge alert={props.eventStreamAlert} />}
-        </div>
-      )}
+      {/* In normal flow below the header (see .maka-chat-status-cluster)
+          so wrapped multi-badge rows reserve space before banners and
+          messages. ALWAYS mounted (even with zero badges): the cluster
+          collapses/expands via the CSS `:empty` height transition instead of
+          conditional mount/unmount — unmounting it when a run completes used
+          to snap the whole conversation column up by the badge-row height in
+          a single frame (the settle "jump"). */}
+      <div className="maka-chat-status-cluster">
+        {props.sessionStatusBadge && <SessionStatusBadge badge={props.sessionStatusBadge} />}
+        {props.connectionAlert && <ChatHeaderAlertBadge alert={props.connectionAlert} />}
+        {props.eventStreamAlert && <ChatHeaderAlertBadge alert={props.eventStreamAlert} />}
+      </div>
       {isLocalSimulationBackend && (
         <Alert variant="info" className="maka-fake-backend-banner" role="status">
-          <AlertTriangle size={14} strokeWidth={1.75} aria-hidden="true" />
+          <AlertTriangle size={14} aria-hidden="true" />
           <AlertDescription>
             当前会话来自旧的本地模拟连接。要拿到真实 LLM 回复，请到 <strong>设置 · 模型</strong> 添加 Anthropic / OpenAI / GLM 等 API key。
           </AlertDescription>
@@ -579,7 +453,7 @@ export function ChatView(props: {
           contentClassName="maka-chatContent"
           onScroll={onScroll}
         >
-          {chat.length === 0 && !props.streamingText && (
+          {chat.length === 0 && !streamingActive && (
             props.messageLoading ? null : props.messageLoadError ? (
               <div role="alert" aria-busy={props.messageLoadRetryPending ? 'true' : undefined}>
                 <EmptyState
@@ -601,7 +475,7 @@ export function ChatView(props: {
               )
             )
           )}
-          {turns.map((turn, idx) => {
+          {turns.map((turn) => {
             return (
               <TurnView
                 key={turn.turnId}
@@ -614,44 +488,32 @@ export function ChatView(props: {
                 lineageBadges={props.turnLineageBadgesByTurn?.[turn.turnId]}
                 onLineageBadgeClick={stableLineageBadgeClick}
                 searchHighlighted={highlightedTurnId === turn.turnId}
+                liveStreaming={
+                  turn.turnId === tailTurnId
+                    ? {
+                        onStreamingSettled: props.onStreamingSettled,
+                        processingIndicator: props.processingIndicator,
+                        continuingIndicator: props.continuingIndicator,
+                      }
+                    : undefined
+                }
               />
             );
           })}
-          {(props.streamingText || props.thinkingText) && (
-            // PR-STREAM-TURN-CENTER: the in-flight answer must use the SAME
-            // `.maka-turn` shell a committed turn uses. `.maka-turn` owns the
-            // centered 680px reading column (max-width + margin:0 auto). A bare
-            // `.message.assistant` instead left-aligns — its unlayered
-            // margin-right:auto outranks `.maka-message-row`'s margin:0 auto —
-            // so without this wrapper the streaming answer rendered ~110px left
-            // of where it lands once committed, a visible horizontal jump on
-            // text_complete. Wrapping here makes streaming structurally
-            // identical to TurnView's committed turn.
-            <section className="maka-turn maka-turn-streaming">
-              <Message variant="assistant">
-                {/* PR-UI-LAYOUT-42: Reasoning panel for Anthropic-style
-                 * extended thinking. Renders ABOVE the streaming
-                 * answer because thinking always precedes the
-                 * answer. Default-open during streaming so the user
-                 * sees the model reasoning; users can collapse it
-                 * if too verbose. The panel disappears entirely on
-                 * text_complete / abort / error (parent clears the
-                 * thinkingBySession entry). */}
-                {props.thinkingText && (
-                  <ReasoningPanel
-                    text={props.thinkingText}
-                    live={!props.streamingText}
-                    truncated={props.thinkingTruncated === true}
-                  />
-                )}
-                {props.streamingText && (
-                  <StreamingAssistantBubble
-                    text={props.streamingText}
-                    live={props.streamingComplete !== true}
-                    truncated={props.streamingTruncated === true}
-                    onSettled={props.onStreamingSettled}
-                  />
-                )}
+          {/* #642 fallback: streaming began before the optimistic user turn
+              materialized (rare — e.g. an event replay while messages are still
+              loading), so there is no tail turn to inject into. Render the live
+              answer in a bare `.maka-turn` so it isn't dropped. Mutually
+              exclusive with the tail injection above (only fires when
+              `tailTurnId` is undefined), so the answer never double-renders. */}
+          {streamingActive && !tailTurnId && (
+            <section className="maka-turn" data-live-streaming="true">
+              <Message variant="assistant" className="group/answer">
+                <div className="flex flex-col gap-2">
+                  {props.processingIndicator && <ModelProcessingIndicator />}
+                  {props.continuingIndicator && !props.processingIndicator && <ModelContinuingIndicator />}
+                </div>
+                <div aria-hidden="true" className="mt-0.5 h-8" />
               </Message>
             </section>
           )}
@@ -671,212 +533,13 @@ export function ChatView(props: {
             onClick={scrollToBottom}
             aria-label="跳到最新消息"
           >
-            <ArrowDown size={16} strokeWidth={2} aria-hidden="true" />
+            <ArrowDown size={16} aria-hidden="true" />
           </UiButton>
         )}
       </div>
     </main>
   );
 }
-
-/**
- * Renders an individual chat message body.
- *
- * - `user` messages stay verbatim (whitespace + line breaks preserved); the
- *   user's literal input shouldn't be reinterpreted as markdown.
- * - `assistant` / `system` (and anything else) flow through the markdown
- *   renderer so code fences, lists, tables, and links display natively.
- *
- * Assistant messages get a hover Copy button that yanks the raw markdown
- * source to the clipboard.
- *
- * Memoized because chat scroll re-renders the whole list on every streaming
- * delta; this keeps already-final bubbles from re-parsing markdown.
- */
-function AttachmentImage(props: { attachment: AttachmentRef }) {
-  const [src, setSrc] = useState<string | undefined>(undefined);
-  const [lightboxOpen, setLightboxOpen] = useState(false);
-  useEffect(() => {
-    if (props.attachment.ref.kind !== 'session_file') return;
-    const reader = (window as unknown as {
-      maka?: {
-        attachments?: {
-          readBytes?: (
-            sessionId: string,
-            relativePath: string,
-          ) => Promise<{ ok: true; base64: string; mimeType: string } | { ok: false }>;
-        };
-      };
-    }).maka?.attachments?.readBytes;
-    if (!reader) return;
-    let cancelled = false;
-    reader(props.attachment.ref.sessionId, props.attachment.ref.relativePath)
-      .then((result) => {
-        if (cancelled || !result.ok) return;
-        setSrc(`data:${result.mimeType};base64,${result.base64}`);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [props.attachment]);
-  if (!src) {
-    return (
-      <span className="maka-user-attachment-thumb-pending h-32 w-32 rounded-lg border border-border bg-muted grid place-items-center text-muted-foreground/60" aria-hidden="true">
-        <Loader2 className="h-5 w-5 animate-spin" />
-      </span>
-    );
-  }
-  return (
-    <>
-      <button
-        type="button"
-        className="group relative inline-flex rounded-lg overflow-hidden border border-border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-        onClick={() => setLightboxOpen(true)}
-        aria-label={`查看图片 ${props.attachment.name}`}
-      >
-        <img className="h-32 w-32 object-cover transition group-hover:opacity-90" src={src} alt={props.attachment.name} />
-      </button>
-      <DialogRoot open={lightboxOpen} onOpenChange={setLightboxOpen}>
-        <DialogContent className="!w-auto !max-w-[90vw] !max-h-[90vh] !bg-transparent !p-0 !shadow-none !rounded-lg overflow-visible">
-          <img className="max-h-[90vh] max-w-[90vw] object-contain rounded-lg shadow-2xl" src={src} alt={props.attachment.name} />
-        </DialogContent>
-      </DialogRoot>
-    </>
-  );
-}
-
-const MessageBody = memo(function MessageBody(props: { role: string; text: string; ts?: number; attachments?: readonly AttachmentRef[] }) {
-  if (props.role === 'user') {
-    // User turn: the message sits in a tinted, width-capped block aligned to
-    // the right (so the right-anchor reads even for long messages), with a
-    // quiet always-visible time + a copy affordance in a meta row beneath it.
-    // The time is no longer hover-gated (was `opacity: 0` until hover, which
-    // hid it from touch + assistive tech). Copy reuses MessageCopyButton in
-    // `footerStyle`, so it's the same quiet ghost action as the assistant
-    // turn footer's copy (same primitive + `markerVariants('footer-action')`).
-    return (
-      <>
-        <Bubble variant="user">
-          <span>{props.text}</span>
-          {props.attachments && props.attachments.length > 0 ? (
-            <div className="maka-user-attachments flex flex-wrap gap-1.5 mt-2">
-              {props.attachments.map((attachment, index) => (
-                attachment.kind === 'image' ? (
-                  <AttachmentImage key={`${attachment.name}-${index}`} attachment={attachment} />
-                ) : (
-                  <AttachmentFileCard
-                    key={`${attachment.name}-${index}`}
-                    name={attachment.name}
-                    kind={attachment.kind}
-                    size={attachment.bytes}
-                  />
-                )
-              ))}
-            </div>
-          ) : null}
-        </Bubble>
-        <div className="maka-message-meta">
-          {props.ts !== undefined && (
-            <RelativeTime ts={props.ts} className="maka-message-time-inline" />
-          )}
-          <MessageCopyButton text={props.text} footerStyle />
-        </div>
-      </>
-    );
-  }
-  // Assistant / system body: open prose, no bubble. Per-turn meta (model ·
-  // duration · cost) lives in the footer's info tooltip; copy + the other
-  // actions live in the turn footer.
-  return (
-    <Bubble variant="assistant" className="maka-bubble-with-actions">
-      <Markdown text={props.text} />
-    </Bubble>
-  );
-});
-
-function MessageCopyButton(props: { text: string; label?: string; footerStyle?: boolean }) {
-  const copyFeedback = useClipboardCopyFeedback(1400, { redact: false });
-  const copyPhase = copyFeedback.phaseFor('message');
-  const copyPending = copyPhase === 'pending';
-  const copied = copyPhase === 'copied';
-
-  async function copy() {
-    await copyFeedback.copy('message', props.text);
-  }
-
-  // `footerStyle` renders this copy as the SAME quiet ghost action the
-  // assistant turn footer uses (`markerVariants('footer-action')` on a
-  // UiButton variant="quiet" size="nav" — the bare size, with icon + "复制").
-  // The user-message copy and the assistant copy then read as one button by
-  // construction — same primitive, same class, same icon metrics — instead
-  // of a look-alike bespoke treatment.
-  const footer = props.footerStyle === true;
-  const iconSize = footer ? 12 : 14;
-
-  const baseLabel = props.label ?? (footer ? '复制' : '复制消息');
-  const actionLabel = copyPhase === 'pending'
-    ? '复制中'
-    : copyPhase === 'copied'
-      ? '已复制'
-      : copyPhase === 'failed'
-        ? '复制失败'
-        : baseLabel;
-  const icon = copied
-    ? <Check size={iconSize} strokeWidth={2} aria-hidden="true" />
-    : <Copy size={iconSize} strokeWidth={footer ? 2 : 1.75} aria-hidden="true" />;
-
-  if (footer) {
-    // icon-only + tooltip, matching the assistant footer copy action (#546)
-    // so the user-message copy and the assistant copy read as one button.
-    return (
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <UiButton
-              type="button"
-              className={markerVariants({ variant: 'footer-action' })}
-              variant="quiet"
-              size="nav"
-              aria-label={baseLabel}
-              aria-busy={copyPending ? 'true' : undefined}
-              disabled={copyPending}
-              data-copied={copied}
-              data-copy-feedback={copyPhase ?? undefined}
-              data-pending={copyPending ? 'true' : undefined}
-              onClick={() => void copy()}
-            />
-          }
-        >
-          {icon}
-        </TooltipTrigger>
-        <TooltipContent>{actionLabel}</TooltipContent>
-      </Tooltip>
-    );
-  }
-
-  return (
-    <UiButton
-      type="button"
-      className="maka-message-copy"
-      variant="quiet"
-      size="icon-sm"
-      onClick={() => void copy()}
-      aria-label={copyPhase ? `${actionLabel} · ${baseLabel}` : baseLabel}
-      aria-busy={copyPending ? 'true' : undefined}
-      disabled={copyPending}
-      data-copied={copied}
-      data-copy-feedback={copyPhase ?? undefined}
-      data-pending={copyPending ? 'true' : undefined}
-      data-labelled={props.label ? 'true' : undefined}
-    >
-      {icon}
-      {props.label && <span>{copyPhase === 'pending' ? '复制中…' : copyPhase === 'failed' ? '复制失败' : copied ? '已复制' : props.label}</span>}
-    </UiButton>
-  );
-}
-
-
 /**
  * Locale-aware copy bundle for the empty-chat hero. Mirrors the
  * locale split applied to `PROMPT_SUGGESTIONS_BY_LOCALE` (PR-UI-14)
@@ -913,7 +576,7 @@ function ChatHeaderAlertBadge(props: { alert: ChatHeaderAlert }) {
         aria-label={tooltip ?? label}
         title={tooltip}
       >
-        <AlertTriangle size={12} strokeWidth={2} aria-hidden="true" />
+        <AlertTriangle size={12} aria-hidden="true" />
         <span>{label}</span>
       </UiButton>
     );
@@ -925,7 +588,7 @@ function ChatHeaderAlertBadge(props: { alert: ChatHeaderAlert }) {
       aria-label={tooltip ?? label}
       title={tooltip}
     >
-      <AlertTriangle size={12} strokeWidth={2} aria-hidden="true" />
+      <AlertTriangle size={12} aria-hidden="true" />
       <span>{label}</span>
     </span>
   );
@@ -937,206 +600,6 @@ function ChatHeaderAlertBadge(props: { alert: ChatHeaderAlert }) {
 // sits where you actually start typing, matching the reference product.
 // Keyboard arrow/Home/End handling is delegated to the Select primitive.
 
-/**
- * Renders one conversational turn: user message → tools used → assistant
- * answer, in that order, as a single visual unit. Replaces the previous
- * "message stack + tools panel at end" layout so the user sees the
- * narrative of "ask → tools fired → answer" as one work unit.
- */
-const TurnView = memo(function TurnView(props: {
-  turn: TurnViewModel;
-  userLabel?: string;
-  /**
-   * PR109d-b: footer actions derived from `TurnStatus` + lineage map
-   * by the consumer (renderer/main.tsx). Each action carries its
-   * own `enabled` flag + tooltip; @maka/ui doesn't compute these
-   * itself so the policy stays in the renderer where the lineage
-   * map is built.
-   */
-  footerActions?: ReadonlyArray<TurnFooterActionMeta>;
-  onFooterAction?: (turnId: string, actionId: TurnFooterActionMeta['id']) => void;
-  /**
-   * PR109e-d: pre-translated Chinese phrase for a failed turn's
-   * `errorClass`. Caller computes via `describeTurnErrorClass()`.
-   * Undefined for non-failed turns or when the runtime didn't
-   * populate `errorClass`. UI never sees the raw enum identifier.
-   */
-  failedReasonLabel?: string;
-  /**
-   * PR-PawWork-run-incident-lite: pre-derived recovery guidance for a failed
-   * turn. Caller computes this from error class, retained partial output, and
-   * tool activity so the banner can distinguish "retry" from "inspect tool
-   * output first".
-   */
-  failedRecoveryLabel?: string;
-  /**
-   * PR109e-e: forward + reverse lineage badges. The renderer
-   * computes the labels (with short turn ids) and click targets;
-   * @maka/ui just renders the badge UI.
-   */
-  lineageBadges?: TurnLineageBadge[];
-  /** PR109e-e: invoked when the user clicks a lineage badge. The
-   *  renderer scrolls the target turn into view. */
-  onLineageBadgeClick?: (targetTurnId: string) => void;
-  /** True when a search result just navigated to this turn. */
-  searchHighlighted?: boolean;
-}) {
-  const { turn } = props;
-  const forwardBadges = props.lineageBadges?.filter((b) => b.direction === 'forward') ?? [];
-  const reverseBadges = props.lineageBadges?.filter((b) => b.direction === 'reverse') ?? [];
-  return (
-    <section
-      className="maka-turn"
-      data-turn-id={turn.turnId}
-      data-search-highlight={props.searchHighlighted ? 'true' : undefined}
-      tabIndex={props.searchHighlighted ? -1 : undefined}
-    >
-      {forwardBadges.length > 0 && (
-        <Marker variant="lineage-row" aria-label="本轮回答的来源">
-          {forwardBadges.map((badge) => (
-            <UiButton
-              key={badge.id}
-              type="button"
-              className={markerVariants({ variant: 'lineage-badge' })}
-              variant="quiet"
-              size="nav"
-              data-direction="forward"
-              title={badge.tooltip ?? badge.label}
-              onClick={() => props.onLineageBadgeClick?.(badge.targetTurnId)}
-            >
-              <GitBranch size={11} strokeWidth={2} aria-hidden="true" />
-              <span>{badge.label}</span>
-            </UiButton>
-          ))}
-        </Marker>
-      )}
-      {turn.user && (
-        <Message
-          variant="user"
-          aria-label="你发送的消息"
-          title={turn.user.ts ? formatAbsoluteTimestamp(turn.user.ts) : undefined}
-        >
-          <MessageBody role="user" text={turn.user.text} ts={turn.user.ts} attachments={turn.user.attachments} />
-        </Message>
-      )}
-      {turn.notes.map((note) => (
-        <Message
-          key={note.id}
-          variant="system"
-          title={note.ts ? formatAbsoluteTimestamp(note.ts) : undefined}
-        >
-          <MessageBody role="system" text={note.text} ts={note.ts} />
-        </Message>
-      ))}
-      {turn.tools.length > 0 && (
-        <div className="maka-turn-tools">
-          <ToolActivity items={turn.tools} />
-        </div>
-      )}
-      {turn.assistant && (
-        <Message
-          variant="assistant"
-          data-turn-status={turn.status}
-          aria-label="Maka 的回答"
-        >
-          <div className="flex flex-col">
-            {turn.assistantThinking && (
-              <Collapsible className="maka-turn-thinking">
-                <CollapsibleTrigger>
-                  <span>查看思考过程</span>
-                  <span className="maka-turn-thinking-note">模型推理草稿，不是最终答案</span>
-                </CollapsibleTrigger>
-                <CollapsiblePanel>
-                  <div className="maka-turn-thinking-body">
-                    <Markdown text={turn.assistantThinking} />
-                    <div className="maka-turn-thinking-actions">
-                      <MessageCopyButton text={turn.assistantThinking} label="复制思考过程" />
-                    </div>
-                  </div>
-                </CollapsiblePanel>
-              </Collapsible>
-            )}
-            {/* PR109d-c: aborted turn body gets a muted "(已中断)" prefix
-                + Ban icon so the user can see this turn was cancelled
-                without it looking like a fault state (which is reserved
-                for `failed`). Lives in the message body wrapper so the
-                Copy button below still copies the assistant text without
-                the prefix. */}
-            {turn.status === 'aborted' && (
-              <Marker variant="aborted" role="status">
-                <Ban size={12} strokeWidth={2} aria-hidden="true" />
-                <em>{turnAbortMarkerLabel(turn.abortSource)}</em>
-              </Marker>
-            )}
-            {/* PR109e-d: failed turn AlertOctagon banner with generalized
-                Chinese copy (no raw `errorClass` leak per @kenji gate #3).
-                Caller passes the pre-translated `failedReasonLabel` —
-                @maka/ui doesn't know how to translate the runtime enum;
-                that mapping lives in `session-status-presentation.ts`
-                via `describeTurnErrorClass()`. */}
-            {turn.status === 'failed' && props.failedReasonLabel && (
-              <Marker variant="failed-banner" role="alert">
-                <Marker as="span" variant="failed-icon" aria-hidden="true">
-                  <AlertOctagon size={14} strokeWidth={2} />
-                </Marker>
-                <span>{props.failedReasonLabel}</span>
-                {props.failedRecoveryLabel && (
-                  <Marker as="span" variant="failed-recovery">{props.failedRecoveryLabel}</Marker>
-                )}
-              </Marker>
-            )}
-            <MessageBody role="assistant" text={turn.assistant.text} ts={turn.assistant.ts} />
-          </div>
-          {reverseBadges.length > 0 && (
-            <Marker variant="lineage-row-reverse" aria-label="本轮回答的衍生">
-              {reverseBadges.map((badge) => (
-                <UiButton
-                  key={badge.id}
-                  type="button"
-                  className={markerVariants({ variant: 'lineage-badge' })}
-                  variant="quiet"
-                  size="nav"
-                  data-direction="reverse"
-                  title={badge.tooltip ?? badge.label}
-                  onClick={() => props.onLineageBadgeClick?.(badge.targetTurnId)}
-                >
-                  <GitBranch size={11} strokeWidth={2} aria-hidden="true" />
-                  <span>{badge.label}</span>
-                </UiButton>
-              ))}
-            </Marker>
-          )}
-          {props.footerActions && props.footerActions.length > 0 && (
-            <TurnFooterActions
-              actions={props.footerActions}
-              onAction={props.onFooterAction ? (actionId) => props.onFooterAction?.(turn.turnId, actionId) : undefined}
-              assistantText={turn.assistant.text}
-            />
-          )}
-        </Message>
-      )}
-    </section>
-  );
-});
-
-/**
- * Turn footer actions row. Renders icon-only buttons (regenerate /
- * branch / copy, plus an optional info action whose tooltip carries
- * the turn meta) driven by the pure helper's enabled matrix. Disabled
- * buttons stay rendered so the user can see what actions exist on the
- * turn; click handlers no-op when disabled (#546: retry merged into
- * regenerate).
- *
- * Copy action is handled locally (write to clipboard) so the
- * consumer doesn't need a clipboard IPC for it. Other actions
- * (regenerate / branch) bubble up via `onAction`.
- */
-export interface TurnFooterActionMeta {
-  id: 'regenerate' | 'branch' | 'copy' | 'info';
-  label: string;
-  enabled: boolean;
-  tooltip?: string;
-}
 
 /**
  * Branched session banner (PR109f). Surfaces above the chat surface
@@ -1164,7 +627,7 @@ function SessionBranchBanner(props: {
         ? `从中断前分支自 ${banner.parentSessionName} · 点击跳回原会话`
         : `分自 ${banner.parentSessionName} · 点击跳回原会话`}
     >
-      <GitBranch size={12} strokeWidth={2} aria-hidden="true" />
+      <GitBranch size={12} aria-hidden="true" />
       <span>
         {banner.fromAbortedTurn
           ? `从中断前分支自 ${banner.parentSessionName}`
@@ -1172,363 +635,6 @@ function SessionBranchBanner(props: {
       </span>
     </UiButton>
   );
-}
-
-/**
- * Lineage badge rendered on a turn, either pointing to its origin
- * ("重新生成自 turn ${id}") or to a descendant ("已重新生成 → turn ${id}").
- * Renderer (main.tsx) computes the labels and targets from the lineage
- * map; @maka/ui renders the badge UI. PR109e-e.
- */
-export interface TurnLineageBadge {
-  /** Stable key for React. */
-  id: string;
-  /** Chinese label. UI surfaces it verbatim — caller is responsible for
-   *  generalized phrasing (never expose enum identifiers). */
-  label: string;
-  /** Optional tooltip / aria-label override. Falls back to `label`. */
-  tooltip?: string;
-  /** Click target turn id. Renderer scrolls + highlights that turn. */
-  targetTurnId: string;
-  /**
-   * Forward = "this turn was retried/regenerated from another";
-   * reverse = "another turn descends from this one". UI shows them
-   * in different positions (forward at top, reverse at bottom).
-   */
-  direction: 'forward' | 'reverse';
-}
-
-function TurnFooterActions(props: {
-  actions: ReadonlyArray<TurnFooterActionMeta>;
-  onAction?: (actionId: TurnFooterActionMeta['id']) => void;
-  /** Assistant text used by the inline copy action. */
-  assistantText?: string;
-}) {
-  const [copyPhase, setCopyPhase] = useState<ClipboardCopyPhase | null>(null);
-  const copyPendingRef = useRef(false);
-  const copyResetTimerRef = useRef<number | null>(null);
-  const copyMountedRef = useRef(true);
-
-  function clearCopyResetTimer() {
-    if (copyResetTimerRef.current === null) return;
-    window.clearTimeout(copyResetTimerRef.current);
-    copyResetTimerRef.current = null;
-  }
-
-  useEffect(() => {
-    copyMountedRef.current = true;
-    return () => {
-      copyMountedRef.current = false;
-      clearCopyResetTimer();
-    };
-  }, []);
-
-  function settleCopy(phase: Exclude<ClipboardCopyPhase, 'pending'>) {
-    if (!copyMountedRef.current) return;
-    setCopyPhase(phase);
-    copyResetTimerRef.current = window.setTimeout(() => {
-      if (!copyMountedRef.current) return;
-      setCopyPhase(null);
-      copyResetTimerRef.current = null;
-    }, 1400);
-  }
-
-  async function copyAssistantText() {
-    if (!props.assistantText || copyPendingRef.current) return;
-    copyPendingRef.current = true;
-    clearCopyResetTimer();
-    setCopyPhase('pending');
-    try {
-      await navigator.clipboard.writeText(props.assistantText);
-      settleCopy('copied');
-    } catch {
-      settleCopy('failed');
-    } finally {
-      copyPendingRef.current = false;
-    }
-  }
-
-  async function handleClick(action: TurnFooterActionMeta) {
-    if (!action.enabled) return;
-    if (action.id === 'copy') {
-      await copyAssistantText();
-      return;
-    }
-    if (action.id === 'info') return; // tooltip-only meta display, no action
-    props.onAction?.(action.id);
-  }
-  return (
-    <Marker variant="footer" role="toolbar" aria-label="本轮回答操作">
-      {props.actions.map((action) => {
-        // Per @kenji review: pending state must keep the original button
-        // label visible (not a spinner-only) so screen readers can hear
-        // which action is processing. `data-pending` + `aria-busy="true"`
-        // are the signals — the `footer-action` marker shell renders as a
-        // bare `quiet` button in every state, so pending never keys off the
-        // Button `variant`, and no presentation-priority hook is emitted.
-        const isPending = action.tooltip === '正在处理…';
-        const isCopyAction = action.id === 'copy';
-        const copyIsPending = isCopyAction && copyPhase === 'pending';
-        const copyFeedbackLabel = copyPhase === 'pending'
-          ? '复制中…'
-          : copyPhase === 'copied'
-            ? '已复制'
-            : copyPhase === 'failed'
-              ? '复制失败'
-              : action.label;
-        const isActionPending = isPending || copyIsPending;
-        // Copy's tooltip comes from the helper (enabled affordance vs disabled
-        // reason). Only while clipboard feedback is active do we surface that
-        // transient state; otherwise the helper's tooltip wins.
-        const tooltipText = isCopyAction
-          ? (copyPhase ? copyFeedbackLabel : (action.tooltip ?? action.label))
-          : (action.tooltip ?? action.label);
-        const icon = isCopyAction && copyPhase === 'copied'
-          ? <Check size={12} strokeWidth={2} aria-hidden="true" />
-          : STATUS_FOOTER_ICON[action.id];
-        return (
-          <Tooltip key={action.id}>
-            <TooltipTrigger
-              render={
-                <UiButton
-                  type="button"
-                  className={markerVariants({ variant: 'footer-action' })}
-                  variant="quiet"
-                  size="nav"
-                  aria-label={action.label}
-                  data-action={action.id}
-                  data-pending={isActionPending || undefined}
-                  data-copy-feedback={isCopyAction && copyPhase ? copyPhase : undefined}
-                  aria-disabled={!action.enabled || copyIsPending}
-                  aria-busy={isActionPending || undefined}
-                  onClick={() => void handleClick(action)}
-                />
-              }
-            >
-              {icon}
-            </TooltipTrigger>
-            <TooltipContent>{tooltipText}</TooltipContent>
-          </Tooltip>
-        );
-      })}
-    </Marker>
-  );
-}
-
-const STATUS_FOOTER_ICON: Record<TurnFooterActionMeta['id'], ReactNode> = {
-  regenerate: <RefreshCcw size={12} strokeWidth={2} aria-hidden="true" />,
-  branch: <GitBranch size={12} strokeWidth={2} aria-hidden="true" />,
-  copy: <Copy size={12} strokeWidth={2} aria-hidden="true" />,
-  info: <Info size={12} strokeWidth={2} aria-hidden="true" />,
-};
-
-/**
- * PR-UI-LAYOUT-42 — ReasoningPanel: collapsible "thinking" panel for
- * Anthropic-style extended thinking. Renders the live
- * `ThinkingDeltaEvent.text` (or final `ThinkingCompleteEvent.text`)
- * accumulated by the renderer in `thinkingBySession`.
- *
- * Default-open during streaming so the user sees the live reasoning;
- * collapses to a single-line summary if user clicks the header. The
- * panel itself is wrapped in a Base UI Collapsible for keyboard a11y
- * (Space/Enter toggles).
- *
- * `live=true` means thinking is still streaming (no text yet). Adds
- * a small pulse dot in the header so users see motion.
- *
- * The text inside is rendered as `<pre>` so the model's
- * step-by-step reasoning preserves indentation / line breaks. We
- * don't pipe through Markdown — thinking is usually plain prose +
- * occasional code, and full markdown would slow the streaming.
- */
-/**
- * PR-UI-RENDER-1 — streaming assistant bubble.
- *
- * Wraps the live `streamingText` in `useSmoothStreamContent` so the
- * visible text grows at the EMA-tracked arrival CPS instead of
- * lurching with each network chunk. On `text_complete`, the parent keeps
- * the bubble mounted with `live=false` so the smoother can drain the final
- * tail before settled history takes over. Abort / error still unmount
- * immediately.
- *
- * `live=false` after `text_complete`: keep the bubble mounted until
- * the smoother catches up, then notify the parent to hand off to history.
- */
-function StreamingAssistantBubble(props: { text: string; live: boolean; truncated?: boolean; onSettled?: () => void }) {
-  // PR-UI-C1 review fixup (@kenji msg fbb8f119): the smoother
-  // typewriters PREFIXES of its input string. If the raw text
-  // contains a mid-delta secret like `Authorization: Bearer sk-...`,
-  // prefixes such as `Authorization: Bearer s` don't match any
-  // redaction pattern by themselves and would leak to the DOM for
-  // a frame or two before the downstream Markdown redactor sees
-  // the full token. `prepareSmoothStreamText` runs `redactSecrets`
-  // on the FULL raw text BEFORE the smoother sees it, so every
-  // displayed prefix is guaranteed secret-free.
-  //
-  // PR-UI-Cx (@kenji msg cd09bcac): `props.text` is already the
-  // post-redaction post-cap output of `applyAssistantDelta` (parent
-  // ran the chokepoint inside `setStreamingBySession` updater),
-  // so the smoother only sees safe text. `prepareSmoothStreamText`
-  // here is defense-in-depth — `redactSecrets` is idempotent on
-  // already-masked text, and the gate guarantees the smoother
-  // contract holds even if a future caller forgets the chokepoint.
-  const snap = useStreamSnap();
-  const safeText = prepareSmoothStreamText(props.text);
-  const { displayed, catchingUp } = useSmoothStreamContent(safeText, {
-    streaming: props.live,
-    snap,
-  });
-  const settledRef = useRef(false);
-
-  useEffect(() => {
-    settledRef.current = false;
-  }, [safeText, props.live]);
-
-  useEffect(() => {
-    if (props.live || catchingUp || settledRef.current) return;
-    settledRef.current = true;
-    props.onSettled?.();
-  }, [props.live, catchingUp, props.onSettled]);
-
-  return (
-    <Bubble variant="assistant" className="maka-bubble-streaming">
-      <Markdown text={displayed} />
-      {props.truncated && (
-        <div
-          className="mt-1.5 inline-block cursor-help rounded-[var(--radius-control)] border border-[oklch(from_var(--warning)_l_c_h_/_0.24)] bg-[oklch(from_var(--warning)_l_c_h_/_0.05)] px-1 text-xs text-[color:var(--warning-text,var(--info-text))]"
-          role="status"
-          aria-live="polite"
-          title="助手输出已超过单次回合上限，超出部分未渲染。如需完整内容请重新生成或查看持久化的会话日志。"
-        >
-          已截断
-        </div>
-      )}
-    </Bubble>
-  );
-}
-
-function ReasoningPanel(props: { text: string; live: boolean; truncated: boolean }) {
-  // PR-UI-RENDER-1 + PR-UI-C0: smooth-stream the thinking text on top
-  // of the C0 redaction/cap chokepoint. `props.text` is the already-
-  // redacted-and-capped buffer (renderer ran it through
-  // `applyThinkingDelta` / `applyThinkingComplete` before passing
-  // here), so the smoother is purely a visual frame-pacing layer.
-  //
-  // C1 review fixup (@kenji msg fbb8f119) — defense in depth: even
-  // though C0 already redacted, we run `prepareSmoothStreamText`
-  // again before the smoother. `redactSecrets` is idempotent on
-  // already-masked text, and the gate guarantees the smoother
-  // contract ("smoother never sees raw secrets") holds even if a
-  // future change accidentally bypasses the C0 chokepoint.
-  //
-  // `live=true` means thinking is still flowing (no answer yet) →
-  // streaming=true so the smoother typewriters. `live=false` means
-  // `thinking_complete` already fired (caller passes a settled blob)
-  // → streaming=false, hook snaps. Reduced-motion / visual-smoke
-  // also forces snap so deterministic capture sees the final text
-  // immediately.
-  const snap = useStreamSnap();
-  const safeText = prepareSmoothStreamText(props.text);
-  const { displayed } = useSmoothStreamContent(safeText, {
-    streaming: props.live,
-    snap,
-  });
-  // PR-UI-RENDER-1 @kenji review concern #4 — explicitly controlled
-  // open state. With a raw `open` JSX attribute, React's reconciler
-  // could re-assert the open state and undo the user's manual collapse
-  // on the next stream-driven re-render (the smoother re-renders at
-  // ~60Hz while the stream is live, so any reconciliation drift is
-  // immediately visible to the user). Owning the open state via
-  // useState + onOpenChange makes the panel uncontrolled-from-React's-view:
-  // the user's collapse sticks because we only write `open` from our
-  // own state, which we only mutate from the onOpenChange callback.
-  // Default-open at mount so users see the reasoning by default; first
-  // click toggles to closed and that sticks.
-  const [open, setOpen] = useState(true);
-  return (
-    <Collapsible
-      className="maka-reasoning-panel"
-      data-live={props.live ? 'true' : undefined}
-      open={open}
-      onOpenChange={(v) => setOpen(v)}
-    >
-      <CollapsibleTrigger className="maka-reasoning-panel-header">
-        {props.live && <span className="maka-reasoning-panel-dot" aria-hidden="true" />}
-        <span className="maka-reasoning-panel-label">
-          {props.live ? '正在思考…' : '思考过程'}
-        </span>
-        {/* PR-UI-C0 review fixup (@kenji msg 7885a347): "已截断" pill
-            fires when `applyThinkingDelta` / `applyThinkingComplete`
-            dropped content (per-delta cap or per-session total cap).
-            Same chrome family as the A3 tool-output truncated pill. */}
-        {props.truncated && (
-          <span
-            className="maka-reasoning-panel-truncated"
-            data-truncated="true"
-            title="部分 reasoning 已截断；显示的是最近的内容"
-          >
-            已截断
-          </span>
-        )}
-        <span className="maka-reasoning-panel-chevron" aria-hidden="true">›</span>
-      </CollapsibleTrigger>
-      <CollapsiblePanel>
-        <pre className="maka-reasoning-panel-body">{displayed}</pre>
-      </CollapsiblePanel>
-    </Collapsible>
-  );
-}
-
-/**
- * PR-UI-RENDER-1 — reduced-motion / visual-smoke probe for the
- * streaming smoother.
- *
- * Three triggers force the smoother to snap (mirroring the rule in
- * `apps/desktop/src/renderer/scroll-motion-policy.ts`):
- *
- *   1. `data-maka-reduced-motion="true"` — set by the PR-IR-04
- *      reduced variant of the visual-smoke fixture.
- *   2. `data-maka-visual-smoke="true"` — set by ANY visual-smoke
- *      capture so screenshots see the final text on the first paint.
- *   3. OS-level `prefers-reduced-motion: reduce`.
- *
- * The hook reads the dataset attributes once on mount (they're set
- * pre-React in main.tsx and don't toggle during a session) but
- * subscribes to `matchMedia` for the OS preference so a mid-session
- * toggle reaches the running stream.
- */
-function useStreamSnap(): boolean {
-  const [snap, setSnap] = useState(() => readStreamSnap());
-  useEffect(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const onChange = () => setSnap(readStreamSnap());
-    // Initial read (in case dataset attrs landed after first paint).
-    setSnap(readStreamSnap());
-    if (typeof mq.addEventListener === 'function') {
-      mq.addEventListener('change', onChange);
-      return () => mq.removeEventListener('change', onChange);
-    }
-    return undefined;
-  }, []);
-  return snap;
-}
-
-function readStreamSnap(): boolean {
-  if (typeof document === 'undefined' || typeof window === 'undefined') return true;
-  const root = document.documentElement;
-  if (root.dataset.makaReducedMotion === 'true') return true;
-  if (root.dataset.makaVisualSmoke === 'true') return true;
-  if (typeof window.matchMedia === 'function') {
-    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  }
-  return false;
-}
-
-function mergeTools(stored: ToolActivityItem[], live: ToolActivityItem[]): ToolActivityItem[] {
-  const byId = new Map(stored.map((item) => [item.toolUseId, item]));
-  for (const item of live) byId.set(item.toolUseId, { ...byId.get(item.toolUseId), ...item });
-  return [...byId.values()];
 }
 
 const noMessagesYet = '暂无消息';

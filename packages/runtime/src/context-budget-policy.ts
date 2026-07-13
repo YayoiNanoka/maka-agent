@@ -1,9 +1,11 @@
 import type { LlmConnection } from '@maka/core/llm-connections';
+import { lookupModelMetadata } from '@maka/core/model-metadata';
 import type { ContextBudgetPolicy } from './context-budget.js';
 
 export interface BuildDefaultContextBudgetPolicyOptions {
   name?: string;
   env?: Record<string, string | undefined>;
+  modelId?: string;
 }
 
 export function buildDefaultContextBudgetPolicy(
@@ -14,7 +16,7 @@ export function buildDefaultContextBudgetPolicy(
   if (env.MAKA_CONTEXT_BUDGET === 'off') return undefined;
   const maxHistoryEstimatedTokens =
     parseOptionalPositiveInt(env.MAKA_CONTEXT_HISTORY_BUDGET_TOKENS) ??
-    defaultHistoryBudgetTokens(connection);
+    defaultHistoryBudgetTokens(connection, env, options.modelId);
   const maxHistoryTurns = parseOptionalPositiveInt(env.MAKA_CONTEXT_HISTORY_BUDGET_TURNS);
   const minRecentTurns = parsePositiveInt(env.MAKA_CONTEXT_MIN_RECENT_TURNS, 2);
   const surfaceName = (options.name ?? 'default-history-budget').replace(/-default-history-budget$/, '');
@@ -93,7 +95,11 @@ export function buildManualCompactLookupPolicy(
 function buildStaleToolResultPrunePolicy(
   env: Record<string, string | undefined>,
 ): NonNullable<ContextBudgetPolicy['staleToolResultPrune']> | undefined {
-  if (env.MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE !== 'on') return undefined;
+  const enabled = parseOptionalBoolean(
+    env.MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE,
+    'MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE',
+  );
+  if (enabled === false) return undefined;
   return {
     enabled: true,
     maxResultEstimatedTokens: parsePositiveInt(
@@ -171,7 +177,8 @@ function buildHistoryCompactPolicy(
   env: Record<string, string | undefined>,
   defaultHighWaterName: string,
 ): NonNullable<ContextBudgetPolicy['historyCompact']> | undefined {
-  if (env.MAKA_CONTEXT_HISTORY_COMPACT !== 'on') return undefined;
+  const enabled = parseOptionalBoolean(env.MAKA_CONTEXT_HISTORY_COMPACT, 'MAKA_CONTEXT_HISTORY_COMPACT');
+  if (enabled === false) return undefined;
   const highWaterRatio = parseOptionalRatio(env.MAKA_CONTEXT_HISTORY_COMPACT_HIGH_WATER_RATIO);
   const forceRatio = parseOptionalRatio(env.MAKA_CONTEXT_HISTORY_COMPACT_FORCE_RATIO);
   const targetRatio = parseOptionalRatio(env.MAKA_CONTEXT_HISTORY_COMPACT_TARGET_RATIO);
@@ -181,11 +188,11 @@ function buildHistoryCompactPolicy(
   return {
     enabled: true,
     mode: parseHistoryCompactMode(env.MAKA_CONTEXT_HISTORY_COMPACT_MODE),
-    ...(highWaterRatio !== undefined ? { highWaterRatio } : {}),
+    highWaterRatio: highWaterRatio ?? 1,
     ...(forceRatio !== undefined ? { forceRatio } : {}),
     ...(targetRatio !== undefined ? { targetRatio } : {}),
-    ...(tailEstimatedTokens !== undefined ? { tailEstimatedTokens } : {}),
-    ...(minRecentTurns !== undefined ? { minRecentTurns } : {}),
+    tailEstimatedTokens: tailEstimatedTokens ?? 16_384,
+    minRecentTurns: minRecentTurns ?? 3,
     ...(maxSummaryEstimatedTokens !== undefined ? { maxSummaryEstimatedTokens } : {}),
     maxBlocks: parsePositiveInt(env.MAKA_CONTEXT_HISTORY_COMPACT_MAX_BLOCKS, 1),
     maxEstimatedTokens: parsePositiveInt(env.MAKA_CONTEXT_HISTORY_COMPACT_MAX_TOKENS, 2048),
@@ -269,9 +276,28 @@ function buildSemanticCompactPolicy(
   };
 }
 
-function defaultHistoryBudgetTokens(connection: LlmConnection): number | undefined {
+function defaultHistoryBudgetTokens(
+  connection: LlmConnection,
+  env: Record<string, string | undefined>,
+  modelId: string | undefined,
+): number | undefined {
+  const contextWindow = resolveSelectedModelContextWindow(connection, modelId);
+  if (contextWindow !== undefined) {
+    const reserveTokens = parsePositiveInt(env.MAKA_CONTEXT_HISTORY_COMPACT_RESERVE_TOKENS, 16_384);
+    return Math.max(1, contextWindow - reserveTokens);
+  }
   if (connection.providerType === 'deepseek') return undefined;
   return 32_000;
+}
+
+export function resolveSelectedModelContextWindow(connection: LlmConnection, modelId: string | undefined): number | undefined {
+  const selectedModelId = modelId ?? connection.defaultModel;
+  const model = selectedModelId
+    ? connection.models?.find((candidate) => candidate.id === selectedModelId)
+    : undefined;
+  return model?.contextWindow ?? (
+    selectedModelId ? lookupModelMetadata(connection.providerType, selectedModelId).contextWindow : undefined
+  );
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
@@ -309,7 +335,7 @@ function parseSynthesisCacheMode(value: string | undefined): 'lookup' | 'read_wr
 
 function parseHistoryCompactMode(value: string | undefined): NonNullable<ContextBudgetPolicy['historyCompact']>['mode'] {
   if (value === 'lookup' || value === 'read_write' || value === 'deterministic') return value;
-  return 'lookup';
+  return 'read_write';
 }
 
 function parseSemanticCompactMode(value: string | undefined): NonNullable<ContextBudgetPolicy['semanticCompact']>['mode'] | undefined {

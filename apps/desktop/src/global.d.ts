@@ -19,6 +19,7 @@ import type {
   SessionEvent,
   SessionListFilter,
   SessionSummary,
+  ShellRunUpdate,
   StoredMessage,
   ThinkingLevel,
   UpdateConnectionInput,
@@ -68,7 +69,7 @@ import type { TestProxyInput } from '@maka/core/settings/network-settings';
 import type { Result } from '@maka/core/settings/result';
 import type { CreateSessionInput } from '@maka/core';
 import type { BotStatus, WechatBridgeQrCodeResult } from '@maka/runtime';
-import type { SkillEntry } from '@maka/ui';
+import type { BundledSkillCatalogEntry, ManagedSkillSourceEntry, ManagedSkillUpdatePreview, SkillEntry, SkillGovernanceDetails } from '@maka/ui';
 import type { ConfigCategory } from '@maka/storage';
 import type {
   OnboardingMilestone,
@@ -156,6 +157,16 @@ declare global {
         setThinkingLevel(sessionId: string, level: ThinkingLevel | undefined | null): Promise<SessionSummary>;
         remove(sessionId: string): Promise<void>;
       };
+      shellRuns: {
+        list(sessionId: string): Promise<ShellRunUpdate[]>;
+        subscribeUpdates(handler: (update: ShellRunUpdate) => void): () => void;
+      };
+      goal: {
+        /** The session's current goal (null when none is set). */
+        get(sessionId: string): Promise<import('@maka/runtime').GoalState | null>;
+        /** Clear the active goal, stopping autonomous continuation. */
+        clear(sessionId: string): Promise<void>;
+      };
       connections: {
         list(): Promise<LlmConnection[]>;
         getDefault(): Promise<string | null>;
@@ -193,6 +204,18 @@ declare global {
             >>;
           };
         };
+      };
+      notifications: {
+        /** Fire-and-forget: report that an agent turn reached a terminal
+         * state. `title` is the session name, `body` the start of the
+         * reply (or error message); main sanitizes + falls back to
+         * generic copy. Main gates on the product toggle + window focus
+         * before raising a native OS notification. */
+        runEnded(payload: {
+          kind: 'completed' | 'errored';
+          title?: string;
+          body?: string;
+        }): Promise<void>;
       };
       onboarding: {
         getSnapshot(): Promise<OnboardingSnapshot>;
@@ -407,6 +430,9 @@ declare global {
         // PR-WINDOW-TITLEBAR-0: re-sync the native Windows titleBarOverlay
         // color/symbolColor to the current app theme. No-op on non-Windows.
         setTitleBarOverlayTheme(isDark: boolean): Promise<void>;
+        // PR-SHOW-AFTER-FIRST-COMMIT: signal main after the first React commit
+        // so the hidden window is revealed (see main-window.ts).
+        notifyRendererReady(): Promise<void>;
       };
       config: {
         export(input: { categories: ConfigCategory[] }): Promise<
@@ -521,6 +547,40 @@ declare global {
       };
       skills: {
         list(): Promise<SkillEntry[]>;
+        catalog: {
+          list(): Promise<BundledSkillCatalogEntry[]>;
+          install(id: string): Promise<
+            | { ok: true; skill: SkillEntry }
+            | { ok: false; reason: 'not_found' | 'already_exists' | 'blocked_path' | 'write_failed' }
+          >;
+        };
+        sources: {
+          list(): Promise<ManagedSkillSourceEntry[]>;
+          importLocalFile(): Promise<
+            | { ok: true; source: ManagedSkillSourceEntry }
+            | { ok: false; reason: 'cancelled' | 'invalid_skill' | 'already_exists' | 'blocked_path' | 'write_failed' }
+          >;
+        };
+        installManaged(sourceId: string): Promise<
+          | { ok: true; skill: SkillEntry }
+          | { ok: false; reason: 'not_found' | 'already_exists' | 'blocked_path' | 'write_failed' }
+        >;
+        details(skillId: string): Promise<
+          | { ok: true; details: SkillGovernanceDetails }
+          | { ok: false; reason: 'not_found' | 'invalid_id' }
+        >;
+        previewUpdate(skillId: string): Promise<
+          | { ok: true; preview: ManagedSkillUpdatePreview }
+          | { ok: false; reason: 'not_managed' | 'source_missing' | 'metadata_error' | 'blocked_path' | 'read_failed' }
+        >;
+        updateManaged(skillId: string, options?: { force?: boolean; expectedCurrentSha256?: string; expectedSourceSha256?: string }): Promise<
+          | { ok: true; skill: SkillEntry }
+          | { ok: false; reason: 'not_managed' | 'source_missing' | 'local_modified' | 'metadata_error' | 'blocked_path' | 'write_failed' }
+        >;
+        setEnabled(skillId: string, enabled: boolean): Promise<
+          | { ok: true; skill: SkillEntry }
+          | { ok: false; reason: 'not_found' | 'blocked_path' | 'state_error' | 'write_failed' }
+        >;
         createStarter(): Promise<
           | { ok: true; skill: SkillEntry; filePath: string }
           | { ok: false; reason: 'blocked_path' | 'already_exists' | 'write_failed' }

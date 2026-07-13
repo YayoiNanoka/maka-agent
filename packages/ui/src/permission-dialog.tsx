@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { PermissionRequestEvent, PermissionResponse } from '@maka/core';
-import { derivePermissionRequestHealth, formatPermissionRequestWait } from '@maka/core';
+import { derivePermissionRequestHealth, formatPermissionRequestWait, readWriteStdinInputPreview } from '@maka/core';
 import { AlertOctagon, AlertTriangle, FileEdit, GitMerge, Globe, HelpCircle, ShieldAlert, Terminal, Wifi } from './icons.js';
 import { Alert, AlertDescription } from './primitives/alert.js';
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from './primitives/collapsible.js';
@@ -114,7 +114,7 @@ export function PermissionDialog(props: {
       >
         <div className="maka-modal-header maka-permission-header">
           <span className="maka-permission-icon" aria-hidden="true">
-            <preset.Icon size={20} strokeWidth={1.75} />
+            <preset.Icon size={20} />
           </span>
           <div>
             <h2 className="maka-modal-title" id="permissionTitle">需要确认权限</h2>
@@ -185,10 +185,28 @@ export function PermissionDialog(props: {
           )}
         </div>
         <div className="maka-modal-footer permissionActions">
-          <UiButton className="maka-button" variant="ghost" type="button" disabled={responsePending} onClick={() => submit('deny')}>拒绝</UiButton>
+          {/* Designer audit P2-16: for destructive requests the confirm used
+              to be the dialog's ONLY solid colored button — muscle memory
+              clicks the brightest control, which is exactly wrong for an
+              irreversible action. Danger side drops to a red OUTLINE (still
+              unmistakably destructive, no longer the visual magnet) and the
+              safe side (拒绝) rises from ghost to secondary so both options
+              read as equally pressable. Non-destructive requests keep the
+              plain primary confirm. */}
           <UiButton
             className="maka-button"
-            variant={isDestructive ? 'destructive' : 'default'}
+            variant={isDestructive ? 'secondary' : 'ghost'}
+            type="button"
+            disabled={responsePending}
+            onClick={() => submit('deny')}
+          >
+            拒绝
+          </UiButton>
+          <UiButton
+            className={isDestructive
+              ? 'maka-button border border-[oklch(from_var(--destructive)_l_c_h_/_0.55)] bg-[oklch(from_var(--destructive)_l_c_h_/_0.08)] text-[color:var(--destructive)] hover:bg-[oklch(from_var(--destructive)_l_c_h_/_0.14)] active:bg-[oklch(from_var(--destructive)_l_c_h_/_0.18)]'
+              : 'maka-button'}
+            variant={isDestructive ? 'outline' : 'default'}
             type="button"
             disabled={responsePending}
             onClick={() => submit('allow')}
@@ -291,6 +309,33 @@ function renderPermissionSummary(request: PermissionRequestEvent): ReactNode | u
           <pre className="maka-code maka-permission-command">{redactSecrets(command)}</pre>
           {timeout !== undefined && (
             <p className="maka-permission-meta">超时 <strong>{timeout} ms</strong></p>
+          )}
+        </>
+      );
+    }
+    case 'WriteStdin': {
+      const input = readWriteStdinInputPreview(args);
+      const size = args.size && typeof args.size === 'object' && !Array.isArray(args.size)
+        ? args.size as Record<string, unknown>
+        : undefined;
+      const cols = typeof size?.cols === 'number' ? size.cols : undefined;
+      const rows = typeof size?.rows === 'number' ? size.rows : undefined;
+      if (!input && (cols === undefined || rows === undefined)) return undefined;
+      return (
+        <>
+          <p className="maka-permission-line">即将与后台终端交互：</p>
+          {input && (
+            <>
+              <pre className="maka-code maka-permission-preview">
+                {input.text}{input.truncated ? '…' : ''}
+              </pre>
+              {input.truncated && (
+                <p className="maka-permission-meta">完整输入共 <strong>{input.bytes}</strong> 字节</p>
+              )}
+            </>
+          )}
+          {cols !== undefined && rows !== undefined && (
+            <p className="maka-permission-meta">目标尺寸 <strong>{cols}x{rows}</strong></p>
           )}
         </>
       );

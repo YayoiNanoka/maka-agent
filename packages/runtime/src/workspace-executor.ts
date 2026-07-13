@@ -31,6 +31,8 @@ import { computeEditedSource, type EditMatchStrategy } from './edit-replace.js';
 import type { SandboxErrorDomain, SandboxErrorStage } from './sandbox/errors.js';
 import type { ToolExecutionPermissionContext } from './additional-permissions.js';
 import { assertSandboxEscalationGrantForExecution } from './sandbox-escalation.js';
+import type { ChildFdInput } from './child-fd-input.js';
+import type { ShellPlan } from './shell-detect.js';
 
 const execAsync = promisify(exec);
 
@@ -54,11 +56,16 @@ export interface WorkspacePermissionInput {
 
 export interface WorkspaceExecInput extends WorkspacePermissionInput {
   command: string;
+  /** Final executable argv. When provided, bypasses host-shell parsing. */
+  argv?: readonly string[];
+  env?: NodeJS.ProcessEnv;
+  fdInputs?: readonly ChildFdInput[];
   cwd: string;
   timeoutMs: number;
-  env?: NodeJS.ProcessEnv;
   abortSignal?: AbortSignal;
   emitOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void;
+  /** Shell to run the command with. The local executor defaults to the process-wide detected shell. */
+  shell?: ShellPlan;
 }
 
 export interface WorkspaceExecResult {
@@ -399,13 +406,18 @@ export class LocalWorkspaceExecutor implements WorkspaceExecutor {
   readonly facts = LOCAL_WORKSPACE_EXECUTOR_FACTS;
 
   async exec(input: WorkspaceExecInput): Promise<WorkspaceExecResult> {
-    const result = await runShellWithBoundedTail(input.command, {
+    const options = {
       cwd: input.cwd,
       timeoutMs: input.timeoutMs,
       ...(input.env ? { env: input.env } : {}),
+      ...(input.fdInputs ? { fdInputs: input.fdInputs } : {}),
       ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
       ...(input.emitOutput ? { emitOutput: input.emitOutput } : {}),
-    });
+      ...(input.shell ? { shell: input.shell } : {}),
+    };
+    const result = input.argv
+      ? await runProcessWithBoundedTail(input.argv[0] ?? '', input.argv.slice(1), options)
+      : await runShellWithBoundedTail(input.command, options);
     return {
       stdout: result.stdout,
       stderr: result.stderr,

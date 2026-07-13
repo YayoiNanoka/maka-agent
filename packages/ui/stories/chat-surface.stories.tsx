@@ -1,8 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import type { ComponentProps, ReactNode } from 'react';
 import type { SessionSummary, StoredMessage } from '@maka/core';
-import { ChatView, Composer } from '../src/components.js';
-import type { TurnFooterActionMeta } from '../src/chat-view.js';
+import { ChatView, Composer, type TurnFooterActionMeta } from '../src/components.js';
 import type { ChatModelChoice } from '../src/chat-model-helpers.js';
 
 const NOW = Date.UTC(2026, 6, 1, 9, 30, 0);
@@ -92,15 +91,12 @@ function turnState(turnId: string, status: Extract<StoredMessage, { type: 'turn_
 
 const baseChatProps: ChatViewProps = {
   messages: [],
-  streamingText: '',
-  tools: [],
   activeSession: session(),
   activeConnectionLabel: 'Anthropic',
   activeModel: 'claude-sonnet-4-5',
   activeModelLabel: 'Claude Sonnet 4.5',
   modelChoices,
   userLabel: '你',
-  mode: 'sessions',
   onNew: noop,
   onPromptSuggestion: noop,
 };
@@ -245,10 +241,14 @@ const toolConversation: StoredMessage[] = [
       cmd: 'npm run -w @maka/desktop build-storybook',
       status: 'completed',
       exitCode: 0,
-      stdout: 'storybook v10.4.6\ninfo => Output directory: apps/desktop/storybook-static\n',
-      stderr: '',
-      stdoutTruncated: false,
-      stderrTruncated: false,
+      output: {
+        mode: 'pipes',
+        stdout: 'storybook v10.4.6\ninfo => Output directory: apps/desktop/storybook-static\n',
+        stderr: '',
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        redacted: false,
+      },
     },
   },
   assistant(
@@ -295,6 +295,96 @@ const longMessages: StoredMessage[] = [
   ),
 ];
 
+// Multi-step reasoning turn (streaming UI rework): two think->say->call steps
+// in a single turn. Each step persists an assistant row (thinking + text) plus
+// tool_calls tagged with that row's id as `stepId`, so the turn timeline
+// reconstructs the real order — 深度思考 → answer text → tool trow — per step,
+// instead of lumping every tool into one trailing group.
+const multiStepConversation: StoredMessage[] = [
+  user('msg-user-multistep', 'turn-multistep', 12, '看一下 stream-fade 的环逻辑有没有边界问题，然后跑一下单测。'),
+  {
+    type: 'tool_call',
+    id: 'tool-read-stream-fade',
+    turnId: 'turn-multistep',
+    ts: NOW - 11 * 60_000,
+    toolName: 'Read',
+    displayName: '读取 stream-fade.ts',
+    intent: '读取淡入环的实现，确认窗口滑动与上限',
+    stepId: 'msg-assistant-step-1',
+    args: { file_path: 'packages/ui/src/stream-fade.ts' },
+  },
+  {
+    type: 'tool_result',
+    id: 'tool-read-stream-fade-result',
+    turnId: 'turn-multistep',
+    ts: NOW - 11 * 60_000 + 900,
+    toolUseId: 'tool-read-stream-fade',
+    isError: false,
+    durationMs: 640,
+    content: {
+      kind: 'text',
+      text: 'export function updateFadeRing(...) { /* prune + cap */ }',
+    },
+  },
+  {
+    type: 'assistant',
+    id: 'msg-assistant-step-1',
+    turnId: 'turn-multistep',
+    ts: NOW - 10 * 60_000,
+    text: '环逻辑没问题：增长记录批次、超窗剪枝、再按上限截断，收缩时整体重置。接下来我跑一下单测确认。',
+    thinking: {
+      text: '先读实现，确认 boundary 取的是最老存活批次的 start，age 用 now 减去覆盖该 offset 的批次时间。看起来窗口滑动和上限都覆盖了，值得跑一遍测试坐实。',
+    },
+    modelId: 'claude-sonnet-4-5',
+  },
+  {
+    type: 'tool_call',
+    id: 'tool-run-tests',
+    turnId: 'turn-multistep',
+    ts: NOW - 10 * 60_000 + 500,
+    toolName: 'Bash',
+    displayName: '运行 stream-fade 单测',
+    intent: '执行 node --test 跑淡入环与 tokenizer 的单测',
+    stepId: 'msg-assistant-step-2',
+    args: { cmd: 'node --test dist/main/__tests__/stream-fade.test.js' },
+  },
+  {
+    type: 'tool_result',
+    id: 'tool-run-tests-result',
+    turnId: 'turn-multistep',
+    ts: NOW - 9 * 60_000,
+    toolUseId: 'tool-run-tests',
+    isError: false,
+    durationMs: 1930,
+    content: {
+      kind: 'terminal',
+      cwd: '/workspace/maka-agent/apps/desktop',
+      cmd: 'node --test dist/main/__tests__/stream-fade.test.js',
+      status: 'completed',
+      exitCode: 0,
+      output: {
+        mode: 'pipes',
+        stdout: 'tests 13\npass 13\nfail 0\n',
+        stderr: '',
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        redacted: false,
+      },
+    },
+  },
+  {
+    type: 'assistant',
+    id: 'msg-assistant-step-2',
+    turnId: 'turn-multistep',
+    ts: NOW - 8 * 60_000,
+    text: '13 个单测全绿，环的窗口滑动、乱序快照取龄和上限都被覆盖。边界没有问题。',
+    thinking: {
+      text: '测试包含窗口滑动、乱序 age 查询与上限三类，全过说明剪枝和 cap 的顺序是对的，可以收尾。',
+    },
+    modelId: 'claude-sonnet-4-5',
+  },
+];
+
 export const EmptyChat: Story = {
   render: () => (
     <ChatSurface
@@ -327,7 +417,13 @@ export const StreamingResponse: Story = {
           user('msg-user-streaming', 'turn-streaming', 6, '用三句话说明这个 PR 的 review 重点。'),
           turnState('turn-streaming', 'running'),
         ],
-        streamingText: '第一，状态覆盖要完整。第二，fixture 要小，不复制 app shell。第三，验证以 Storybook build 和 typecheck 为准。',
+        liveTurn: {
+          turnId: 'turn-streaming', phase: 'streamed', steps: [{
+            stepId: 'msg-assistant-streaming',
+            text: { text: '第一，状态覆盖要完整。第二，fixture 要小，不复制 app shell。第三，验证以 Storybook build 和 typecheck 为准。', truncated: false, complete: false },
+            tools: [],
+          }],
+        },
       }}
       composer={{
         streaming: true,
@@ -341,6 +437,16 @@ export const WithToolActivity: Story = {
     <ChatSurface
       chat={{
         messages: toolConversation,
+      }}
+    />
+  ),
+};
+
+export const MultiStepReasoning: Story = {
+  render: () => (
+    <ChatSurface
+      chat={{
+        messages: multiStepConversation,
       }}
     />
   ),

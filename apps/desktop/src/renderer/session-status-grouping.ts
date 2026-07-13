@@ -1,6 +1,5 @@
 /**
- * Pure derivation of sidebar session grouping by status (PR109b,
- * design-system §9.8).
+ * Pure derivation of sidebar session grouping by status.
  *
  * Extracted from the React component layer so the group ordering +
  * filtering + per-group counts can be unit-tested with node:test (no
@@ -30,8 +29,8 @@ import type { SessionStatus, SessionSummary } from '@maka/core';
 
 /**
  * Stable group ordering. Used by both the renderer and node:test
- * gates; do NOT reorder without updating §9.8 docs and the smoke
- * Path.
+ * gates; do not reorder without updating those tests and the screenshot
+ * fixture.
  */
 export const SESSION_STATUS_GROUP_ORDER = [
   'running',
@@ -79,7 +78,7 @@ const GROUP_LABEL: Record<SessionGroupId, string> = {
   pinned: '已置顶',
   running: '进行中',
   waiting_for_user: '等待你',
-  blocked: '已阻塞',
+  blocked: '需要处理',
   active: '会话',
   review: '待审核',
   done: '已完成',

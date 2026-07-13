@@ -10,6 +10,8 @@ import {
   buildHarborCellTaskLedgerExperimentPolicy,
   harborCellMaxStepsFromEnv,
   normalizeHarborCellContextEnv,
+  providerApiKeyEnvName,
+  reasoningEffortFromEnv,
   runHarborCell,
 } from '#harbor-cell';
 
@@ -24,6 +26,7 @@ const HOST_BACKEND_ENV_KEYS = [
   ...TRIAL_PRICING_ENV,
   'MAKA_OUTPUT_DIR',
   'MAKA_STORAGE_ROOT',
+  'MAKA_REASONING_EFFORT',
 ];
 export async function main(options = {}) {
   const env = process.env;
@@ -37,6 +40,7 @@ export async function main(options = {}) {
   const economyTaskMode = economyTaskModeFromEnv(env.MAKA_ECONOMY_TASK_MODE);
   const taskLedgerExperimentPolicy = buildHarborCellTaskLedgerExperimentPolicy(env);
   const maxSteps = harborCellMaxStepsFromEnv(env);
+  const reasoningEffort = reasoningEffortFromEnv(env.MAKA_REASONING_EFFORT);
   const now = Date.now;
   const newId = randomId;
 
@@ -46,6 +50,7 @@ export async function main(options = {}) {
       backend: 'ai-sdk',
       llmConnectionSlug: env.MAKA_LLM_CONNECTION_SLUG || provider,
       model,
+      ...(reasoningEffort ? { thinkingLevel: reasoningEffort } : {}),
       ...(env.MAKA_SYSTEM_PROMPT !== undefined ? { systemPrompt: env.MAKA_SYSTEM_PROMPT } : {}),
       ...(economyTaskMode !== undefined ? { economyTaskMode } : {}),
     },
@@ -53,6 +58,7 @@ export async function main(options = {}) {
     cwd: env.MAKA_WORKDIR || process.cwd(),
     outputDir,
     storageRoot,
+    pricingProfile: env.MAKA_TRIAL_PRICING_SOURCE || 'unconfigured',
     ...(contextBudgetPolicy ? { contextBudgetPolicy } : {}),
     ...(continuationPolicy ? { continuationPolicy } : {}),
     ...(taskLedgerExperimentPolicy ? { taskToolSummaryEnabled: true } : {}),
@@ -88,7 +94,7 @@ function economyTaskModeFromEnv(value) {
 }
 
 export async function backendEnv(env, provider) {
-  const keyEnvName = env.MAKA_HOST_API_KEY_ENV_NAME || defaultKeyEnvName(provider);
+  const keyEnvName = env.MAKA_HOST_API_KEY_ENV_NAME || providerApiKeyEnvName(provider);
   const apiKey = await hostApiKey(env);
   const contextEnv = normalizeHarborCellContextEnv(env);
   const result = {
@@ -150,27 +156,6 @@ function providerFromModel(rawModel) {
 function stripProvider(rawModel, provider) {
   const prefix = `${provider}/`;
   return rawModel.startsWith(prefix) ? rawModel.slice(prefix.length) : rawModel;
-}
-
-function defaultKeyEnvName(provider) {
-  switch (provider) {
-    case 'deepseek':
-      return 'DEEPSEEK_API_KEY';
-    case 'moonshot':
-      return 'MOONSHOT_API_KEY';
-    case 'google':
-      return 'GOOGLE_API_KEY';
-    case 'anthropic':
-    case 'kimi-coding-plan':
-    case 'claude-subscription':
-      return 'ANTHROPIC_API_KEY';
-    case 'zai-coding-plan':
-      return 'ZAI_API_KEY';
-    case 'openai':
-    case 'openai-compatible':
-    default:
-      return 'OPENAI_API_KEY';
-  }
 }
 
 function requiredEnv(env, name) {

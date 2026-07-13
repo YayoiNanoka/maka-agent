@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { LlmConnection } from '@maka/core';
 import { thinkingVariantsForModel, type ThinkingLevel } from '@maka/core';
-import { changesBackendConfig, buildProviderOptions } from '@maka/runtime';
+import { changesBackendConfig, buildProviderOptions, getAIModel } from '@maka/runtime';
 
 function conn(providerType: LlmConnection['providerType'], slug = 'test'): LlmConnection {
   return {
@@ -74,6 +74,19 @@ describe('buildProviderOptions: thinking level', () => {
   test('a level the model does not support is dropped (defensive)', () => {
     assert.deepEqual(buildProviderOptions(conn('openai'), 'gpt-4o', 'high'), { openai: {} });
     assert.deepEqual(buildProviderOptions(conn('anthropic'), 'claude-haiku-4-5', 'max'), { anthropic: {} });
+  });
+});
+
+describe('getAIModel: models.dev registry providers', () => {
+  test('routes SiliconFlow through the shared OpenAI-compatible adapter without rewriting model ids', () => {
+    const model = getAIModel({
+      connection: conn('siliconflow'),
+      apiKey: 'sf-test-key',
+      modelId: 'moonshotai/Kimi-K2.6',
+    });
+
+    assert.equal(model.provider, 'siliconflow.chat');
+    assert.equal(model.modelId, 'moonshotai/Kimi-K2.6');
   });
 });
 

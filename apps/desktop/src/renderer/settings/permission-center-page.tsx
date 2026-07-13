@@ -18,9 +18,10 @@ import type {
   PermissionSnapshot,
 } from '@maka/core';
 import { OS_PERMISSION_IDS } from '@maka/core';
-import { Button, Badge, RelativeTime, useToast } from '@maka/ui';
+import { Button, Badge, EmptyState, RelativeTime, PageHeader, SectionHeader, StatTile, useMountedRef, useToast } from '@maka/ui';
 import { settingsActionErrorMessage } from './settings-error-copy';
 import { statusBadgeVariant } from './settings-status-badge';
+import { SettingsSkeletonStack } from './settings-skeleton';
 
 /**
  * PR-UI-8 — Permission Center read-only page. Consumes `window.maka.permissions.getSnapshot()`
@@ -91,7 +92,9 @@ const OS_PERMISSION_STATE_COPY: Record<OsPermissionState, { label: string; tone:
   unknown: { label: '无法读取状态', tone: 'neutral' },
   not_determined: { label: '等待授权', tone: 'warning' },
   denied: { label: '已拒绝', tone: 'destructive' },
-  granted: { label: '已授权', tone: 'success' },
+  // Status-color restraint: granted is the expected state — neutral badge;
+  // color is reserved for the states that need the user's attention.
+  granted: { label: '已授权', tone: 'neutral' },
 };
 
 const OFFICECLI_INSTALL_COMMAND = 'curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.sh | bash';
@@ -106,13 +109,11 @@ export function PermissionCenterPage() {
   const [pendingPermAction, setPendingPermAction] = useState<string | null>(null);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const toast = useToast();
-  const mountedRef = useRef(true);
+  const mountedRef = useMountedRef();
   const pendingPermActionRef = useRef<string | null>(null);
 
   useEffect(() => {
-    mountedRef.current = true;
     return () => {
-      mountedRef.current = false;
       pendingPermActionRef.current = null;
     };
   }, []);
@@ -173,12 +174,7 @@ export function PermissionCenterPage() {
 
   if (loading) {
     return (
-      <div className="maka-skeleton-stack" aria-busy="true" aria-label="正在加载权限快照">
-        <div className="maka-skeleton maka-skeleton-line" data-size="lg" style={{ width: '38%' }} />
-        <div className="maka-skeleton maka-skeleton-line" style={{ width: '72%' }} />
-        <div className="maka-skeleton maka-skeleton-line" style={{ width: '60%' }} />
-        <div className="maka-skeleton maka-skeleton-line" style={{ width: '80%' }} />
-      </div>
+      <SettingsSkeletonStack label="正在加载权限快照" />
     );
   }
 
@@ -201,28 +197,27 @@ export function PermissionCenterPage() {
 
   return (
     <div className="settingsPermissionPage">
-      <header className="settingsPermissionIntro">
-        <div>
-          <h3>权限与能力</h3>
-          <p>
-            查看 Maka 需要的系统权限和当前授权状态，
-            直接从这里前往「系统设置 → 隐私与安全性」完成授权或撤销，不必自己翻菜单。
-          </p>
-        </div>
-        <div className="settingsPermissionMeta">
-          <small>
-            最近读取：<RelativeTime ts={checkedAtMs} className="settingsHelpInlineTime" />
-          </small>
-          <Button
-            type="button"
-            className="settingsPermissionRefresh"
-            variant="secondary"
-            onClick={() => setRefreshTick((tick) => tick + 1)}
-          >
-            重新检测
-          </Button>
-        </div>
-      </header>
+      <PageHeader
+        className="settingsPermissionIntro"
+        as="h3"
+        title="权限与能力"
+        subtitle="查看 Maka 需要的系统权限和当前授权状态，直接从这里前往「系统设置 → 隐私与安全性」完成授权或撤销，不必自己翻菜单。"
+        meta={
+          <div className="settingsPermissionMeta">
+            <small>
+              最近读取：<RelativeTime ts={checkedAtMs} className="settingsHelpInlineTime" />
+            </small>
+            <Button
+              type="button"
+              className="settingsPermissionRefresh"
+              variant="secondary"
+              onClick={() => setRefreshTick((tick) => tick + 1)}
+            >
+              重新检测
+            </Button>
+          </div>
+        }
+      />
 
       <section className="settingsPermissionSummary" aria-label="权限概览">
         <PermissionSummaryTile label="已授权" value={counts.granted} tone="success" />
@@ -251,21 +246,23 @@ export function PermissionCenterPage() {
       </section>
 
       <section aria-label="功能能力" className="settingsPermissionSection">
-        <header className="settingsPermissionSectionHeader">
-          <div>
-            <h4>功能能力</h4>
-            <small>每个能力的就绪状态由「功能开关 · 配置 · 系统权限 · 运行态探测」共同决定。</small>
-          </div>
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            onClick={() => setDiagnosticsOpen((open) => !open)}
-            aria-expanded={diagnosticsOpen}
-          >
-            {diagnosticsOpen ? '收起详情' : '展开详情'}
-          </Button>
-        </header>
+        <SectionHeader
+          className="settingsPermissionSectionHeader"
+          as="h4"
+          title="功能能力"
+          subtitle="每个能力的就绪状态由「功能开关 · 配置 · 系统权限 · 运行态探测」共同决定。"
+          action={
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => setDiagnosticsOpen((open) => !open)}
+              aria-expanded={diagnosticsOpen}
+            >
+              {diagnosticsOpen ? '收起详情' : '展开详情'}
+            </Button>
+          }
+        />
         <ul className="settingsCapabilityList" aria-label="功能能力列表" data-diagnostics-open={diagnosticsOpen ? 'true' : undefined}>
           {capabilities.capabilities.map((capability) => (
             <CapabilityRow key={capability.id} capability={capability} />
@@ -287,11 +284,15 @@ function PermissionSummaryTile(props: {
   value: number;
   tone: 'success' | 'warning' | 'destructive' | 'neutral';
 }) {
+  // Convergence R4: StatTile owns the recipe (incl. the zero-is-not-an-
+  // exception tone gate this tile pioneered).
   return (
-    <div className="settingsPermissionSummaryTile" data-tone={props.tone}>
-      <span className="settingsPermissionSummaryValue">{props.value}</span>
-      <span className="settingsPermissionSummaryLabel">{props.label}</span>
-    </div>
+    <StatTile
+      className="settingsPermissionSummaryTile"
+      label={props.label}
+      value={props.value}
+      tone={props.tone}
+    />
   );
 }
 
@@ -475,7 +476,7 @@ function CapabilityRow(props: { capability: CapabilitySnapshot }) {
       */}
       <div className="settingsCapabilityAuditSlot" aria-hidden={capability.auditEvents.length === 0}>
         {capability.auditEvents.length === 0 ? (
-          <small>暂无审计记录。</small>
+          <EmptyState variant="inline" title="暂无审计记录" body="" />
         ) : (
           <ul aria-label={`${capability.label}审计记录列表`}>
             {capability.auditEvents.slice(-3).map((event, index) => (
@@ -509,7 +510,7 @@ function OsPermissionRow(props: {
   return (
     <li className="settingsOsPermissionRow" data-state={snapshot.status}>
       <div className="settingsOsPermissionIcon" aria-hidden="true">
-        {Icon ? <Icon size={18} strokeWidth={1.6} /> : null}
+        {Icon ? <Icon size={18} /> : null}
       </div>
       <div className="settingsOsPermissionBody">
         <div className="settingsOsPermissionHeading">
@@ -536,10 +537,14 @@ function OsPermissionRow(props: {
           request flow for the permission), it still falls under the
           primary slot — no awkward "lonely secondary" state. */}
       <div className="settingsOsPermissionActions">
+        {/* Affordance honesty (round 8): ghost next to the primary read as a
+            plain text label — a clickable action sitting beside a real button
+            needs its own visible edge. Secondary keeps it quieter than
+            请求授权 without hiding that it's a button. */}
         {showOpenSettings && (
           <Button
             type="button"
-            variant={showRequest ? 'ghost' : 'default'}
+            variant={showRequest ? 'secondary' : 'default'}
             size="sm"
             onClick={props.onOpenSettings}
             disabled={busy}

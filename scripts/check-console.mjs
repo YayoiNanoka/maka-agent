@@ -82,6 +82,22 @@ const ALLOW = new Map([
     'scripts/check-console.mjs',
     'this script — explicit allow.',
   ],
+  [
+    'apps/desktop/src/main/automation-wiring.ts',
+    'best-effort sync warning when durable automation persistence fails.',
+  ],
+  [
+    'packages/storage/src/automation-store.ts',
+    'best-effort warning when automation store read/write fails.',
+  ],
+  [
+    'packages/cli/src/runtime-bootstrap.ts',
+    'best-effort warning when CLI durable automation persistence fails.',
+  ],
+  [
+    'packages/core/src/shell-run-result.ts',
+    'ShellRun reconciliation invariant diagnostics contain only runtime refs and revisions, never command or output data.',
+  ],
 ]);
 
 async function walk(root) {

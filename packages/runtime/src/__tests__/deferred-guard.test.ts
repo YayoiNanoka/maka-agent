@@ -6,12 +6,14 @@ import type { SessionHeader } from '@maka/core/session';
 import type { StoredMessage } from '@maka/core/session';
 import type { ToolExecutionFacts } from '@maka/core/permission';
 import type { ActiveSandboxCapabilities } from '../sandbox/active-capabilities.js';
+import { projectToolActivityArgs } from '@maka/core';
 
 import {
   ToolRuntime,
   formatDeferredNotLoadedText,
   type MakaTool,
 } from '../tool-runtime.js';
+import { mapSessionEventToRuntimeEvent } from '../ai-sdk-flow.js';
 import { PermissionEngine, type EvaluateInput } from '../permission-engine.js';
 
 // The execute-boundary guard rejects a *gated* tool whose name is absent from
@@ -48,6 +50,7 @@ interface Harness {
   pushed: SessionEvent[];
   evaluateCalls: string[];
   evaluateInputs: EvaluateInput[];
+  invocationArgsSummaries: string[];
 }
 
 function makeHarness(sandboxCapabilities?: ActiveSandboxCapabilities): Harness {
@@ -55,6 +58,7 @@ function makeHarness(sandboxCapabilities?: ActiveSandboxCapabilities): Harness {
   const pushed: SessionEvent[] = [];
   const evaluateCalls: string[] = [];
   const evaluateInputs: EvaluateInput[] = [];
+  const invocationArgsSummaries: string[] = [];
   const engine = new PermissionEngine({ newId: () => 'perm', now: () => 1 });
   const realEvaluate = engine.evaluate.bind(engine);
   // Spy: record whether the guard let execution reach permission evaluation.
@@ -75,8 +79,11 @@ function makeHarness(sandboxCapabilities?: ActiveSandboxCapabilities): Harness {
     now: () => 1,
     getPermissionPauseTarget: () => null,
     ...(sandboxCapabilities ? { sandboxCapabilities } : {}),
+    recordToolInvocation: (record) => {
+      invocationArgsSummaries.push(record.argsSummary ?? '');
+    },
   });
-  return { runtime, appended, pushed, evaluateCalls, evaluateInputs };
+  return { runtime, appended, pushed, evaluateCalls, evaluateInputs, invocationArgsSummaries };
 }
 
 function tool(name: string, implCalls: string[]): MakaTool {
@@ -88,9 +95,9 @@ function tool(name: string, implCalls: string[]): MakaTool {
   };
 }
 
-function run(h: Harness, t: MakaTool) {
+function run(h: Harness, t: MakaTool, args: unknown = {}) {
   const exec = h.runtime.wrapToolExecute(t, 'turn-1', { push: (e) => h.pushed.push(e) });
-  return exec({}, { toolCallId: 'tc1', abortSignal: new AbortController().signal });
+  return exec(args, { toolCallId: 'tc1', abortSignal: new AbortController().signal });
 }
 
 describe('tool-availability execute-boundary guard', () => {
@@ -117,6 +124,69 @@ describe('tool-availability execute-boundary guard', () => {
     assert.deepEqual(h.evaluateCalls, ['Read']);
     assert.ok('error' in (result as object));
     assert.ok(!h.pushed.some((event) => event.type === 'permission_request'));
+  });
+
+  test('projects a declared activity kind into persisted and live tool facts', async () => {
+    const h = makeHarness();
+    const implCalls: string[] = [];
+    const t = Object.assign(tool('CustomCommand', implCalls), {
+      activityKind: 'command' as const,
+      permissionRequired: false,
+    });
+
+    await run(h, t);
+
+    const call = h.appended.find((message) => message.type === 'tool_call') as unknown as { activityKind?: string };
+    const start = h.pushed.find((event) => event.type === 'tool_start') as unknown as { activityKind?: string };
+    assert.equal(call.activityKind, 'command');
+    assert.equal(start.activityKind, 'command');
+  });
+
+  test('keeps WriteStdin args exact across canonical ledgers and projects telemetry', async () => {
+    const h = makeHarness();
+    const implCalls: string[] = [];
+    const t = Object.assign(tool('WriteStdin', implCalls), { permissionRequired: false });
+    const args = {
+      ref: 'maka://runtime/background-tasks/pty-1',
+      input: 'password=ordinary-audited-input\r',
+      size: { cols: 100, rows: 30 },
+    };
+
+    await run(h, t, args);
+
+    const call = h.appended.find((message) => message.type === 'tool_call');
+    const start = h.pushed.find(
+      (event): event is Extract<SessionEvent, { type: 'tool_start' }> => event.type === 'tool_start',
+    );
+    assert.ok(call?.type === 'tool_call');
+    assert.ok(start);
+    assert.deepEqual(call.args, args);
+    assert.deepEqual(start.args, args);
+
+    const runtimeEvent = mapSessionEventToRuntimeEvent(start, {
+      sessionId: 'session-1',
+      invocationId: 'inv-1',
+      runId: 'run-1',
+      turnId: 'turn-1',
+      source: 'test',
+      startedAt: 1,
+      request: {
+        sessionId: 'session-1',
+        invocationId: 'inv-1',
+        runId: 'run-1',
+        turnId: 'turn-1',
+        text: 'test',
+        source: 'test',
+      },
+      newId: () => 'runtime-event-1',
+      now: () => 1,
+    });
+    assert.equal(runtimeEvent.content?.kind, 'function_call');
+    assert.deepEqual(runtimeEvent.content?.kind === 'function_call' ? runtimeEvent.content.args : undefined, args);
+    assert.deepEqual(
+      JSON.parse(h.invocationArgsSummaries[0] ?? 'null'),
+      projectToolActivityArgs('WriteStdin', args),
+    );
   });
 
   test('passes tool execution facts into permission evaluation', async () => {

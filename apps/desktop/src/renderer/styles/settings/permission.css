@@ -147,9 +147,8 @@
     border-color: oklch(from var(--warning, var(--info)) l c h / 0.28);
   }
 
-.settingsCapabilityRow[data-readiness="enabled"] {
-    border-color: oklch(from var(--success) l c h / 0.24);
-  }
+/* Status-color restraint: "enabled" is the expected state — it keeps the
+   default hairline. Only exceptions (denied/degraded) wear a colored border. */
 
 .settingsCapabilityHeader {
     display: flex;
@@ -220,7 +219,8 @@
     color: var(--muted-foreground);
   }
 
-.settingsCapabilityLayers dd[data-tone="success"] { color: var(--success-text); }
+/* data-tone="success" intentionally has no rule — a healthy layer reads
+   in the default ink; color is reserved for warning/destructive/info. */
 
 .settingsCapabilityLayers dd[data-tone="warning"] { color: var(--warning-text, var(--info-text)); }
 
@@ -273,10 +273,8 @@
     color: var(--foreground-secondary);
   }
 
-.settingsCapabilityOsPermissions li em[data-tone="success"] {
-    color: var(--success-text);
-    background: oklch(from var(--success) l c h / 0.10);
-  }
+/* success chips fall through to the neutral base above — granted is the
+   expected state and doesn't need a green pill. */
 
 .settingsCapabilityOsPermissions li em[data-tone="warning"] {
     color: var(--warning-text, var(--info-text));
@@ -451,7 +449,7 @@
   }
 
 .settingsOsPermissionHeading strong {
-    font-size: var(--font-size-base);
+    font-size: var(--font-size-heading);
     font-weight: var(--font-weight-semibold);
     color: var(--foreground);
   }
@@ -514,9 +512,12 @@
      granted are visible at a glance without re-introducing per-row
      borders that fight the unified card. */
 
+/* Status-color restraint: granted is the expected state — no stripe, no
+   green icon fill; the row label already says 已授权. Only the exception
+   states (denied / not_determined) keep an edge stripe. */
+
 .settingsOsPermissionRow[data-state="denied"]::before,
-  .settingsOsPermissionRow[data-state="not_determined"]::before,
-  .settingsOsPermissionRow[data-state="granted"]::before {
+  .settingsOsPermissionRow[data-state="not_determined"]::before {
     content: "";
     position: absolute;
     left: 0;
@@ -533,15 +534,6 @@
     background: oklch(from var(--warning, var(--info)) l c h / 0.55);
   }
 
-.settingsOsPermissionRow[data-state="granted"]::before {
-    background: oklch(from var(--success) l c h / 0.45);
-  }
-
-.settingsOsPermissionRow[data-state="granted"] .settingsOsPermissionIcon {
-    background: oklch(from var(--success) l c h / 0.08);
-    color: oklch(from var(--success) l c h);
-  }
-
 /* PR-PERMISSION-PAGE-REDESIGN: 4-cell summary above system permissions.
      Quick read of overall posture (X granted / Y waiting / Z denied /
      W other) so users see what's configured at a glance. */
@@ -552,54 +544,8 @@
     gap: var(--space-2);
   }
 
-.settingsPermissionSummaryTile {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-0-5);
-    padding: var(--space-3) var(--space-3);
-    border: var(--border-width-hairline) solid var(--card-border-color, var(--border));
-    border-radius: var(--radius-surface);
-    background: var(--card-bg, var(--background));
-    box-shadow:
-      var(--card-shadow, none),
-      var(--card-highlight, none);
-  }
-
-.settingsPermissionSummaryValue {
-    font-size: 1.5em;
-    font-weight: var(--font-weight-semibold);
-    line-height: var(--leading-tight);
-    font-variant-numeric: tabular-nums;
-    color: var(--foreground);
-  }
-
-.settingsPermissionSummaryLabel {
-    font-size: var(--font-size-caption);
-    color: var(--foreground-secondary);
-    letter-spacing: var(--tracking-wide);
-  }
-
-.settingsPermissionSummaryTile[data-tone="success"] .settingsPermissionSummaryValue {
-    color: oklch(from var(--success) l c h);
-  }
-
-.settingsPermissionSummaryTile[data-tone="warning"] .settingsPermissionSummaryValue {
-    color: var(--warning-text, var(--info-text));
-  }
-
-.settingsPermissionSummaryTile[data-tone="destructive"] .settingsPermissionSummaryValue {
-    color: oklch(from var(--destructive) l c h);
-  }
-
 /* Diagnostic 5-column capability detail collapsed by default so the
      page reads as "system permissions" first. Expand on click. */
-
-.settingsPermissionSectionHeader {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: var(--space-3);
-  }
 
 .settingsCapabilityList:not([data-diagnostics-open="true"]) .settingsCapabilityLayers,
   .settingsCapabilityList:not([data-diagnostics-open="true"]) .settingsCapabilityGuidance,

@@ -90,23 +90,114 @@ describe('PermissionEngine.evaluate — allow path', () => {
     expect(r3.kind).toBe('prompt');
   });
 
-  test('execution facts are accepted without changing current policy decisions', () => {
+});
+
+describe('PermissionEngine.evaluate — invocation-local rules', () => {
+  test('explicit deny wins over allow and applies to permission-free tools in bypass mode', () => {
     const { engine } = makeEngine();
     engine.beginTurn('t1');
-    const r = engine.evaluate({
+    const result = engine.evaluate({
+      sessionId: 's1',
+      turnId: 't1',
+      toolUseId: 'tu1',
+      toolName: 'Read',
+      args: { path: '/repo/file.ts' },
+      mode: 'bypass',
+      permissionRequired: false,
+      permissionRules: [
+        { effect: 'allow', kind: 'category', category: 'read' },
+        { effect: 'deny', kind: 'category', category: 'read' },
+      ],
+    });
+
+    assert.equal(result.kind, 'block');
+    if (result.kind !== 'block') return;
+    assert.equal(result.category, 'read');
+    assert.equal(result.decisionEvent?.decision, 'deny');
+    assert.equal(result.decisionEvent?.toolUseId, 'tu1');
+  });
+
+  test('explicit category allow overrides the explore policy block', () => {
+    const { engine } = makeEngine();
+    const result = engine.evaluate({
+      sessionId: 's1',
+      turnId: 't1',
+      toolUseId: 'tu1',
+      toolName: 'Write',
+      args: { path: '/repo/file.ts' },
+      mode: 'explore',
+      permissionRules: [{ effect: 'allow', kind: 'category', category: 'file_write' }],
+    });
+
+    assert.equal(result.kind, 'allow');
+  });
+
+  test('Bash rules use exact command equality without whitespace rewriting', () => {
+    const rules = [{ effect: 'allow', kind: 'bash_exact', command: 'npm  test' }] as const;
+    const { engine } = makeEngine();
+    const exact = engine.evaluate({
       sessionId: 's1',
       turnId: 't1',
       toolUseId: 'tu1',
       toolName: 'Bash',
-      args: { command: 'npm install lodash' },
-      mode: 'execute',
-      executionFacts: LOCAL_EXECUTION_FACTS,
+      args: { command: 'npm  test' },
+      mode: 'explore',
+      permissionRules: rules,
+    });
+    const normalized = engine.evaluate({
+      sessionId: 's1',
+      turnId: 't1',
+      toolUseId: 'tu2',
+      toolName: 'Bash',
+      args: { command: 'npm test' },
+      mode: 'explore',
+      permissionRules: rules,
     });
 
-    expect(r.kind).toBe('allow');
-    if (r.kind === 'allow') {
-      expect(r.category).toBe('shell_unsafe');
-    }
+    assert.equal(exact.kind, 'allow');
+    assert.equal(normalized.kind, 'block');
+  });
+
+  test('exact tool rules authorize WriteStdin without authorizing Bash', () => {
+    const rules = [{ effect: 'allow', kind: 'tool', toolName: 'WriteStdin' }] as const;
+    const { engine } = makeEngine();
+    const writeStdin = engine.evaluate({
+      sessionId: 's1',
+      turnId: 't1',
+      toolUseId: 'tu1',
+      toolName: 'WriteStdin',
+      args: { ref: 'maka://runtime/background-tasks/pty-1', input: '\\r' },
+      mode: 'explore',
+      permissionRules: rules,
+    });
+    const bash = engine.evaluate({
+      sessionId: 's1',
+      turnId: 't1',
+      toolUseId: 'tu2',
+      toolName: 'Bash',
+      args: { command: 'echo no' },
+      mode: 'explore',
+      permissionRules: rules,
+    });
+
+    assert.equal(writeStdin.kind, 'allow');
+    assert.equal(bash.kind, 'block');
+  });
+
+  test('an unrelated rule preserves the permission-free tool fast path', () => {
+    const { engine } = makeEngine();
+    const result = engine.evaluate({
+      sessionId: 's1',
+      turnId: 't1',
+      toolUseId: 'tu1',
+      toolName: 'Read',
+      args: { path: '/repo/file.ts' },
+      mode: 'explore',
+      permissionRequired: false,
+      permissionRules: [{ effect: 'deny', kind: 'category', category: 'file_write' }],
+    });
+
+    assert.equal(result.kind, 'allow');
   });
 });
 
@@ -191,6 +282,44 @@ describe('PermissionEngine.evaluate — block path', () => {
 });
 
 describe('PermissionEngine.evaluate — prompt path', () => {
+  test('allows execute shell_unsafe when the runtime reports an enforceable sandbox', () => {
+    const { engine } = makeEngine();
+    engine.beginTurn('t1');
+    const r = engine.evaluate({
+      sessionId: 's1',
+      turnId: 't1',
+      toolUseId: 'tu1',
+      toolName: 'Bash',
+      args: { command: 'npm install lodash' },
+      mode: 'execute',
+      sandbox: { requirement: 'command', status: 'available' },
+    });
+
+    expect(r.kind).toBe('allow');
+  });
+
+  test('execution facts are accepted but do not (yet) downgrade host-local shell to allow', () => {
+    // executionFacts is plumbed for forward-compat: a future sandbox-aware
+    // policy may auto-allow unsafe shell inside an isolated worktree. On the
+    // HOST (isolation: 'none') execute mode is fail-closed, so an unrecognized
+    // command prompts regardless of the facts being present.
+    const { engine } = makeEngine();
+    engine.beginTurn('t1');
+    const r = engine.evaluate({
+      sessionId: 's1',
+      turnId: 't1',
+      toolUseId: 'tu1',
+      toolName: 'Bash',
+      args: { command: 'npm install lodash' },
+      mode: 'execute',
+      executionFacts: LOCAL_EXECUTION_FACTS,
+    });
+    expect(r.kind).toBe('prompt');
+    if (r.kind === 'prompt') {
+      expect(r.event.category).toBe('shell_unsafe');
+    }
+  });
+
   test('emits PermissionRequestEvent with stable requestId', () => {
     const { engine, deps: _deps } = makeEngine();
     engine.beginTurn('t1');
@@ -208,6 +337,31 @@ describe('PermissionEngine.evaluate — prompt path', () => {
     expect(r.event.turnId).toBe('t1');
     expect(r.event.toolUseId).toBe('tu1');
     expect(r.event.requestId).toMatch(/^id-/);
+  });
+
+  test('projects WriteStdin permission args to a bounded human-readable preview', () => {
+    const { engine } = makeEngine();
+    engine.beginTurn('t1');
+    const r = engine.evaluate({
+      sessionId: 's1',
+      turnId: 't1',
+      toolUseId: 'tu-stdin',
+      toolName: 'WriteStdin',
+      args: {
+        ref: 'maka://runtime/background-tasks/pty-1',
+        input: 'private input\r',
+        size: { cols: 100, rows: 30 },
+      },
+      mode: 'ask',
+    });
+
+    assert.equal(r.kind, 'prompt');
+    if (r.kind !== 'prompt') return;
+    assert.deepEqual(r.event.args, {
+      ref: 'maka://runtime/background-tasks/pty-1',
+      inputPreview: { text: 'private input\\r', bytes: 14, truncated: false },
+      size: { cols: 100, rows: 30 },
+    });
   });
 
   test('parked Promise resolves on recordResponse', async () => {

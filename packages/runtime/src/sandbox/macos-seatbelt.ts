@@ -156,8 +156,9 @@ export const MACOS_SEATBELT_PLATFORM_DEFAULTS_POLICY = `; macOS platform default
 (allow file-read-data (subpath "/usr/libexec"))
 (allow file-read-metadata (subpath "/usr/libexec"))
 
-(allow file-read* (subpath "/opt/homebrew/lib"))
-(allow file-read* (subpath "/usr/local/lib"))
+(allow file-read* file-test-existence file-map-executable
+  (subpath "/opt/homebrew")
+  (subpath "/usr/local"))
 
 (allow file-read* (regex "^/dev/fd/(0|1|2)$"))
 (allow file-write* (regex "^/dev/fd/(1|2)$"))
@@ -304,14 +305,14 @@ function resolveRoots(profile: PermissionProfile, pathContext: SandboxPathContex
   const protectedWritableRoots: string[] = [];
 
   for (const entry of profile.fileSystem.entries) {
-    const roots = rootsForEntry(entry, pathContext);
-    if (entry.access === 'deny') {
-      addUniqueResolvedRoots(deniedRoots, roots);
+      const roots = rootsForEntry(entry, pathContext);
+      if (entry.access === 'deny') {
+        addUniqueResolvedRoots(deniedRoots, roots);
       continue;
     }
 
-    if (entry.access === 'read' || entry.access === 'write') {
-      addUniqueResolvedRoots(readableRoots, roots);
+      if (entry.access === 'read' || entry.access === 'write') {
+        addUniqueResolvedRoots(readableRoots, roots);
     }
     if (entry.access === 'write') {
       addUniqueResolvedRoots(writableRoots, roots);
@@ -371,7 +372,6 @@ function uniqueRoots(roots: readonly string[]): readonly string[] {
   addUniqueRoots(unique, roots);
   return unique;
 }
-
 function buildReadableRootsPolicy(roots: ResolvedRoots): string {
   if (roots.readableRoots.length === 0) return '';
 
@@ -450,7 +450,6 @@ function seatbeltPathClause(root: ResolvedRoot, parameter: string): string {
 function escapeSeatbeltString(value: string): string {
   return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
 }
-
 function protectedMetadataRequirement(root: string, name: string): string {
   const escapedRoot = escapeSeatbeltRegex(trimTrailingSlash(root));
   const escapedName = escapeSeatbeltRegex(name);

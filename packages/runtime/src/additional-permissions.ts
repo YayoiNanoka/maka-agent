@@ -313,14 +313,16 @@ export async function revalidateAdditionalPermissionProposal(input: {
 }
 
 export async function planFileToolAdditionalPermission(input: {
-  toolName: 'Read' | 'Write' | 'Edit' | 'Glob' | 'Grep';
+  toolName: 'Read' | 'Write' | 'Edit' | 'FormatJson' | 'Glob' | 'Grep';
   path: string;
   cwd: string;
   mode: PermissionMode;
   args: unknown;
   context: AdditionalPermissionPlanningContext;
 }): Promise<AdditionalPermissionPlanResult> {
-  const access: AdditionalPermissionAccess = input.toolName === 'Write' || input.toolName === 'Edit'
+  const access: AdditionalPermissionAccess = input.toolName === 'Write'
+    || input.toolName === 'Edit'
+    || input.toolName === 'FormatJson'
     ? 'write'
     : 'read';
   const scope: AdditionalPermissionScope = input.toolName === 'Glob' || input.toolName === 'Grep'

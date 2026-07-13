@@ -14,11 +14,89 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import {
+  CATALOG_PROVIDER_TYPES,
   PROVIDER_DEFAULTS,
+  PROVIDER_REGISTRY,
+  READY_PROVIDER_TYPES,
+  RECOMMENDED_PROVIDER_TYPES,
   normalizeConnectionBaseUrl,
   persistedBaseUrl,
   validateConnectionBaseUrl,
 } from '../llm-connections.js';
+
+describe('provider compatibility contract', () => {
+  it('exposes only supported first-class provider ids in stable order', () => {
+    assert.deepEqual(Object.keys(PROVIDER_DEFAULTS), [
+      'anthropic',
+      'kimi-coding-plan',
+      'minimax-coding-plan',
+      'openai',
+      'google',
+      'deepseek',
+      'moonshot',
+      'zai-coding-plan',
+      'MiniMax',
+      'MiniMax-cn',
+      'siliconflow',
+      'ollama',
+      'openai-compatible',
+      'claude-subscription',
+      'codex-subscription',
+      'gemini-cli',
+    ]);
+    assert.deepEqual(READY_PROVIDER_TYPES, [
+      'anthropic',
+      'openai',
+      'google',
+      'deepseek',
+      'moonshot',
+      'zai-coding-plan',
+      'MiniMax',
+      'MiniMax-cn',
+      'siliconflow',
+      'ollama',
+      'kimi-coding-plan',
+      'openai-compatible',
+      'minimax-coding-plan',
+    ]);
+    assert.deepEqual(CATALOG_PROVIDER_TYPES, [
+      'kimi-coding-plan',
+      'minimax-coding-plan',
+      'deepseek',
+      'moonshot',
+      'zai-coding-plan',
+      'MiniMax',
+      'MiniMax-cn',
+      'siliconflow',
+      'anthropic',
+      'openai',
+      'google',
+      'ollama',
+      'openai-compatible',
+    ]);
+  });
+
+  it('derives catalog, recommendation, runtime, and discovery behavior from one registry', () => {
+    assert.equal(PROVIDER_DEFAULTS, PROVIDER_REGISTRY, 'the compatibility export must not copy registry state');
+    assert.deepEqual(RECOMMENDED_PROVIDER_TYPES, [
+      'siliconflow',
+      'anthropic',
+      'openai',
+      'google',
+      'kimi-coding-plan',
+      'deepseek',
+      'ollama',
+    ]);
+    assert.equal(PROVIDER_REGISTRY['kimi-coding-plan'].catalogGroup, 'plans');
+    assert.equal(PROVIDER_REGISTRY.siliconflow.catalogGroup, 'aggregators');
+    assert.equal(PROVIDER_REGISTRY.ollama.catalogGroup, 'local');
+    assert.equal(PROVIDER_REGISTRY.siliconflow.runtimeAdapter.kind, 'openai-compatible');
+    assert.equal(PROVIDER_REGISTRY.siliconflow.modelDiscovery.kind, 'protocol');
+    assert.deepEqual(PROVIDER_REGISTRY.siliconflow.modelDiscovery.query, { sub_type: 'chat' });
+    assert.equal(PROVIDER_REGISTRY.ollama.modelDiscovery.kind, 'ollama');
+    assert.equal(PROVIDER_REGISTRY['codex-subscription'].modelDiscovery.kind, 'fallback');
+  });
+});
 
 describe('validateConnectionBaseUrl (PR-UI-IPC-1, @kenji msg 35260e29)', () => {
   describe('accept (returns null)', () => {
@@ -186,6 +264,21 @@ describe('validateConnectionBaseUrl (PR-UI-IPC-1, @kenji msg 35260e29)', () => {
 });
 
 describe('provider URL defaults', () => {
+  it('exposes SiliconFlow with models.dev provider facts and exact model ids', () => {
+    const siliconflow = (PROVIDER_DEFAULTS as Partial<Record<string, (typeof PROVIDER_DEFAULTS)[keyof typeof PROVIDER_DEFAULTS]>>).siliconflow;
+
+    assert.ok(siliconflow, 'SiliconFlow must be available through the shared provider registry');
+    assert.equal(siliconflow.label, 'SiliconFlow');
+    assert.equal(siliconflow.baseUrl, 'https://api.siliconflow.com/v1');
+    assert.equal(siliconflow.authKind, 'api_key');
+    assert.equal(siliconflow.protocol, 'openai');
+    assert.equal(
+      siliconflow.fallbackModels[0],
+      'moonshotai/Kimi-K2.6',
+      'the Maka recommendation must use an exact models.dev id, including provider namespace and case',
+    );
+  });
+
   it('labels the ChatGPT account path as OpenAI OAuth, not Codex subscription', () => {
     assert.equal(PROVIDER_DEFAULTS['codex-subscription'].label, 'OpenAI OAuth (ChatGPT / Codex)');
     assert.equal(PROVIDER_DEFAULTS['codex-subscription'].description, 'ChatGPT/Codex account OAuth path for OpenAI Responses models.');
@@ -196,6 +289,24 @@ describe('provider URL defaults', () => {
     assert.equal(PROVIDER_DEFAULTS['kimi-coding-plan'].signupUrl, 'https://www.kimi.com/code/console');
     assert.equal(PROVIDER_DEFAULTS.moonshot.baseUrl, 'https://api.moonshot.cn/v1');
     assert.equal(PROVIDER_DEFAULTS.moonshot.signupUrl, 'https://platform.kimi.com/console/api-keys');
+  });
+
+  it('keeps MiniMax Coding Plan separate from MiniMax direct API access', () => {
+    const providers = PROVIDER_DEFAULTS as Partial<Record<string, (typeof PROVIDER_DEFAULTS)[keyof typeof PROVIDER_DEFAULTS]>>;
+    const plan = providers['minimax-coding-plan'];
+
+    assert.ok(plan, 'MiniMax Coding Plan must have its own persisted provider id');
+    assert.equal(plan.label, 'MiniMax Coding Plan');
+    assert.equal(plan.baseUrl, 'https://api.minimax.io/anthropic');
+    assert.equal(plan.authKind, 'api_key');
+    assert.equal(plan.protocol, 'anthropic');
+    assert.deepEqual(plan.runtimeAdapter, { kind: 'anthropic', auth: 'api-key', normalizeBaseUrl: true });
+    assert.deepEqual(plan.modelDiscovery, { kind: 'protocol' });
+    assert.equal(plan.category, 'overseas');
+    assert.equal(plan.catalogGroup, 'plans');
+    assert.equal(plan.modelsDevId, 'minimax');
+    assert.equal(plan.fallbackModels[0], 'MiniMax-M3');
+    assert.notEqual(plan, providers.MiniMax);
   });
 });
 

@@ -1,5 +1,7 @@
+import { projectToolActivityArgs } from '@maka/core';
 import type {
   SessionEvent,
+  ToolActivityKind,
   ToolOutputStream,
   ToolResultContent,
   ToolResultEvent,
@@ -13,8 +15,10 @@ import type {
 import type { PermissionDecision } from '@maka/core/backend-types';
 import type { AgentSpec } from '@maka/core/runtime-inputs';
 import type {
+  PermissionMode,
   ToolCategory,
   ToolExecutionFacts,
+  ToolPermissionRule,
   ToolSandboxRequirement,
 } from '@maka/core/permission';
 import { BUILTIN_TOOL_CATEGORY, categorizeBash } from '@maka/core/permission';
@@ -63,12 +67,14 @@ export interface MakaTool<P = any, R = unknown> {
   /** Zod schema describing the tool's argument shape. */
   parameters: unknown;
   /**
-   * If `false`, the wrap layer skips PermissionEngine.evaluate() entirely.
-   * Defaults to `true` (always go through the engine).
+   * If `false`, the base mode policy is skipped unless invocation-local rules
+   * are present. Explicit deny rules still apply to every tool.
    */
   permissionRequired?: boolean;
   /** Optional UI display name. */
   displayName?: string;
+  /** Stable semantic category used by UI presentation; never carries styling. */
+  activityKind?: ToolActivityKind;
   /** Optional trusted category override for custom tools. */
   categoryHint?: ToolCategory;
   /** Optional trusted facts about the executor that runs this tool. */
@@ -85,6 +91,12 @@ export interface MakaTool<P = any, R = unknown> {
     args: P,
     context: SandboxEscalationPlannerContext,
   ) => Promise<SandboxEscalationPlanResult> | SandboxEscalationPlanResult;
+  /** Optional trusted platform sandbox availability for this tool. */
+  sandbox?: {
+    platformSandboxAvailable: boolean;
+  } | ((context: { permissionMode: PermissionMode; cwd: string; args: P }) => {
+    platformSandboxAvailable: boolean;
+  });
   /** Real tool implementation. Called only after permission allows. */
   impl: (args: P, ctx: MakaToolContext) => Promise<R> | R;
 }
@@ -95,6 +107,7 @@ export interface MakaToolContext {
   turnId: string;
   /** Session working directory. */
   cwd: string;
+  permissionMode?: PermissionMode;
   toolCallId: string;
   abortSignal: AbortSignal;
   emitOutput: (stream: ToolOutputStream, chunk: string) => void;
@@ -151,6 +164,13 @@ export interface ToolRuntimeInput {
   now: () => number;
   getPermissionPauseTarget: () => { pause(): void; resume(): void } | null;
   getCurrentRunId?: () => string | undefined;
+  /**
+   * Id of the assistant step currently streaming, stamped onto each tool call's
+   * `tool_start` event so model replay can group a step's reasoning + tool calls
+   * into one provider assistant message. Undefined leaves the step unpaired
+   * (legacy per-turn behavior).
+   */
+  getCurrentStepId?: () => string | undefined;
   spawnChildAgent?: (input: {
     parentRunId: string;
     spec: AgentSpec;
@@ -161,6 +181,7 @@ export interface ToolRuntimeInput {
   readChildAgentOutput?: (input: { runId?: string; turnId?: string; maxEvents?: number }) => Promise<unknown>;
   getRunTrace?: () => RunTraceLike | null;
   permissionTimeoutMs?: number;
+  permissionRules?: readonly ToolPermissionRule[];
   recordToolInvocation?: ToolTelemetryRecorder;
   recordToolArtifacts?: ToolArtifactRecorder;
   /** Session-scoped policy snapshot; execution paths still revalidate at launch. */
@@ -288,15 +309,20 @@ export class ToolRuntime {
     const toolIntent = describeToolIntent(tool, args);
     const trace = this.input.getRunTrace?.() ?? null;
 
+    const stepId = this.input.getCurrentStepId?.();
     const callMsg: ToolCallMessage = {
       type: 'tool_call',
       id: toolUseId,
       turnId,
       ts: now,
       toolName: tool.name,
+      ...(tool.activityKind ? { activityKind: tool.activityKind } : {}),
       ...(tool.displayName ? { displayName: tool.displayName } : {}),
       ...(toolIntent ? { intent: toolIntent } : {}),
       args,
+      // Persist the same step id the tool_start event carries so the UI
+      // timeline and post-restart backfill can pair this call with its step.
+      ...(stepId !== undefined ? { stepId } : {}),
     };
     await this.input.appendMessage(callMsg);
     const startEv: ToolStartEvent = {
@@ -306,9 +332,11 @@ export class ToolRuntime {
       ts: now,
       toolUseId,
       toolName: tool.name,
+      ...(tool.activityKind ? { activityKind: tool.activityKind } : {}),
       args,
       ...(tool.displayName ? { displayName: tool.displayName } : {}),
       ...(toolIntent ? { intent: toolIntent } : {}),
+      ...(stepId !== undefined ? { stepId } : {}),
     };
     queue.push(startEv);
     trace?.emit('tool', 'tool_started', 'Tool execution started', {
@@ -364,7 +392,23 @@ export class ToolRuntime {
       return this.errorReturn(reason);
     }
 
-    const sandbox = sandboxContextForTool(tool.sandboxRequirement, this.input.sandboxCapabilities);
+    let sandbox = sandboxContextForTool(tool.sandboxRequirement, this.input.sandboxCapabilities);
+    if (tool.sandbox !== undefined && sandbox.requirement !== 'none') {
+      const availability = typeof tool.sandbox === 'function'
+        ? tool.sandbox({
+            permissionMode: this.input.header.permissionMode,
+            cwd: this.input.header.cwd,
+            args,
+          })
+        : tool.sandbox;
+      if (!availability.platformSandboxAvailable) {
+        sandbox = {
+          requirement: sandbox.requirement,
+          status: 'unavailable',
+          unavailableReason: 'The selected platform sandbox cannot enforce this tool invocation.',
+        };
+      }
+    }
     let additionalPlan: AdditionalPermissionPlanResult = { kind: 'not_required' };
     if (tool.planAdditionalPermissions) {
       try {
@@ -467,6 +511,7 @@ export class ToolRuntime {
       || sandbox.requirement !== 'none'
       || additionalPlan.kind === 'request'
       || escalationPlan.kind === 'request'
+      || (this.input.permissionRules?.length ?? 0) > 0
     ) {
       const verdict = this.input.permissionEngine.evaluate({
         sessionId: this.input.sessionId,
@@ -477,6 +522,8 @@ export class ToolRuntime {
         ...(tool.categoryHint !== undefined ? { categoryHint: tool.categoryHint } : {}),
         ...(tool.executionFacts !== undefined ? { executionFacts: tool.executionFacts } : {}),
         sandbox,
+        permissionRequired: tool.permissionRequired !== false,
+        ...(this.input.permissionRules !== undefined ? { permissionRules: this.input.permissionRules } : {}),
         mode: this.input.header.permissionMode,
         cwd: this.input.header.cwd,
         ...(additionalPlan.kind === 'request'
@@ -490,6 +537,18 @@ export class ToolRuntime {
       if (verdict.kind === 'block') {
         if (autoReviewEscalationKey) {
           this.autoReviewEscalationAttempts.set(autoReviewEscalationKey, 'denied');
+        }
+        if (verdict.decisionEvent) {
+          await this.input.appendMessage({
+            type: 'permission_decision',
+            id: verdict.decisionEvent.requestId,
+            turnId,
+            ts: verdict.decisionEvent.ts,
+            toolUseId,
+            toolName: tool.name,
+            decision: 'deny',
+          });
+          queue.push(verdict.decisionEvent);
         }
         trace?.emit('permission', 'permission_failed', 'Permission blocked tool execution', {
           toolUseId,
@@ -811,6 +870,7 @@ export class ToolRuntime {
           turnId,
           ...(runId ? { runId } : {}),
           cwd: this.input.header.cwd,
+          permissionMode: this.input.header.permissionMode,
           toolCallId: toolUseId,
           abortSignal: ctx.abortSignal,
           emitOutput: output.emit,
@@ -855,7 +915,7 @@ export class ToolRuntime {
           modelId: this.input.modelId,
           durationMs,
           status: toolResultStatus,
-          argsSummary: summarizeArgs(args),
+          argsSummary: summarizeArgs(tool.name, args),
           bytesIn: byteLength(args),
           bytesOut: byteLength(result),
           startedAt,
@@ -940,7 +1000,7 @@ export class ToolRuntime {
           durationMs,
           status: 'error',
           errorClass: classifyError(err),
-          argsSummary: summarizeArgs(args),
+          argsSummary: summarizeArgs(tool.name, args),
           bytesIn: byteLength(args),
           bytesOut: byteLength(terminalFailure.content),
           startedAt,
@@ -967,7 +1027,7 @@ export class ToolRuntime {
         durationMs: Math.max(0, this.input.now() - startedAt),
         status: 'error',
         errorClass: classifyError(err),
-        argsSummary: summarizeArgs(args),
+        argsSummary: summarizeArgs(tool.name, args),
         bytesIn: byteLength(args),
         bytesOut: 0,
         startedAt,
@@ -1126,10 +1186,17 @@ export function formatSyntheticToolErrorText(error: unknown): string {
 export function classifyError(error: unknown): string {
   if (!(error instanceof Error)) return 'Other';
   const code = 'code' in error ? String((error as { code?: unknown }).code) : '';
-  const text = `${error.name} ${code} ${error.message}`.toLowerCase();
+  const statusCode = 'statusCode' in error
+    ? String((error as { statusCode?: unknown }).statusCode)
+    : 'status' in error
+      ? String((error as { status?: unknown }).status)
+      : '';
+  const text = `${error.name} ${code} ${statusCode} ${error.message}`.toLowerCase();
   if (text.includes('abort')) return 'Abort';
-  if (text.includes('rate') || code === '429') return 'RateLimit';
-  if (text.includes('auth') || code === '401' || code === '403') return 'Auth';
+  if (statusCode === '402' || code === '402') return 'ProviderBilling';
+  if (text.includes('rate') || statusCode === '429' || code === '429') return 'RateLimit';
+  if (text.includes('auth') || statusCode === '401' || statusCode === '403' || code === '401' || code === '403') return 'Auth';
+  if (/^5\d\d$/.test(statusCode) || /^5\d\d$/.test(code)) return 'ProviderUnavailable';
   if (text.includes('timeout')) return 'Timeout';
   if (text.includes('network') || text.includes('fetch')) return 'Network';
   return error.name || 'Other';
@@ -1141,6 +1208,10 @@ export function errorReasonFromClass(errorClass: string): string | undefined {
       return 'timeout';
     case 'Auth':
       return 'auth';
+    case 'ProviderBilling':
+      return 'provider_billing';
+    case 'ProviderUnavailable':
+      return 'provider_unavailable';
     case 'RateLimit':
       return 'rate_limit';
     case 'Network':
@@ -1196,10 +1267,14 @@ function coerceTerminalFailure(
       cmd: redactSecrets(command),
       status: error.code === 124 ? 'timed_out' : error.code === 130 ? 'cancelled' : 'failed',
       exitCode: error.code,
-      stdout,
-      stderr,
-      stdoutTruncated: error.stdoutTruncated === true,
-      stderrTruncated: error.stderrTruncated === true,
+      output: {
+        mode: 'pipes',
+        stdout,
+        stderr,
+        stdoutTruncated: error.stdoutTruncated === true,
+        stderrTruncated: error.stderrTruncated === true,
+        redacted: stdout !== String(error.stdout ?? '') || stderr !== String(error.stderr ?? ''),
+      },
       ...(sandboxDenied ? {
         sandboxDenial: {
           likely: true,
@@ -1269,15 +1344,21 @@ function deriveToolResultStatus(content: ToolResultContent): ToolInvocationRecor
     if (content.status === 'cancelled') return 'aborted';
     return 'error';
   }
+  if (
+    content.kind === 'shell_run'
+    && content.operation?.kind === 'pty_control'
+    && content.operation.failed
+  ) return 'error';
   // All other structured results are successful tool executions. That includes
   // ShellRun observations: their embedded process status stays model-visible,
   // but reading or returning the observation itself succeeded.
   return 'success';
 }
 
-function summarizeArgs(args: unknown): string {
-  const raw = typeof args === 'string' ? args : JSON.stringify(args ?? null);
-  const text = redactSecrets(raw);
+function summarizeArgs(toolName: string, args: unknown): string {
+  const projected = projectToolActivityArgs(toolName, args);
+  const raw = typeof projected === 'string' ? projected : JSON.stringify(projected ?? null);
+  const text = toolName === 'WriteStdin' ? raw : redactSecrets(raw);
   return text.length <= 512 ? text : `${text.slice(0, 511)}…`;
 }
 

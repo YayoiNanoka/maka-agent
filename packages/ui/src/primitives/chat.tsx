@@ -10,8 +10,8 @@ import type React from "react";
  * `Message` is the per-turn row container; `Bubble` is the message body
  * surface. They retire the bespoke `.message.{role}` / `.maka-bubble-user`
  * shell CSS, moving the row/bubble *shell* onto the Tailwind substrate while
- * leaving Markdown prose (now the `.maka-prose` layer in chat-message.css,
- * split off the assistant bubble shell by #546 PR4) and the turn machinery
+ * leaving Markdown prose (now the `.maka-prose` layer in prose.css, split
+ * off the assistant bubble shell by #546 PR4 / #618 item 3) and the turn machinery
  * (summary / lineage / footer / markers — PR2) untouched.
  *
  * The row keeps the authored `.maka-message-row` base (centered reading column).
@@ -72,10 +72,12 @@ const bubbleVariants = cva("", {
       // Keeps the neutral `--chat-user-bg` token path (never primary/accent).
       user: "max-w-[min(100%,640px)] whitespace-pre-wrap break-words rounded-[var(--radius-surface)] bg-[var(--chat-user-bg)] px-3 py-2.5 leading-normal text-[color:var(--chat-user-foreground,var(--foreground))]",
       // Assistant / system: open prose, no bubble. The shell stays
-      // `.maka-bubble-assistant` (geometry: max-width 72ch, padding, generic
-      // first/last-child margin reset); the Markdown prose layer `.maka-prose`
-      // (p / h / ul / code / ... typography) rides alongside so the same prose
-      // rules can be reused by tool-result bodies (#546 PR5).
+      // `.maka-bubble-assistant` (now just surface padding — typography,
+      // edge-margin trims, and line-height/break-word live on the prose
+      // layer, #618 item 2; the reading measure is owned by
+      // `.maka-message-row`, not the prose layer); the Markdown prose layer
+      // `.maka-prose` (p / h / ul / code / ... typography) rides alongside
+      // and stays reusable on its own.
       assistant: "maka-bubble-assistant maka-prose",
     },
   },
@@ -143,6 +145,11 @@ const markerVariants = cva("", {
       // `.maka-turn-aborted-marker` (+ its italic `em`) — dormant, muted.
       aborted:
         "inline-flex w-fit items-center gap-1 mx-0 mt-0.5 mb-1 px-1.5 py-0.5 rounded-[var(--radius-control)] bg-[var(--foreground-5)] text-[color:var(--foreground-secondary)] text-xs italic [&_em]:italic",
+      // `.maka-turn-automation-origin` — quiet provenance chip above a user
+      // bubble whose turn was fired by an automation, not hand-typed. Sits on
+      // the user side (self-end) so it reads as the bubble's byline.
+      "automation-origin":
+        "inline-flex w-fit items-center gap-1 self-end mx-0 mb-1 px-1.5 py-0.5 rounded-[var(--radius-control)] bg-[var(--foreground-5)] text-[color:var(--muted-foreground)] text-xs",
       // `.maka-turn-failed-banner` — fault state, destructive tone.
       "failed-banner":
         "inline-flex w-fit flex-wrap items-center gap-1.5 mx-0 mt-0.5 mb-1.5 px-2 py-1 rounded-[var(--radius-control)] border border-[oklch(from_var(--destructive)_l_c_h_/_0.28)] bg-[oklch(from_var(--destructive)_l_c_h_/_0.10)] text-[color:var(--destructive)] text-xs",
@@ -171,10 +178,14 @@ const markerVariants = cva("", {
         + " focus-visible:[outline:2px_solid_var(--focus-ring)] focus-visible:[outline-offset:2px]"
         + " data-[direction=forward]:bg-[oklch(from_var(--info)_l_c_h_/_0.06)] data-[direction=forward]:text-[oklch(from_var(--info-text)_calc(l_-_0.06)_c_h)]"
         + " data-[direction=reverse]:bg-[oklch(from_var(--brand-deep)_l_c_h_/_0.06)] data-[direction=reverse]:text-[oklch(from_var(--brand-deep)_calc(l_-_0.04)_c_h)]",
-      // `.maka-turn-footer` (+ measure-column re-anchor) — quiet toolbar that
-      // lifts to full opacity on hover / focus-within.
+      // `.maka-turn-footer` (+ measure-column re-anchor) — hidden by default,
+      // revealed when the answer block is hovered or keyboard focus lands
+      // inside it (#642). `group-hover/answer` keys off the `group/answer` on
+      // the assistant `Message`; `focus-within` keeps it reachable without a
+      // pointer. Opacity-only (layout stays reserved) so live→settled is
+      // height-neutral. Sole consumer is the assistant turn footer.
       footer:
-        "flex w-full max-w-[var(--maka-chat-measure,680px)] flex-wrap items-center justify-start gap-0.5 mt-0.5 ml-0 mr-auto p-0 opacity-[0.72] hover:opacity-100 focus-within:opacity-100",
+        "flex w-full max-w-[var(--maka-chat-measure,680px)] flex-wrap items-center justify-start gap-0.5 mt-0.5 ml-0 mr-auto p-0 opacity-0 [transition:opacity_var(--duration-quick)_var(--ease-out-strong)] group-hover/answer:opacity-100 focus-within:opacity-100",
       // `.maka-turn-footer-action` (UiButton) — borderless ghost action. Also
       // reused by the user-message copy (`MessageCopyButton footerStyle`), so
       // it carries only the button look, never the footer's measure column.
@@ -242,107 +253,68 @@ export function Marker({
 }
 
 /**
- * Tool live-output stream shell (issue #332, PR3).
+ * `TextShimmer` — a running "sweep of light" across short label text
+ * (streaming UI rework). Used for the "深度思考" disclosure title while
+ * reasoning streams and for a working trow's active-tool summary.
  *
- * Retires the bespoke `.maka-tool-output-stream-*` shell CSS (the panel,
- * header, counts row, scrolling body, and chunk/tag spans in
- * `styles/tool-stream.css`), moving each onto this Tailwind substrate. Every
- * value is a LITERAL arbitrary utility that compiles 1:1 to the declaration it
- * replaces, so the cva source string IS the computed-style proof (the cascade
- * contract asserts the exact strings).
+ * Two overlaid layers on the same grid cell: an opaque `base` (keeps the text
+ * readable at all times, and is all a snapshot / reduced-motion user sees) and
+ * a `sweep` layer whose animated linear-gradient is clipped to the glyph shape
+ * (`background-clip: text` + transparent fill) so a light band travels across
+ * the letters. The band motion is the one declaration that can't be a leaf
+ * literal — it rides the governed `@keyframes maka-text-shimmer` in
+ * maka-tokens.css plus the literal
+ * utilities here.
  *
- * The single consumer (`ToolOutputStream`) keeps its semantic tags
- * (`<header>` / `<pre>` / `<span>`) and applies these by `className` rather than
- * through a wrapper component — there is one call site, the tags differ, and the
- * literalize vehicle (this table) is what the test net asserts. `streamVariants`
- * is kept OFF the package barrel for the same reason as `markerVariants`: the
- * only consumer imports it by relative path, so the part set stays an internal,
- * freely-removable styling detail.
+ * `active={false}` (or reduced-motion) renders just the base text — callers
+ * pass `active` false for settled/snap states so the sweep never runs in a
+ * deterministic capture. Kept INTERNAL (off the package barrel, imported by
+ * relative path) — its only consumers live in `@maka/ui`.
  *
- * The live pulse dot is NOT a part here — it moves onto the governed
- * `LiveIndicator` primitive below (animation can't be a leaf-literal, so it gets
- * a primitive + a single canonical keyframe instead of a per-feature one).
+ * `delayed` (#646 run→done seam) holds the sweep at its resting frame for
+ * `--duration-emphasized` (~200ms) before it starts — a purely CSS de-flicker so
+ * a sub-second tool row (which unmounts inside the window) never visibly sweeps,
+ * while the base text is readable from frame 0. The keyframe rests at
+ * `background-position:150% 0` (= the sweep's declared start), so the delay reads
+ * as plain static muted text, matching `active={false}`.
  */
-const streamVariants = cva("", {
-  variants: {
-    part: {
-      // `.maka-tool-output-stream` (+ the `[data-live="true"]` accent border /
-      // inset ring while the tool is running). The call site keeps passing
-      // `data-live`, which the literalized `data-[live=true]:` utilities read.
-      container:
-        "flex flex-col gap-1.5 my-1.5 mx-0 overflow-hidden rounded-[var(--radius-surface)] border border-[var(--border)] bg-[var(--background)]"
-        + " data-[live=true]:border-[oklch(from_var(--status-running)_l_c_h_/_0.40)] data-[live=true]:[box-shadow:inset_0_0_0_1px_oklch(from_var(--status-running)_l_c_h_/_0.06)]",
-      // `.maka-tool-output-stream-header`
-      header:
-        "flex items-center justify-between gap-3 px-2.5 py-1.5 border-b border-[var(--border)] bg-[var(--foreground-3)] text-xs uppercase tracking-[0.06em] text-[color:var(--muted-foreground)]",
-      // `.maka-tool-output-stream-label`
-      label: "inline-flex items-center gap-1.5",
-      // `.maka-tool-output-stream-counts`
-      counts: "inline-flex items-center gap-2.5",
-      // `.maka-tool-output-stream-counts span` (tabular-nums on every count) plus
-      // the `[data-stream=stderr]` / `[data-redacted]` / `[data-truncated]`
-      // recolors. The `已截断` pill (`data-truncated`) gets the warning chrome the
-      // old `span[data-truncated="true"]` rule supplied; the inert
-      // `.maka-tool-output-stream-truncated-tag` class (no rule of its own) is
-      // dropped.
-      count:
-        "min-w-[5rem] [font-variant-numeric:tabular-nums]"
-        + " data-[stream=stderr]:text-[color:var(--destructive-text)]"
-        + " data-[redacted=true]:text-[color:var(--warning-text,var(--info-text))]"
-        + " data-[truncated=true]:rounded-[var(--radius-control)] data-[truncated=true]:border data-[truncated=true]:border-[oklch(from_var(--warning)_l_c_h_/_0.30)] data-[truncated=true]:bg-[oklch(from_var(--warning)_l_c_h_/_0.06)] data-[truncated=true]:px-1 data-[truncated=true]:text-[color:var(--warning-text,var(--info-text))] data-[truncated=true]:cursor-help",
-      // `.maka-tool-output-stream-body` — the scrolling mono output `<pre>`.
-      // `word-break:break-word` stays an arbitrary literal (Tailwind's
-      // `break-words` is `overflow-wrap`, a different property).
-      body:
-        "m-0 max-h-55 overflow-y-auto whitespace-pre-wrap [word-break:break-word] px-2.5 py-2 [font-family:var(--font-mono)] text-xs leading-normal bg-[var(--background)] text-[color:var(--foreground-secondary)] [scroll-behavior:auto]",
-      // `.maka-tool-output-stream-chunk` (`display:contents`; recolors stderr,
-      // dims redacted). The call site keeps `data-stream` / `data-redacted`.
-      chunk:
-        "contents data-[stream=stderr]:text-[color:var(--destructive-text)] data-[redacted=true]:opacity-[0.65]",
-      // `.maka-tool-output-stream-redacted-tag` — the inline `[已脱敏]` tag.
-      "redacted-tag":
-        "inline ml-0.5 rounded-[var(--radius-control)] px-1 tracking-[0.04em] text-xs text-[color:var(--warning-text,var(--info-text))] bg-[oklch(from_var(--warning,var(--info))_l_c_h_/_0.10)]",
-    },
-  },
-});
-
-export { streamVariants };
-
-/**
- * `LiveIndicator` — the pulsing "live" dot (issue #332, PR3).
- *
- * The governed home for the chat live-output dot, replacing the bespoke
- * `.maka-tool-output-stream-dot` + its per-feature `@keyframes`. The breath
- * itself is the one declaration that can't be a leaf-literal (a `@keyframes` is
- * a named global rule, not an element property, and `getComputedStyle` reads a
- * phase-dependent value — so it escapes the computed-style proof). It is pinned
- * instead by the canonical `@keyframes maka-pulse` in `maka-tokens.css` (the
- * shared motion home) plus the literal values here, verified by a keyframe
- * contract + before/after screenshots rather than the diff harness.
- *
- * It is kept INTERNAL (off the package barrel, applied by relative import like
- * `streamVariants`): the tool stream is its only consumer today. The duplicate
- * reasoning / composer / onboarding live dots can adopt it in a follow-up motion
- * pass — retiring their own `*-pulse` keyframes onto `maka-pulse` — and that is
- * when it would be promoted to a public export, not speculatively before a second
- * consumer exists. Reduced-motion suppression rides on the `motion-reduce:`
- * utilities (real-OS `prefers-reduced-motion: reduce`), mirroring the retired
- * dot's `@media` rule; the visual-smoke fixture freeze is handled by `base.css`.
- */
-export function LiveIndicator({
+export function TextShimmer({
+  children,
+  active = true,
+  delayed = false,
   className,
-  ...props
-}: React.ComponentPropsWithoutRef<"span">): React.ReactElement {
+}: {
+  children: React.ReactNode;
+  active?: boolean;
+  delayed?: boolean;
+  className?: string;
+}): React.ReactElement {
+  if (!active) {
+    return <span className={cn("inline-block", className)}>{children}</span>;
+  }
   return (
-    <span
-      aria-hidden="true"
-      {...props}
-      data-slot="live-indicator"
-      className={cn(
-        "inline-block w-[6px] h-[6px] rounded-[50%] bg-[var(--status-running)] [animation:maka-pulse_1.4s_ease-in-out_infinite] motion-reduce:[animation:none] motion-reduce:opacity-[0.8]",
-        className,
-      )}
-    />
+    <span data-slot="text-shimmer" className={cn("relative inline-grid", className)}>
+      {/* Base: opaque, muted, always readable. */}
+      <span className="[grid-area:1/1] text-[color:var(--muted-foreground)]">{children}</span>
+      {/* Sweep: a clipped light band that travels across the glyphs. The delay
+          rides inside the `animation` shorthand (second <time> = animation-delay)
+          so it can't be reset by the shorthand — the governance keyframe name is
+          still `maka-text-shimmer`, the only token the scanner reads. */}
+      <span
+        aria-hidden="true"
+        className={cn(
+          "[grid-area:1/1] bg-clip-text [-webkit-text-fill-color:transparent] text-transparent",
+          "bg-[linear-gradient(100deg,transparent_30%,oklch(from_var(--foreground)_l_c_h_/_0.95)_50%,transparent_70%)]",
+          "[background-size:200%_100%] [background-position:150%_0]",
+          delayed
+            ? "[animation:maka-text-shimmer_1.8s_linear_var(--duration-emphasized)_infinite]"
+            : "[animation:maka-text-shimmer_1.8s_linear_infinite]",
+          "motion-reduce:[animation:none] motion-reduce:opacity-0",
+        )}
+      >
+        {children}
+      </span>
+    </span>
   );
 }
 
@@ -359,7 +331,7 @@ export function LiveIndicator({
  * Every value is a LITERAL arbitrary utility that compiles 1:1 to the
  * declaration it replaces, so the cva source string IS the computed-style proof
  * (the cascade contract asserts the exact strings, no browser needed). Literals
- * over the semantic scale for the same reason as `markerVariants` / `streamVariants`:
+ * over the semantic scale for the same reason as `markerVariants`:
  * the retired CSS hardcoded these pixels, so the literal is the faithful,
  * self-evidently-equal translation and is immune to later scale/token re-tuning
  * (the visual refresh, not this governance pass, owns adopting the scale).
@@ -369,7 +341,7 @@ export function LiveIndicator({
  * pinned by the PR3b cascade contract (source strings + keyframe frames) rather
  * than the diff harness:
  *   1. the running status dot's `[animation:maka-tool-pulse …]` breath (the
- *      shorthand rides in the `dot` part here like `LiveIndicator`; only the
+ *      shorthand rides in the `dot` part here; only the
  *      `@keyframes maka-tool-pulse` stays in CSS — a keyframe is a global rule,
  *      not an element property, and `getComputedStyle` reads a phase-dependent
  *      value). The running dot's box-shadow RING is a leaf rest-state literal, so
@@ -377,13 +349,12 @@ export function LiveIndicator({
  *   2. the native `<summary>` marker reset (`::-webkit-details-marker` /
  *      `::marker`) — pseudo-elements with no leaf-utility form. Kept as residue.
  * (The reduced-motion / visual-smoke suppression both ride GLOBAL `*` rules in
- * maka-tokens.css / base.css, so — unlike `LiveIndicator`, a reusable primitive
- * that carries its own `motion-reduce:` guards — the dot and card need no
- * per-element motion utilities; the same global rules cover them as before.)
+ * maka-tokens.css / base.css, so the dot and card need no per-element motion
+ * utilities; the same global rules cover them as before.)
  *
  * The single consumer (`ToolActivity`) renders a Base UI Collapsible and applies
  * these by `className`. `toolVariants` is kept OFF the package barrel for the
- * same reason as `markerVariants` / `streamVariants`: the only consumer imports
+ * same reason as `markerVariants`: the only consumer imports
  * it by relative path, so the part set stays an internal, freely-removable
  * styling detail.
  *
@@ -478,7 +449,7 @@ export { toolVariants };
  * to keep those shells pixel-identical; the PR4 cascade contract pins the absence
  * of the retired selectors + the escape literals). Literals over the semantic
  * scale for the same reason as
- * `markerVariants` / `streamVariants` / `toolVariants`: the retired CSS hardcoded
+ * `markerVariants` / `toolVariants`: the retired CSS hardcoded
  * these pixels, so the literal is the faithful, self-evidently-equal translation
  * and is immune to later scale/token re-tuning (the visual refresh, not this
  * governance pass, owns adopting the scale).
@@ -517,7 +488,7 @@ const previewVariants = cva("", {
       // overlay preview shares. `white-space` / `font-family` are arbitrary so
       // the structured-card kind parts override them by tailwind-merge (note 1).
       overlay:
-        "mt-1 mx-0 mb-0 max-h-[180px] overflow-auto [font-family:var(--font-mono)] text-xs [white-space:pre-wrap] [word-break:break-word]",
+        "mt-1 mx-0 mb-0 max-h-[180px] overflow-auto [font-family:var(--font-mono)] [font-variant-ligatures:none] text-xs [white-space:pre-wrap] [word-break:break-word]",
       // `.maka-overlay-close` — the dismiss action (layered over `.maka-button`).
       close:
         "justify-self-end inline-flex items-center gap-1 min-h-6 px-1.5",
@@ -533,7 +504,7 @@ const previewVariants = cva("", {
         + " [&_code]:text-[color:var(--foreground-secondary)] [&_code]:bg-transparent",
       // `.maka-tool-diff-body` — the scrolling mono `<pre>`.
       "diff-body":
-        "m-0 px-0 py-1 max-h-80 overflow-auto [font-family:var(--font-mono)] text-xs leading-snug [white-space:pre] [word-break:normal]",
+        "m-0 px-0 py-1 max-h-80 overflow-auto [font-family:var(--font-mono)] [font-variant-ligatures:none] text-xs leading-snug [white-space:pre] [word-break:normal]",
       // `.maka-tool-diff-line` (+ the `[data-line]` add/del/hunk/meta/ctx tints).
       "diff-line":
         "block px-2 py-0 [white-space:pre]"
@@ -549,7 +520,7 @@ const previewVariants = cva("", {
         "grid gap-0 p-0 rounded-[var(--radius-surface)] bg-[var(--background)] [white-space:normal] [box-shadow:var(--shadow-minimal-flat)]",
       // `.maka-tool-terminal-head`
       "terminal-head":
-        "flex flex-wrap items-center gap-1.5 px-2 py-1 [border-bottom:1px_solid_var(--border)] bg-[var(--foreground-2)] [font-family:var(--font-mono)] text-xs",
+        "flex flex-wrap items-center gap-1.5 px-2 py-1 [border-bottom:1px_solid_var(--border)] bg-[var(--foreground-2)] [font-family:var(--font-mono)] [font-variant-ligatures:none] text-xs",
       // `.maka-tool-terminal-cwd`
       "terminal-cwd": "text-[color:var(--muted-foreground)] bg-transparent",
       // `.maka-tool-terminal-cmd` — the ellipsized command line.
@@ -565,7 +536,7 @@ const previewVariants = cva("", {
         "m-0 p-2 text-[color:var(--muted-foreground)] [font-family:var(--font-mono)] text-xs italic",
       // `.maka-tool-terminal-stream` (+ the `[data-stream]` stdout/stderr tone).
       "terminal-stream":
-        "m-0 px-2 py-1.5 max-h-[180px] overflow-auto [font-family:var(--font-mono)] text-xs [white-space:pre-wrap] [word-break:break-word]"
+        "m-0 px-2 py-1.5 max-h-[180px] overflow-auto [font-family:var(--font-mono)] [font-variant-ligatures:none] text-xs [white-space:pre-wrap] [word-break:break-word]"
         + " data-[stream=stdout]:text-[color:var(--foreground)]"
         + " data-[stream=stderr]:[border-top:1px_solid_var(--border)] data-[stream=stderr]:bg-[oklch(from_var(--destructive)_l_c_h_/_0.04)] data-[stream=stderr]:text-[color:var(--destructive)]",
       // `.maka-tool-terminal-truncated-note` (+ its `> span` min-width reset).
@@ -596,7 +567,7 @@ const previewVariants = cva("", {
         "m-0 text-[color:var(--muted-foreground)] [font-family:var(--font-mono)] text-xs italic",
       // `.maka-office-document-stream` (+ the `[data-stream=stderr]` tone).
       "office-stream":
-        "m-0 px-2.5 py-2 max-h-50 overflow-auto [border:1px_solid_var(--foreground-10)] rounded-[var(--radius-control)] bg-[var(--background)] [font-family:var(--font-mono)] text-xs [white-space:pre-wrap] [word-break:break-word]"
+        "m-0 px-2.5 py-2 max-h-50 overflow-auto [border:1px_solid_var(--foreground-10)] rounded-[var(--radius-control)] bg-[var(--background)] [font-family:var(--font-mono)] [font-variant-ligatures:none] text-xs [white-space:pre-wrap] [word-break:break-word]"
         + " data-[stream=stderr]:bg-[oklch(from_var(--destructive)_l_c_h_/_0.04)] data-[stream=stderr]:text-[color:var(--destructive)]",
 
       // ── explore agent / subagent (shared shell) ───────────────────────────

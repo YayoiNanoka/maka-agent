@@ -212,10 +212,29 @@
 
 /* --- provider list panel (scrolls vertically as the list grows) --- */
 .maka-firstrun-list {
+  position: relative;
   border: var(--border-width-hairline) solid var(--border);
   border-radius: var(--radius-surface);
   overflow: hidden;
   background: var(--background-elevated);
+}
+
+/* Designer audit P2-15: the height clamp cut the last visible provider row
+   in half with no cue that the list scrolls — it read as broken clipping.
+   A bottom fade signals "more below" (the provider count always exceeds the
+   clamp, so the cue never lies); pointer-events none keeps rows clickable. */
+.maka-firstrun-list::after {
+  content: "";
+  position: absolute;
+  left: var(--border-width-hairline);
+  right: var(--border-width-hairline);
+  bottom: var(--border-width-hairline);
+  /* 56px: tall enough to fully veil a half-clipped row's text — at 28px the
+     cut row stayed half-legible under the fade and still read as broken. */
+  height: 56px;
+  border-radius: 0 0 var(--radius-surface) var(--radius-surface);
+  background: linear-gradient(to bottom, oklch(from var(--background-elevated) l c h / 0), var(--background-elevated));
+  pointer-events: none;
 }
 .maka-firstrun-list ul {
   margin: 0;
@@ -229,18 +248,6 @@
 }
 .maka-firstrun-list li + li {
   border-top: var(--border-width-hairline) solid var(--border);
-}
-
-/* --- "常用" tag inside a provider row title --- */
-.maka-firstrun-tag {
-  flex: 0 0 auto;
-  font-size: var(--font-size-caption);
-  font-weight: var(--font-weight-semibold);
-  line-height: var(--leading-none);
-  color: var(--nav-active);
-  background: oklch(from var(--nav-active) l c h / 0.12);
-  padding: var(--space-0-5) var(--space-1-5);
-  border-radius: var(--radius-control);
 }
 
 .maka-firstrun .maka-onboarding-footer {

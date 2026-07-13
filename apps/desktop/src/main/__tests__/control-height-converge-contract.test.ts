@@ -88,7 +88,10 @@ interface ControlHeightCheck {
 const CONTROL_HEIGHT: ControlHeightCheck[] = [
   // sidebar / 会话 rows
   { selector: '.maka-list-row', props: ['min-height'], token: '--h-control-lg' },
-  { selector: '.maka-search-modal-close', props: ['width', 'height'], token: '--h-control-sm' },
+  { selector: '.maka-list-row-menu-trigger', props: ['width', 'height'], token: '--h-control-lg' },
+  // .maka-search-modal-close retired: the close button is the shared
+  // DialogHeader's quiet icon-sm Button, sized by buttonVariants, not a
+  // search-modal-specific class.
   { selector: '.maka-search-modal-clear', props: ['width', 'height'], token: '--h-control-sm' },
   // 设置 nav / triggers
   { selector: '.settingsBackButton', props: ['height', 'min-height'], token: '--h-control-xl' },
@@ -105,6 +108,7 @@ const CONTROL_HEIGHT: ControlHeightCheck[] = [
   // composer controls
   { selector: '.maka-composer-send-button', props: ['width', 'height'], token: '--h-control-lg' },
   { selector: '.maka-composer-workspace-picker', props: ['min-height'], token: '--h-control-sm' },
+  { selector: '.maka-composer-branch-picker', props: ['min-height'], token: '--h-control-sm' },
 ];
 
 /** Values that are always allowed (not a control-height beat). `100%`

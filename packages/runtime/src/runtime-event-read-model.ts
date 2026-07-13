@@ -1,15 +1,19 @@
 import type {
   AgentRunHeader,
+  AssistantStepContentKind,
   RuntimeEvent,
   RuntimeEventStatus,
   StoredMessage,
+  ToolActivityKind,
   ToolResultContent,
   TurnStatus,
 } from '@maka/core';
 import {
+  TOOL_ACTIVITY_KINDS,
   isPartialRuntimeEvent,
   isTerminalRuntimeEvent,
   isTerminalRuntimeEventStatus,
+  normalizeShellToolResultContent,
 } from '@maka/core';
 import { isArchivedToolResultPlaceholder } from './context-budget.js';
 
@@ -78,11 +82,19 @@ interface ProjectionState {
     toolName: string;
     hint?: string;
   }>;
-  thinkingByTurn: Map<string, PendingThinking>;
+  /**
+   * Thinking awaiting its assistant text row, keyed by the step message id
+   * (function of the event's providerEventId / storedMessageId — the same id the
+   * step's assistant row gets). Per-step turns have several entries per turn, so
+   * keying by message id (not turn) attaches each step's reasoning to its own row.
+   */
+  thinkingByMessageId: Map<string, PendingThinking>;
+  contentOrderByMessageId: Map<string, AssistantStepContentKind[]>;
 }
 
 interface PendingThinking {
   event: RuntimeEvent;
+  messageId: string;
   text: string;
   signature?: string;
 }
@@ -96,11 +108,13 @@ export function projectRuntimeEventsToStoredMessages(
     diagnostics: [],
     toolNameByUseId: new Map(),
     permissionRequestById: new Map(),
-    thinkingByTurn: new Map(),
+    thinkingByMessageId: new Map(),
+    contentOrderByMessageId: new Map(),
   };
   const messages: StoredMessage[] = [];
 
   for (const event of events) {
+    recordStepContentOrder(event, state);
     if (isPartialRuntimeEvent(event)) {
       diagnostic(state, event, 'partial_skipped', 'partial RuntimeEvent skipped');
       continue;
@@ -163,8 +177,8 @@ export function projectRuntimeEventsToStoredMessages(
     }
   }
 
-  for (const pending of state.thinkingByTurn.values()) {
-    diagnostic(state, pending.event, 'unsupported_event', 'thinking content has no same-turn assistant text row');
+  for (const pending of state.thinkingByMessageId.values()) {
+    diagnostic(state, pending.event, 'unsupported_event', 'thinking content has no assistant text row with a matching message id');
   }
 
   return { messages, diagnostics: state.diagnostics };
@@ -382,20 +396,51 @@ function projectText(
       diagnostic(state, event, 'incomplete_event', 'model text RuntimeEvent requires AgentRunHeader.modelId');
       return false;
     }
+    const assistantId = stableMessageId(event, state, 'assistant');
+    const contentOrder = nonCanonicalContentOrder(state.contentOrderByMessageId.get(assistantId));
     messages.push({
       type: 'assistant',
-      id: stableMessageId(event, state, 'assistant'),
+      id: assistantId,
       turnId: event.turnId,
       ts: event.ts,
       text: event.content.text,
+      ...(contentOrder ? { contentOrder } : {}),
       modelId: header.modelId,
     });
-    attachPendingThinking(event, state, messages);
+    attachPendingThinking(event, state, messages, assistantId);
     return true;
   }
 
   diagnostic(state, event, 'unsupported_event', `text content with role ${event.role} is not projected`);
   return false;
+}
+
+function nonCanonicalContentOrder(
+  order: readonly AssistantStepContentKind[] | undefined,
+): AssistantStepContentKind[] | undefined {
+  if (!order?.length) return undefined;
+  const present = new Set(order);
+  const canonical = (['thinking', 'text', 'tools'] as const).filter((kind) => present.has(kind));
+  return order.every((kind, index) => kind === canonical[index]) ? undefined : [...order];
+}
+
+function recordStepContentOrder(event: RuntimeEvent, state: ProjectionState): void {
+  const content = event.content;
+  let messageId: string | undefined;
+  let kind: AssistantStepContentKind | undefined;
+  if (event.role === 'model' && content?.kind === 'text') {
+    messageId = event.refs?.providerEventId ?? event.refs?.storedMessageId ?? event.id;
+    kind = 'text';
+  } else if (event.role === 'model' && content?.kind === 'thinking') {
+    messageId = event.refs?.providerEventId ?? event.refs?.storedMessageId ?? event.id;
+    kind = 'thinking';
+  } else if (event.role === 'model' && content?.kind === 'function_call' && event.refs?.stepId) {
+    messageId = event.refs.stepId;
+    kind = 'tools';
+  }
+  if (!messageId || !kind) return;
+  const order = state.contentOrderByMessageId.get(messageId) ?? [];
+  if (!order.includes(kind)) state.contentOrderByMessageId.set(messageId, [...order, kind]);
 }
 
 function normalizeArchiveStatuses(
@@ -420,13 +465,18 @@ function projectThinking(
   messages: StoredMessage[],
 ): boolean {
   if (event.content?.kind !== 'thinking') return false;
+  const messageId = thinkingMessageId(event);
   const pending: PendingThinking = {
     event,
+    messageId,
     text: event.content.text,
     ...(event.content.signature !== undefined ? { signature: event.content.signature } : {}),
   };
+  // The step's assistant text row lands after its thinking in ledger order, so
+  // attach eagerly if it already exists (older ordering), else park by message id
+  // for projectText's attachPendingThinking to claim.
   if (attachThinkingToAssistant(event, pending, messages)) return true;
-  state.thinkingByTurn.set(thinkingKey(event), pending);
+  state.thinkingByMessageId.set(messageId, pending);
   return true;
 }
 
@@ -454,12 +504,19 @@ function projectFunctionCall(
     turnId: event.turnId,
     ts: event.ts,
     toolName: event.content.name,
+    ...(toolActivityKindStateDelta(event) !== undefined
+      ? { activityKind: toolActivityKindStateDelta(event) }
+      : {}),
     ...(stringStateDelta(event, 'displayName') !== undefined
       ? { displayName: stringStateDelta(event, 'displayName') }
       : {}),
     ...(stringStateDelta(event, 'intent') !== undefined
       ? { intent: stringStateDelta(event, 'intent') }
       : {}),
+    // Carry the step pairing through the projection: without it, sessions
+    // rebuilt from the runtime event log lose the tool↔step association and
+    // the UI timeline falls back to legacy tools-before-text ordering.
+    ...(event.refs?.stepId ? { stepId: event.refs.stepId } : {}),
     args: event.content.args,
   });
   return true;
@@ -485,8 +542,15 @@ function projectFunctionResponse(
   const archivedPlaceholder = isArchivedToolResultPlaceholder(event.content.result)
     ? event.content.result
     : undefined;
-  if (!archivedPlaceholder && !isToolResultContent(event.content.result)) {
-    diagnostic(state, event, 'incomplete_event', 'function_response result is not a legacy ToolResultContent');
+  const normalizedShellResult = archivedPlaceholder
+    ? { state: 'not_shell' as const }
+    : normalizeShellToolResultContent(event.content.result);
+  if (normalizedShellResult.state === 'invalid') {
+    diagnostic(state, event, 'incomplete_event', 'function_response contains an invalid shell tool result');
+    return false;
+  }
+  if (!archivedPlaceholder && normalizedShellResult.state === 'not_shell' && !isToolResultContent(event.content.result)) {
+    diagnostic(state, event, 'incomplete_event', 'function_response result is not a supported ToolResultContent');
     return false;
   }
   if (archivedPlaceholder) {
@@ -514,7 +578,9 @@ function projectFunctionResponse(
         rewriteVersion: archivedPlaceholder.rewriteVersion,
         reason: archivedPlaceholder.reason,
       }
-    : event.content.result as ToolResultContent;
+    : normalizedShellResult.state === 'valid'
+      ? normalizedShellResult.content
+      : event.content.result as ToolResultContent;
   messages.push({
     type: 'tool_result',
     id: stableMessageId(event, state, 'tool_result'),
@@ -637,6 +703,15 @@ function projectTerminalTurnState(
     ...(status === 'failed' ? { errorClass: failureClass ?? 'unknown' } : {}),
     partialOutputRetained,
   });
+  if (failureClass === 'tool_step_cap_reached') {
+    messages.push({
+      type: 'system_note',
+      id: `${event.id}:step-limit-notice`,
+      turnId: event.turnId,
+      ts: event.ts,
+      kind: 'step_limit',
+    });
+  }
   if (status === 'failed' && !failureClass) {
     diagnostic(state, event, 'incomplete_event', 'failed terminal event did not carry an exact AgentRunHeader.failureClass');
   }
@@ -650,12 +725,12 @@ function attachPendingThinking(
   event: RuntimeEvent,
   state: ProjectionState,
   messages: StoredMessage[],
+  assistantMessageId: string,
 ): void {
-  const key = thinkingKey(event);
-  const pending = state.thinkingByTurn.get(key);
+  const pending = state.thinkingByMessageId.get(assistantMessageId);
   if (!pending) return;
   if (attachThinkingToAssistant(event, pending, messages)) {
-    state.thinkingByTurn.delete(key);
+    state.thinkingByMessageId.delete(assistantMessageId);
   }
 }
 
@@ -664,9 +739,12 @@ function attachThinkingToAssistant(
   pending: PendingThinking,
   messages: StoredMessage[],
 ): boolean {
+  // Attach to the assistant row whose id equals the thinking's step message id
+  // (per-step pairing). Scans from the tail so the newest matching row wins.
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]!;
     if (message.type !== 'assistant' || message.turnId !== event.turnId) continue;
+    if (message.id !== pending.messageId) continue;
     message.thinking = {
       text: pending.text,
       ...(pending.signature !== undefined ? { signature: pending.signature } : {}),
@@ -676,8 +754,10 @@ function attachThinkingToAssistant(
   return false;
 }
 
-function thinkingKey(event: RuntimeEvent): string {
-  return `${event.runId}:${event.turnId}`;
+function thinkingMessageId(event: RuntimeEvent): string {
+  return event.refs?.providerEventId
+    ?? event.refs?.storedMessageId
+    ?? event.id;
 }
 
 function abortSourceFromRuntime(event: RuntimeEvent, header: AgentRunHeader): string | undefined {
@@ -756,6 +836,11 @@ function turnStatusFor(
 function stringStateDelta(event: RuntimeEvent, key: string): string | undefined {
   const value = event.actions?.stateDelta?.[key];
   return typeof value === 'string' ? value : undefined;
+}
+
+function toolActivityKindStateDelta(event: RuntimeEvent): ToolActivityKind | undefined {
+  const value = stringStateDelta(event, 'activityKind');
+  return TOOL_ACTIVITY_KINDS.find((kind) => kind === value);
 }
 
 function numberStateDelta(event: RuntimeEvent, key: string): number | undefined {
@@ -884,6 +969,7 @@ function semanticMessage(message: StoredMessage): unknown {
         turnId: message.turnId,
         toolUseId: message.id,
         toolName: message.toolName,
+        activityKind: message.activityKind,
         displayName: message.displayName,
         intent: message.intent,
         args: message.args,

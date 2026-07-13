@@ -10,8 +10,12 @@ import type {
   ThemePalette,
   ThemePreference,
 } from '@maka/core';
-import { generalizedErrorMessageChinese } from '@maka/core';
-import type { NavSelection, PermissionQueues } from '@maka/ui';
+import {
+  ShellRunUpdateBuffer,
+  generalizedErrorMessageChinese,
+  type ShellRunUpdate,
+} from '@maka/core';
+import type { LiveTurnProjection, NavSelection, PermissionQueues } from '@maka/ui';
 import { messageReadErrorMessage } from './app-shell-copy';
 import { applyTheme, applyThemePalette } from './theme';
 import { safeLocalStorageSet } from './browser-storage';
@@ -21,6 +25,12 @@ import {
   recordSessionEventStreamChange,
   recordSessionEventStreamEvent,
 } from './session-event-health';
+import { settledSessionTransientIds } from './settled-session-transients.js';
+import {
+  mergeShellRunNotification,
+  mergeShellRunUpdates,
+  type ShellRunUpdatesBySession,
+} from './shell-run-update-state.js';
 
 type RefBox<T> = { current: T };
 type SessionEventHealthUpdater = (
@@ -39,25 +49,13 @@ type ToastApi = {
   }): void;
 };
 
-export function useAppShellRefSync(options: {
-  activeId: string | undefined;
-  activeIdRef: RefBox<string | undefined>;
+export function useAppShellNavRefSync(options: {
   navSelection: NavSelection;
   navSelectionRef: RefBox<NavSelection>;
-  sessions: SessionSummary[];
-  sessionsRef: RefBox<SessionSummary[]>;
 }) {
-  useEffect(() => {
-    options.activeIdRef.current = options.activeId;
-  }, [options.activeId]);
-
   useEffect(() => {
     options.navSelectionRef.current = options.navSelection;
   }, [options.navSelection]);
-
-  useEffect(() => {
-    options.sessionsRef.current = options.sessions;
-  }, [options.sessions]);
 }
 
 export function useAppShellHostEffects(options: {
@@ -66,7 +64,7 @@ export function useAppShellHostEffects(options: {
   setLiveBrowserSessionIds: (sessionIds: string[]) => void;
 }) {
   // Tag the document with the host OS so glass-material CSS rules
-  // (sidebar vibrancy passthrough — see notes/reference-atlas.md §1 + §12.1)
+  // (sidebar vibrancy passthrough)
   // can light up only on macOS, where `BrowserWindow({ vibrancy: 'sidebar' })`
   // paints the native blur material behind the renderer. Other platforms
   // keep their opaque chrome since vibrancy is a no-op there.
@@ -160,6 +158,7 @@ export function useAppShellBootstrapSubscriptions(options: {
   bootstrapSessions: () => Promise<void>;
   clearPendingTurnActionsForSession: (sessionId: string) => void;
   clearSessionRendererState: (sessionId: string) => void;
+  createSession: () => Promise<void> | void;
   handleConnectionEvent: (event: ConnectionEvent) => void;
   openSettings: () => void;
   pendingPermissionModeChangesRef: RefBox<Set<string>>;
@@ -175,6 +174,8 @@ export function useAppShellBootstrapSubscriptions(options: {
   refreshPlanReminders: (options?: { shouldShowError?: () => boolean }) => Promise<void>;
   refreshShellSettings: () => Promise<void>;
   refreshSkills: (options?: { shouldShowError?: () => boolean }) => Promise<void>;
+  refreshManagedSkillSources: (options?: { shouldShowError?: () => boolean }) => Promise<void>;
+  refreshBundledSkillCatalog: (options?: { shouldShowError?: () => boolean }) => Promise<void>;
   refreshSessions: () => Promise<SessionSummary[]>;
   rendererMountedRef: RefBox<boolean>;
   setActiveId: (sessionId: string | undefined) => void;
@@ -187,6 +188,8 @@ export function useAppShellBootstrapSubscriptions(options: {
     void options.refreshAppInfo();
     void options.refreshMemoryActive('载入本地记忆状态失败');
     void options.refreshSkills();
+    void options.refreshManagedSkillSources();
+    void options.refreshBundledSkillCatalog();
     void options.refreshPlanReminders();
     void options.applyVisualSmokeFixture();
   });
@@ -249,6 +252,12 @@ export function useAppShellBootstrapSubscriptions(options: {
     if ((event.metaKey || event.ctrlKey) && event.key === ',') {
       event.preventDefault();
       options.openSettings();
+    }
+    // ⌘/Ctrl+N — new task, mirroring the sidebar 新任务 row (whose kbd hint
+    // advertises this). Plain N only: shift/alt combos stay free.
+    if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && (event.key === 'n' || event.key === 'N')) {
+      event.preventDefault();
+      void options.createSession();
     }
   });
   const markRendererMounted = useEffectEvent(() => {
@@ -393,6 +402,84 @@ export function useActiveSessionEvents(options: {
   }, [activeId]);
 }
 
+export function useShellRunUpdates(options: {
+  activeId: string | undefined;
+  setShellRunUpdatesBySession: (
+    updater: (current: ShellRunUpdatesBySession) => ShellRunUpdatesBySession,
+  ) => void;
+}) {
+  const applyUpdates = useEffectEvent((
+    sessionId: string,
+    updates: Awaited<ReturnType<typeof window.maka.shellRuns.list>>,
+  ) => {
+    options.setShellRunUpdatesBySession((current) => {
+      const active = current[sessionId];
+      const retained = active ? { [sessionId]: active } : {};
+      return mergeShellRunUpdates(
+        retained,
+        updates.filter((update) => update.sessionId === sessionId),
+      );
+    });
+  });
+
+  useEffect(() => {
+    const sessionId = options.activeId;
+    options.setShellRunUpdatesBySession((current) => {
+      if (!sessionId) return {};
+      const active = current[sessionId];
+      return active ? { [sessionId]: active } : {};
+    });
+    if (!sessionId) return;
+
+    let disposed = false;
+    let hydrated = false;
+    let retryTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+    let retryDelayMs = 250;
+    const pending = new ShellRunUpdateBuffer('desktop.shell-run-hydration-buffer');
+    const unsubscribe = window.maka.shellRuns.subscribeUpdates((update) => {
+      if (disposed) return;
+      if (!hydrated) {
+        pending.add(update);
+        return;
+      }
+      options.setShellRunUpdatesBySession((current) => (
+        mergeShellRunNotification(current, sessionId, update)
+      ));
+    });
+    const hydrate = () => {
+      void window.maka.shellRuns.list(sessionId).then((updates) => {
+        if (disposed) return;
+        applyUpdates(sessionId, updates);
+        retryDelayMs = 250;
+        const buffered = pending.drain();
+        for (const update of buffered.updates) {
+          options.setShellRunUpdatesBySession((current) => (
+            mergeShellRunNotification(current, sessionId, update)
+          ));
+        }
+        if (buffered.overflowed) {
+          hydrate();
+          return;
+        }
+        hydrated = true;
+      }).catch(() => {
+        if (disposed) return;
+        retryTimer = globalThis.setTimeout(() => {
+          retryTimer = undefined;
+          hydrate();
+        }, retryDelayMs);
+        retryDelayMs = Math.min(retryDelayMs * 2, 5_000);
+      });
+    };
+    hydrate();
+    return () => {
+      disposed = true;
+      if (retryTimer !== undefined) globalThis.clearTimeout(retryTimer);
+      unsubscribe();
+    };
+  }, [options.activeId]);
+}
+
 export function useSessionEventHealthPolling(options: {
   activeId: string | undefined;
   activePermission: PermissionRequestEvent | undefined;
@@ -447,4 +534,45 @@ export function useSessionEventHealthPolling(options: {
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [activeId, activeSession?.status, activeStreamingLive, hasInFlightLiveTools, activePermission?.requestId]);
+}
+
+// #646: transient live state is only
+// advanced and cleared by the ACTIVE session's SessionEvent stream (subscribeEvents
+// follows activeId only, with no replay of missed events). So any session that
+// reaches a terminal status while backgrounded — or whose terminal status only
+// lands after the user has switched back — leaves that transient frozen mid-turn,
+// surfacing a stuck Stop (via the ungated `activeStreamingLive`) and a half-streamed
+// bubble. Heal it against the authoritative status, not against an event or a switch
+// (both fire before the terminal status is known): whenever the sessions list
+// settles, drop the turn transient of every session that is no longer running /
+// waiting_for_user. Because it keys off the status landing in `sessions`, it closes
+// the hole regardless of which path or timing delivers that status.
+//
+// An active terminal projection is left to its text handoff callback, so this
+// reconcile cannot cut in front of the committed message landing. Background
+// terminal projections have no mounted smoother and are safe to clear.
+// It drops ONLY the turn transient (`clearTurnTransientState`), never the
+// independently-scoped message-load-error / retry / pending-toggle / permission /
+// health state — those survive a mere settle. The clear is idempotent (referentially
+// stable when there's nothing to drop), so the common "terminal session with no
+// transient" case triggers no re-render.
+export function useSettledSessionTransientReconcile(options: {
+  activeId?: string;
+  sessions: readonly SessionSummary[];
+  liveTurnBySessionRef: RefBox<Record<string, LiveTurnProjection>>;
+  clearTurnTransientState: (sessionId: string) => void;
+}) {
+  const reconcile = useEffectEvent(() => {
+    const sessionIds = settledSessionTransientIds({
+      activeId: options.activeId,
+      sessions: options.sessions,
+      liveTurnBySession: options.liveTurnBySessionRef.current,
+    });
+    for (const sessionId of sessionIds) {
+      options.clearTurnTransientState(sessionId);
+    }
+  });
+  useEffect(() => {
+    reconcile();
+  }, [options.activeId, options.sessions]);
 }

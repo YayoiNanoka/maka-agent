@@ -40,18 +40,22 @@ describe('chat Marker shell migration contract (#332 PR2)', () => {
     }
   });
 
-  it('keeps the turn container + deferred reasoning chrome (out of scope)', async () => {
+  it('keeps the turn container (out of scope)', async () => {
     const css = await readAllRendererCss();
     for (const selector of [
       // The `.maka-turn` flex/measure container is NOT a marker — it stays.
       '.maka-turn {',
-      '.maka-turn-tools',
-      '.maka-turn-streaming',
+      // #642 single render path: the separate `.maka-turn-streaming` section is
+      // gone; the streaming answer rides the tail turn's own `.maka-turn` node,
+      // and the content-visibility override that keeps the growing turn painted
+      // re-keys onto its `data-live-streaming` hook.
+      '.maka-turn[data-live-streaming="true"]',
       '.maka-turn[data-search-highlight="true"]',
-      // `.maka-turn-thinking` is explicitly deferred (pseudo-element chevron +
-      // @starting-style fade don't reduce to leaf utilities); it stays authored.
-      '.maka-turn-thinking',
-      '.maka-turn-thinking [data-slot="collapsible-trigger"]',
+      // NOTE: `.maka-turn-thinking` and `.maka-turn-tools` were retired by the
+      // streaming UI rework — reasoning now renders through the `DeepThinking`
+      // disclosure (Tailwind-literal chrome + the `maka-text-shimmer` primitive)
+      // and tools through the flat `ToolTrow`, so the hand-authored committed-
+      // turn thinking `<details>` chrome and the tools-section wrapper are gone.
     ]) {
       assert.ok(css.includes(selector), `out-of-scope turn rule "${selector}" must be preserved`);
     }
@@ -83,8 +87,10 @@ describe('chat Marker shell migration contract (#332 PR2)', () => {
       // lineage badge directions (models.css)
       'data-[direction=forward]:text-[oklch(from_var(--info-text)_calc(l_-_0.06)_c_h)]',
       'data-[direction=reverse]:text-[oklch(from_var(--brand-deep)_calc(l_-_0.04)_c_h)]',
-      // footer + footer action (models.css)
-      'opacity-[0.72] hover:opacity-100 focus-within:opacity-100',
+      // footer + footer action (models.css). #642: the footer is hidden by
+      // default and revealed on hover / focus-within of the answer block
+      // (`group/answer`), replacing the retired quiet-0.72 + settle fade-in.
+      'opacity-0 [transition:opacity_var(--duration-quick)_var(--ease-out-strong)] group-hover/answer:opacity-100 focus-within:opacity-100',
       'min-h-[28px]',
       // `h-8` (→30px) is folded into the footer-action / lineage-badge shells
       // now that the call sites use `UiButton size="nav"` (bare); it used to

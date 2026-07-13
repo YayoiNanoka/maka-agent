@@ -2,6 +2,8 @@ import type { PermissionMode } from '@maka/core/permission';
 import type { CompiledPermissionProfile } from '@maka/core/permission-profile-compiler';
 import { buildBuiltinTools, type BuildBuiltinToolsOptions } from './builtin-tools.js';
 import type { SandboxPathContext, SandboxPlatform, SandboxablePreference } from './sandbox/index.js';
+import type { SandboxEnforcementManager } from './sandbox/types.js';
+import { createDefaultSandboxManager } from './sandbox/default-sandbox-manager.js';
 import { createPermissionAwareSandboxContext } from './sandbox/permission-aware-context.js';
 import type { PermissionAwareSandboxContext } from './sandbox/permission-aware-context.js';
 import { FilesystemWorkerClient } from './filesystem-worker/client.js';
@@ -13,7 +15,6 @@ import {
   createLocalWorkspaceExecutor,
   SandboxedCommandWorkspaceExecutor,
   type WorkspaceCommandRunner,
-  type WorkspaceCommandSandboxManager,
   type WorkspaceBashExecutor,
   type WorkspaceExecutor,
   type WorkspaceFileOperations,
@@ -24,7 +25,7 @@ export interface CreatePermissionAwareWorkspaceExecutorInput {
   cwd: string;
   workspaceRoots?: readonly string[];
   inner?: WorkspaceExecutor;
-  sandboxManager?: WorkspaceCommandSandboxManager;
+  sandboxManager?: SandboxEnforcementManager;
   sandboxPreference?: SandboxablePreference;
   platform?: SandboxPlatform;
   pathContext?: Partial<Omit<SandboxPathContext, 'workspaceRoots'>>;
@@ -37,7 +38,7 @@ export interface PermissionAwareWorkspaceExecutorAssembly {
   commandExecutor: WorkspaceBashExecutor;
   fileOperations: WorkspaceFileOperations;
   compiledProfile: CompiledPermissionProfile;
-  sandboxManager: WorkspaceCommandSandboxManager;
+  sandboxManager: SandboxEnforcementManager;
   sandboxContext: PermissionAwareSandboxContext;
 }
 
@@ -52,18 +53,18 @@ export interface PermissionAwareBuiltinToolsAssembly extends PermissionAwareWork
 export function createPermissionAwareWorkspaceExecutor(
   input: CreatePermissionAwareWorkspaceExecutorInput,
 ): PermissionAwareWorkspaceExecutorAssembly {
+  const sandboxManager = input.sandboxManager ?? createDefaultSandboxManager();
   const builtContext = createPermissionAwareSandboxContext({
     mode: input.mode,
     cwd: input.cwd,
     ...(input.workspaceRoots ? { workspaceRoots: input.workspaceRoots } : {}),
-    ...(input.sandboxManager ? { sandboxManager: input.sandboxManager } : {}),
+    sandboxManager,
     ...(input.sandboxPreference ? { preference: input.sandboxPreference } : {}),
     ...(input.platform ? { platform: input.platform } : {}),
     ...(input.pathContext ? { pathContext: input.pathContext } : {}),
   });
   const { compiledProfile, context } = builtContext;
   const workspaceRoots = compiledProfile.workspaceRoots;
-  const sandboxManager = context.sandboxManager;
   const pathContext = context.pathContext;
 
   const local = input.inner ?? createLocalWorkspaceExecutor();
@@ -115,8 +116,15 @@ export function buildPermissionAwareBuiltinTools(
     ...assembly,
     tools: buildBuiltinTools({
       ...(input.shellRuns ? { shellRuns: input.shellRuns } : {}),
+      ...(input.runtimeResources ? { runtimeResources: input.runtimeResources } : {}),
+      ...(input.backgroundTasks ? { backgroundTasks: input.backgroundTasks } : {}),
+      ...(input.ptyControls ? { ptyControls: input.ptyControls } : {}),
+      ...(input.shell ? { shell: input.shell } : {}),
       commandExecutor: assembly.commandExecutor,
       fileOperations: assembly.fileOperations,
+      permissionProfile: assembly.compiledProfile.profile,
+      sandboxManager: assembly.sandboxManager,
+      ...(assembly.sandboxContext.platform ? { sandboxPlatform: assembly.sandboxContext.platform } : {}),
       additionalPermissionPlanningContext: {
         profile: assembly.compiledProfile.profile,
         workspaceRoots: assembly.compiledProfile.workspaceRoots,

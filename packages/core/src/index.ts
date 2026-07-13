@@ -16,11 +16,17 @@ export type {
   ThinkingDeltaEvent,
   ThinkingCompleteEvent,
   ToolStartEvent,
+  ToolActivityKind,
   ToolOutputDeltaEvent,
   ToolOutputStream,
   ToolProgressEvent,
   ToolResultEvent,
   ToolResultContent,
+  ShellRunSnapshotResult,
+  ShellRunCompactResult,
+  ShellRunStateResult,
+  ShellRunUpdateOwnership,
+  ShellRunUpdate,
   PermissionRequestEvent,
   PermissionDecisionAckEvent,
   PlanSubmittedEvent,
@@ -32,11 +38,21 @@ export type {
   StorageRef,
   AttachmentRef,
   AttachmentIngestItem,
+  CompleteStopReason,
 } from './events.js';
 export {
+  failureClassFromCompleteStopReason,
+  TOOL_ACTIVITY_KINDS,
   TOOL_OUTPUT_DELTA_MAX_CHARS,
   TOOL_OUTPUT_STREAMS,
 } from './events.js';
+
+// tool-result-status.ts — settled tool activity status from tool_result
+export type { SettledToolActivityStatus } from './tool-result-status.js';
+export {
+  isCancelledToolResultContent,
+  toolResultActivityStatus,
+} from './tool-result-status.js';
 
 // runtime-event.ts — canonical Runtime v2 event contract.
 // Subpath `@maka/core/runtime-event` is the canonical import; these barrel
@@ -96,6 +112,7 @@ export type {
   StoredMessage,
   UserMessage,
   AssistantMessage,
+  AssistantStepContentKind,
   ToolCallMessage,
   ToolResultMessage,
   PermissionDecisionMessage,
@@ -106,6 +123,7 @@ export {
   SESSION_STATUSES,
   SESSION_BLOCKED_REASONS,
   TURN_STATUSES,
+  STEP_LIMIT_NOTICE_TEXT,
   deriveTurnRecords,
   isSessionStatus,
   isSessionBlockedReason,
@@ -134,15 +152,58 @@ export { AGENT_RUN_STATUSES } from './agent-run.js';
 
 // shell-run.ts
 export type {
+  PipeShellOutput,
+  PtyShellOutput,
+  ShellMode,
+  ShellOutput,
+  ShellRunOperation,
+  ShellRunPatch,
   ShellRunRecord,
   ShellRunStatus,
   ShellRunStore,
   ShellRunTerminalStatus,
 } from './shell-run.js';
+export type {
+  ShellRunMergeDiagnostic,
+  ShellRunMergeDiagnosticReporter,
+  ShellRunStateMerge,
+  ShellRunUpdateBufferDrain,
+  ShellRunUpdateMerge,
+  ShellRunToolResult,
+} from './shell-run-result.js';
+export {
+  SHELL_RUN_UPDATE_BUFFER_MAX_ENTRIES,
+  ShellRunUpdateBuffer,
+  mergeShellRunState,
+  mergeShellRunStateWithDiagnostics,
+  mergeShellRunUpdate,
+  projectShellRunUpdateForSession,
+  isValidLegacyShellRunState,
+  normalizeShellToolResultContent,
+  shellRunStateProjection,
+} from './shell-run-result.js';
+export type { ShellToolResultNormalization } from './shell-run-result.js';
+export {
+  ptyCompactTerminalLine,
+  ptyHumanTerminalText,
+  ptyTuiTerminalView,
+  ptyTuiTerminalRows,
+} from './pty-output-view.js';
+export type { PtyTuiTerminalView } from './pty-output-view.js';
+export {
+  projectToolActivityArgs,
+  projectWriteStdinInput,
+  readWriteStdinInputPreview,
+  WRITE_STDIN_INPUT_PREVIEW_MAX_CHARS,
+  type WriteStdinInputPreview,
+} from './tool-activity-args.js';
 export {
   SHELL_RUN_STATUSES,
   SHELL_RUN_TERMINAL_STATUSES,
+  isShellOutput,
+  isShellRunId,
   isShellRunStatus,
+  isValidShellRunState,
   isTerminalShellRunStatus,
 } from './shell-run.js';
 
@@ -196,6 +257,8 @@ export type {
   SandboxEscalationRequest,
   SandboxEscalationRiskSummary,
   PermissionResponse,
+  ToolPermissionRule,
+  ToolPermissionRuleMatchInput,
 } from './permission.js';
 export {
   TOOL_SANDBOX_REQUIREMENTS,
@@ -206,14 +269,16 @@ export {
   TOOL_CATEGORIES,
   PERMISSION_POLICY,
   BUILTIN_TOOL_CATEGORY,
-  SAFE_SHELL_PREFIXES,
   PRIVILEGED_SHELL_PREFIXES,
+  PRIVILEGED_SHELL_PATTERNS,
   FS_DESTRUCTIVE_PATTERNS,
   DESTRUCTIVE_GIT_PATTERNS,
   categorizeBash,
+  classifyToolUse,
   isPermissionMode,
   approvalRoutingPolicyForMode,
   isToolCategory,
+  matchToolPermissionRules,
   preToolUse,
 } from './permission.js';
 
@@ -276,7 +341,6 @@ export {
   serializeAdditionalPermissionProfile,
   validateAdditionalPermissionProfile,
 } from './additional-permissions.js';
-
 // permission-profile-compiler.ts
 export type {
   CompilePermissionProfileInput,
@@ -490,7 +554,7 @@ export {
   pkceCodeChallenge,
 } from './oauth-subscription.js';
 
-// incognito.ts (PR-INCOGNITO-0) — cross-lane privacy contract; no IPC/storage/UI.
+// incognito.ts — cross-cutting workspace privacy contract.
 export type {
   WorkspacePrivacyContext,
   WorkspacePrivacyContextInvalidReason,
@@ -718,7 +782,13 @@ export {
 } from './voice.js';
 
 // backend-types.ts
-export type { BackendSendInput, PermissionDecision } from './backend-types.js';
+export type {
+  BackendSendInput,
+  PermissionDecision,
+  AgentBackend,
+  BackendCompactHistoryInput,
+  BackendCompactHistoryResult,
+} from './backend-types.js';
 
 // llm-connections.ts
 export type {
@@ -732,14 +802,18 @@ export type {
   ModelDiscoverySource,
   ModelInfo,
   ProviderCategory,
+  ProviderCatalogGroup,
   ProviderDefaults,
+  ProviderRuntimeAdapter,
   ProviderType,
   UpdateConnectionInput,
 } from './llm-connections.js';
 export {
   CODEX_SUBSCRIPTION_UNSUPPORTED_CHATGPT_MODELS,
+  PROVIDER_REGISTRY,
   PROVIDER_DEFAULTS,
   CATALOG_PROVIDER_TYPES,
+  RECOMMENDED_PROVIDER_TYPES,
   READY_PROVIDER_TYPES,
   backendKindOf,
   effectiveBaseUrl,
@@ -760,6 +834,13 @@ export {
   isConnectionReady,
   isRealConnection,
 } from './connection-readiness.js';
+
+// connection-error-copy.ts — shared not-ready-connection fix copy
+export {
+  describeChatConfigurationReason,
+  parseNoRealConnectionError,
+} from './connection-error-copy.js';
+export type { ParsedNoRealConnectionError } from './connection-error-copy.js';
 
 // session-name.ts (PR-UI-IPC-2)
 export type { NormalizeSessionNameResult } from './session-name.js';
@@ -838,6 +919,7 @@ export type {
   ChatDefaultsSettings,
   NetworkProxySettings,
   NetworkSettings,
+  NotificationSettings,
   OpenGatewaySettings,
   OpenGatewayRuntimeStatus,
   PrivacySettings,
@@ -866,6 +948,7 @@ export {
   CHAT_DEFAULT_PERMISSION_MODES,
   DEFAULT_PROXY_BYPASS_DOMAINS,
   MAX_ALLOWED_USER_IDS,
+  SETTINGS_SECTIONS,
   THEME_PALETTES,
   createDefaultBotChannel,
   createDefaultSettings,

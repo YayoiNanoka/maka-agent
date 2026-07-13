@@ -55,11 +55,38 @@ describe('isolated headless tools', () => {
       cmd: 'npm test',
       status: 'failed',
       exitCode: 7,
-      stdout: 'out\n',
-      stderr: 'err\n',
-      stdoutTruncated: false,
-      stderrTruncated: false,
+      output: {
+        mode: 'pipes',
+        stdout: 'out\n',
+        stderr: 'err\n',
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        redacted: false,
+      },
     });
+  });
+
+  test('Bash declares the executor shell dialect to the model, and stays silent on POSIX', () => {
+    // Selection without declaration is the original Windows bug (shell-detect.ts):
+    // createHarborCellLocalToolExecutor runs PowerShell on Windows, so the
+    // isolated Bash description must tell the model that dialect.
+    const pwshBash = buildIsolatedBashTool({
+      shell: { kind: 'pwsh', displayName: 'PowerShell 7 (pwsh)', exe: 'C:/pwsh.exe' },
+      async exec() {
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    });
+    assert.match(pwshBash.description, /PowerShell 7 \(pwsh\)/);
+    assert.match(pwshBash.description, /write PowerShell syntax, not cmd or bash syntax/);
+
+    // No shell (POSIX / remote container): the historical description is the
+    // contract; no dialect sentence is added.
+    const posixBash = buildIsolatedBashTool({
+      async exec() {
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    });
+    assert.doesNotMatch(posixBash.description, /PowerShell|cmd syntax/);
   });
 
   test('Bash leaves the default timeout to the isolated executor', async () => {
@@ -98,16 +125,16 @@ describe('isolated headless tools', () => {
         abortSignal: new AbortController().signal,
         emitOutput: (stream, chunk) => emitted.push({ stream, chunk }),
       },
-    ) as { stdout: string };
+    ) as { output: { stdout: string } };
 
     // emitOutput surfaces whatever the executor RETURNS to history (there is no
     // live per-chunk channel across the executor boundary — see the Harbor tests
     // for the real bounded path). The model-facing result is bounded further.
     assert.equal(emitted.find((event) => event.stream === 'stdout')?.chunk, big);
-    assert.ok(result.stdout.includes('line5000'));
-    assert.ok(result.stdout.includes('truncated'));
-    assert.ok(!result.stdout.includes('line1\n'));
-    assert.ok(result.stdout.length < big.length);
+    assert.ok(result.output.stdout.includes('line5000'));
+    assert.ok(result.output.stdout.includes('truncated'));
+    assert.ok(!result.output.stdout.includes('line1\n'));
+    assert.ok(result.output.stdout.length < big.length);
   });
 
   test('Bash preserves retained-tail truncation flags from the isolated executor', async () => {
@@ -120,10 +147,10 @@ describe('isolated headless tools', () => {
     const result = await bash.impl(
       { command: 'noisy' },
       toolCtx('/workspace'),
-    ) as { stdoutTruncated: boolean; stderrTruncated: boolean };
+    ) as { output: { stdoutTruncated: boolean; stderrTruncated: boolean } };
 
-    assert.equal(result.stdoutTruncated, true);
-    assert.equal(result.stderrTruncated, false);
+    assert.equal(result.output.stdoutTruncated, true);
+    assert.equal(result.output.stderrTruncated, false);
   });
 
   test('Bash delegates cleanup commands to the isolated executor', async () => {
@@ -146,7 +173,7 @@ describe('isolated headless tools', () => {
         abortSignal: new AbortController().signal,
         emitOutput: (stream, chunk) => emitted.push({ stream, chunk }),
       },
-    ) as { exitCode: number; stdout: string; stderr: string };
+    ) as { exitCode: number; output: { stdout: string; stderr: string } };
 
     assert.deepEqual(calls, [{
       command: 'rm -f *.gcda *.gcno *.gcov',
@@ -155,8 +182,8 @@ describe('isolated headless tools', () => {
       boundedTail: true,
     }]);
     assert.equal(result.exitCode, 0);
-    assert.equal(result.stdout, 'cleaned\n');
-    assert.equal(result.stderr, '');
+    assert.equal(result.output.stdout, 'cleaned\n');
+    assert.equal(result.output.stderr, '');
     assert.deepEqual(emitted, [{ stream: 'stdout', chunk: 'cleaned\n' }]);
   });
 

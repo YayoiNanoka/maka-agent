@@ -1,8 +1,7 @@
 /**
  * InvocationContext — Runtime v2 invocation/run spine.
  *
- * Source: docs/runtime-v2-architecture-evolution.md §Target Architecture,
- * §Proposed Module Shape, and Phase 2 (RuntimeRunner Shell).
+ * Architecture: docs/architecture/runtime-core-architecture-draft.md
  *
  * Phase 2 scope: types + injectable providers. RuntimeRunner consumes these
  * to build a testable invocation shell and can also be handed production ids
@@ -175,6 +174,8 @@ export interface InvocationResult {
   sessionId: string;
   turnId: string;
   status: InvocationResultStatus;
+  /** Last non-partial model text from a successfully completed invocation. */
+  finalOutput?: string;
   /** Every RuntimeEvent collected, in emission order (user event first). */
   events: RuntimeEvent[];
   /** Present when status === 'failed'. */

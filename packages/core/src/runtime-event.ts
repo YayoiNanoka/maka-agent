@@ -8,7 +8,7 @@
  * projections that should be written from -- or explicitly linked to -- these
  * events.
  *
- * Source: docs/runtime-v2-architecture-evolution.md §Canonical RuntimeEvent
+ * Architecture: docs/architecture/runtime-core-architecture-draft.md
  *
  * Phase 1 scope: types + small pure helpers only. No storage, runner,
  * projection, or ledger logic lives here. Those arrive in later nodes.
@@ -284,6 +284,14 @@ export interface RuntimeEventRefs {
   toolCallId?: string;
   providerEventId?: string;
   artifactId?: string;
+  /**
+   * Assistant step id for a function_call event: the id of the step's
+   * text/thinking messages (their `providerEventId`). Model replay pairs a
+   * step's signed thinking with its tool calls by this id. Absent on legacy
+   * (per-turn) events; a missing stepId marks history that cannot be paired
+   * and is replayed with the older degraded semantics.
+   */
+  stepId?: string;
 }
 
 // ============================================================================

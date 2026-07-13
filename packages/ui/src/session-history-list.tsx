@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent } from 'react';
+import { memo, useEffect, useRef, useState, type FocusEvent, type KeyboardEvent } from 'react';
 import type { SessionSummary } from '@maka/core';
 import { formatCompactTimestamp } from '@maka/core';
 import {
@@ -12,6 +12,7 @@ import {
   Hourglass,
   Loader2,
   MessageSquare,
+  MoreHorizontal,
   Pencil,
   Pin,
   PinOff,
@@ -20,36 +21,9 @@ import {
 } from './icons.js';
 import { EmptyState } from './empty-state.js';
 import { OverlayScrollArea } from './overlay-scroll-area.js';
-import { Button as UiButton, cn } from './ui.js';
-import { cva } from 'class-variance-authority';
-
-const rowActionVariants = cva(
-  [
-    'grid h-7 w-7 place-items-center rounded-sm border-0 bg-transparent',
-    'text-[var(--foreground-secondary)]',
-    'transition-[background-color,color,box-shadow] duration-[var(--duration-quick)] ease-[var(--ease-out-strong)]',
-    'hover:bg-foreground/5 hover:text-foreground',
-    'focus-visible:outline-none focus-visible:bg-foreground/5 focus-visible:text-foreground focus-visible:ring-[3px] focus-visible:ring-accent/14',
-    'disabled:cursor-default disabled:bg-transparent disabled:text-[var(--muted-foreground)] disabled:shadow-none',
-    'disabled:hover:bg-transparent disabled:hover:text-[var(--muted-foreground)]',
-    'data-[active=true]:text-accent',
-    'data-[pending=true]:cursor-progress data-[pending=true]:bg-foreground/5 data-[pending=true]:text-foreground data-[pending=true]:opacity-78',
-  ],
-  {
-    variants: {
-      tone: {
-        default: '',
-        danger: [
-          'hover:bg-destructive/10 hover:text-destructive-text',
-          'focus-visible:bg-destructive/10 focus-visible:text-destructive-text focus-visible:ring-destructive/18',
-        ],
-      },
-    },
-    defaultVariants: {
-      tone: 'default',
-    },
-  },
-);
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from './primitives/menu.js';
+import { Button as UiButton } from './ui.js';
+import { describeBlockedReason, presentSessionStatus } from './session-status-presentation.js';
 
 type SessionRowActionId = 'flag' | 'archive' | 'rename' | 'delete';
 type SessionHistoryGroupVariant = 'status' | 'project';
@@ -81,7 +55,7 @@ export function SessionHistoryList(props: {
   /**
    * Per-session-id boolean flag: true when the session has a live streaming
    * delta in flight. Rendered as a small pulsing accent dot on the row.
-   * Caller (main.tsx) derives this from `streamingBySession` so the sidebar
+   * Caller derives this from the live-turn projection so the sidebar
    * shows live activity without subscribing to the stream itself.
    */
   streamingSessionIds?: Set<string>;
@@ -310,7 +284,6 @@ function SessionListGroups(props: {
               >
                 <ChevronRight
                   size={12}
-                  strokeWidth={2}
                   aria-hidden="true"
                   style={{
                     transform: expanded ? 'rotate(90deg)' : undefined,
@@ -382,7 +355,7 @@ function ProjectSessionGroup(props: {
         aria-expanded={expanded}
         aria-controls={`maka-list-group-body-${props.groupKey}`}
       >
-        <FolderOpen size={14} strokeWidth={1.75} aria-hidden="true" />
+        <FolderOpen size={14} aria-hidden="true" />
         <span>{props.label}</span>
       </UiButton>
       {expanded && (
@@ -420,7 +393,7 @@ function ProjectSessionGroup(props: {
 
 /**
  * Small inline icon next to the session name representing its
- * lifecycle status (PR109b, design-system §9.8). Hidden for `active`
+ * lifecycle status. Hidden for `active`
  * since that's the default and would add visual noise to most rows.
  *
  * `aborted` is rendered as muted history: not an error, not active,
@@ -439,15 +412,13 @@ function SessionStatusIcon(props: { session: SessionSummary }) {
   if (status === 'active') return null;
   const Icon = STATUS_ICON_BY_STATUS[status as keyof typeof STATUS_ICON_BY_STATUS];
   if (!Icon) return null;
-  const label = STATUS_LABEL_BY_STATUS[status as keyof typeof STATUS_LABEL_BY_STATUS];
-  const tone = STATUS_TONE_BY_STATUS[status as keyof typeof STATUS_TONE_BY_STATUS];
+  const { label, tone } = presentSessionStatus(status);
   // `blocked` may attach a reason; we surface the generalized text in
   // the tooltip without exposing the raw enum identifier (per @kenji
-  // i18n contract). The reason mapping lives in the renderer side; this
-  // file knows only the status itself, so the tooltip is just the
-  // status label.
+  // i18n contract). The shared presentation module owns the mapping so
+  // sidebar and renderer surfaces cannot drift.
   const blockedDetail = status === 'blocked' && session.blockedReason
-    ? BLOCKED_REASON_TOOLTIP[session.blockedReason as keyof typeof BLOCKED_REASON_TOOLTIP] ?? null
+    ? describeBlockedReason(session.blockedReason)
     : null;
   const title = blockedDetail ? `${label} · ${blockedDetail}` : label;
   return (
@@ -458,7 +429,7 @@ function SessionStatusIcon(props: { session: SessionSummary }) {
       aria-label={title}
       title={title}
     >
-      <Icon size={12} strokeWidth={2} aria-hidden="true" />
+      <Icon size={12} aria-hidden="true" />
     </span>
   );
 }
@@ -482,10 +453,6 @@ const SIDEBAR_UNREAD_SUPPRESSED_STATUSES = new Set<string>([
   'blocked',
 ]);
 
-// Keep these maps in sync with `apps/desktop/src/renderer/session-status-presentation.ts`.
-// The presentation helper is the authoritative source; we duplicate the
-// minimum subset here to keep @maka/ui independent of the renderer
-// workspace.
 const STATUS_ICON_BY_STATUS = {
   running: Loader2,
   waiting_for_user: Hourglass,
@@ -494,43 +461,6 @@ const STATUS_ICON_BY_STATUS = {
   done: CircleCheckBig,
   archived: Archive,
   aborted: Ban,
-} as const;
-
-const STATUS_LABEL_BY_STATUS = {
-  running: '进行中',
-  waiting_for_user: '等你确认',
-  blocked: '已阻塞',
-  review: '待审核',
-  done: '已完成',
-  archived: '已归档',
-  aborted: '已中止',
-} as const;
-
-// `blocked` was 'destructive' (red), which read as a hard error in the
-// chat header even when the session was just waiting on permission or a
-// connection retry. The chat top-right cluster sits visually alongside
-// monochrome quiet-icon buttons, so the bright red pill clashed. Most
-// blocked sessions are recoverable (permission_required, auth retry,
-// missing connection), so 'warning' (warm yellow) is the honest tone —
-// "you need to do something" rather than "this failed". The destructive
-// red is reserved for hard failures (e.g. permanent connection / auth
-// rejection), which surface through ChatHeaderAlertBadge instead.
-const STATUS_TONE_BY_STATUS = {
-  running: 'accent',
-  waiting_for_user: 'warning',
-  blocked: 'warning',
-  review: 'info',
-  done: 'success',
-  archived: 'muted',
-  aborted: 'muted',
-} as const;
-
-const BLOCKED_REASON_TOOLTIP = {
-  NO_REAL_CONNECTION: '等待配置可用模型连接',
-  auth: '需要重新登录',
-  permission_required: '等待权限确认',
-  tool_failed: '工具调用失败',
-  unknown: '运行中断，可重试',
 } as const;
 
 const SessionRow = memo(function SessionRow(props: {
@@ -550,6 +480,7 @@ const SessionRow = memo(function SessionRow(props: {
   const { session, active, streaming, stale, actions, onSelect } = props;
   const [editing, setEditing] = useState(false);
   const [actionsVisible, setActionsVisible] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [pendingAction, setPendingAction] = useState<SessionRowActionId | null>(null);
   const rowMountedRef = useRef(true);
   const pendingActionRef = useRef<SessionRowActionId | null>(null);
@@ -561,7 +492,7 @@ const SessionRow = memo(function SessionRow(props: {
   // would silently commit the user's typed value despite the cancel.
   const escapeCancelledRef = useRef(false);
   const actionBusy = pendingAction !== null;
-  const actionTabIndex = actionsVisible ? 0 : -1;
+  const actionTriggerVisible = actionsVisible || menuOpen;
 
   useEffect(() => {
     rowMountedRef.current = true;
@@ -581,12 +512,7 @@ const SessionRow = memo(function SessionRow(props: {
     input.select();
   }, [editing]);
 
-  const stopPropagation = (event: MouseEvent<HTMLButtonElement>) => {
-    event.stopPropagation();
-  };
-
-  function startRename(event: MouseEvent<HTMLButtonElement>) {
-    stopPropagation(event);
+  function startRename() {
     if (!actions || pendingActionRef.current) return;
     setEditing(true);
   }
@@ -615,8 +541,7 @@ const SessionRow = memo(function SessionRow(props: {
     runRowAction('rename', () => actions.onRename(session.id, trimmed));
   }
 
-  function handleDelete(event: MouseEvent<HTMLButtonElement>) {
-    stopPropagation(event);
+  function handleDelete() {
     if (!actions) return;
     // Delegation: the App-level handler owns the confirmation flow via the
     // toast system (PR24), so SessionRow stays presentation-only.
@@ -633,6 +558,7 @@ const SessionRow = memo(function SessionRow(props: {
       className="maka-list-row"
       data-active={active}
       data-editing={editing}
+      data-menu-open={menuOpen ? 'true' : undefined}
       data-streaming={streaming ? 'true' : undefined}
       data-stale={stale ? 'true' : undefined}
       onMouseEnter={() => setActionsVisible(true)}
@@ -780,97 +706,55 @@ const SessionRow = memo(function SessionRow(props: {
         </UiButton>
       )}
       {actions && !editing && (
-        <div
-          className="maka-list-row-actions"
-          aria-label="对话操作"
-          aria-hidden={actionsVisible ? undefined : 'true'}
-          data-visible={actionsVisible ? 'true' : undefined}
-        >
-          {/* PR-SESSION-ROW-ACTIONS-PRIMITIVE-0 (round 8/30):
-              four hover-revealed action buttons routed through
-              UiButton variant="quiet" size="icon-sm". Custom
-              `.maka-list-row-action` still owns the overlay
-              positioning + reveal animation; primitive carries
-              the disabled, focus-visible, and `:active` contract.
-              The danger variant only adds a destructive color
-              tint via class override, not a different primitive
-              variant — keeps the overlay shape uniform. */}
-          <UiButton
-            type="button"
-            variant="quiet"
-            size="nav"
-            className={cn('maka-list-row-action', rowActionVariants())}
-            tabIndex={actionTabIndex}
-            onClick={(event) => {
-              stopPropagation(event);
-              runRowAction('flag', () => actions.onToggleFlag(session.id, !session.isFlagged));
-            }}
-            aria-label={session.isFlagged ? '取消置顶对话' : '置顶对话'}
-            aria-busy={pendingAction === 'flag' ? 'true' : undefined}
-            data-active={session.isFlagged}
-            data-pending={pendingAction === 'flag' ? 'true' : undefined}
+        <Menu open={menuOpen} onOpenChange={setMenuOpen}>
+          <MenuTrigger
+            aria-label="对话操作"
+            aria-hidden={actionTriggerVisible ? undefined : 'true'}
+            className="maka-list-row-menu-trigger"
+            data-visible={actionTriggerVisible ? 'true' : undefined}
             disabled={actionBusy}
-            title={session.isFlagged ? '取消置顶对话' : '置顶对话'}
+            tabIndex={actionTriggerVisible ? 0 : -1}
           >
-            {session.isFlagged
-              ? <PinOff size={14} strokeWidth={1.75} aria-hidden="true" />
-              : <Pin size={14} strokeWidth={1.75} aria-hidden="true" />}
-          </UiButton>
-          <UiButton
-            type="button"
-            variant="quiet"
-            size="nav"
-            className={cn('maka-list-row-action', rowActionVariants())}
-            tabIndex={actionTabIndex}
-            onClick={startRename}
-            aria-label="重命名对话"
-            aria-busy={pendingAction === 'rename' ? 'true' : undefined}
-            data-pending={pendingAction === 'rename' ? 'true' : undefined}
-            disabled={actionBusy}
-            title="重命名（双击行名也可）"
-          >
-            <Pencil size={14} strokeWidth={1.75} aria-hidden="true" />
-          </UiButton>
-          <UiButton
-            type="button"
-            variant="quiet"
-            size="nav"
-            className={cn('maka-list-row-action', rowActionVariants())}
-            tabIndex={actionTabIndex}
-            onClick={(event) => {
-              stopPropagation(event);
-              runRowAction('archive', () => (
+            <MoreHorizontal size={16} aria-hidden="true" />
+          </MenuTrigger>
+          <MenuPopup align="end" side="bottom">
+            <MenuItem
+              disabled={actionBusy}
+              onClick={() => runRowAction('flag', () => actions.onToggleFlag(session.id, !session.isFlagged))}
+            >
+              {session.isFlagged
+                ? <PinOff size={16} aria-hidden="true" />
+                : <Pin size={16} aria-hidden="true" />}
+              {session.isFlagged ? '取消置顶' : '置顶'}
+            </MenuItem>
+            <MenuItem disabled={actionBusy} onClick={startRename}>
+              <Pencil size={16} aria-hidden="true" />
+              重命名
+            </MenuItem>
+            <MenuItem
+              disabled={actionBusy}
+              onClick={() => runRowAction('archive', () => (
                 session.isArchived
                   ? actions.onUnarchive(session.id)
                   : actions.onArchive(session.id)
-              ));
-            }}
-            aria-label={session.isArchived ? '取消归档对话' : '归档对话'}
-            aria-busy={pendingAction === 'archive' ? 'true' : undefined}
-            data-pending={pendingAction === 'archive' ? 'true' : undefined}
-            disabled={actionBusy}
-            title={session.isArchived ? '取消归档' : '归档'}
-          >
-            {session.isArchived
-              ? <ArchiveRestore size={14} strokeWidth={1.75} aria-hidden="true" />
-              : <Archive size={14} strokeWidth={1.75} aria-hidden="true" />}
-          </UiButton>
-          <UiButton
-            type="button"
-            variant="quiet"
-            size="nav"
-            className={cn('maka-list-row-action', rowActionVariants({ tone: 'danger' }))}
-            tabIndex={actionTabIndex}
-            onClick={handleDelete}
-            aria-label="删除对话"
-            aria-busy={pendingAction === 'delete' ? 'true' : undefined}
-            data-pending={pendingAction === 'delete' ? 'true' : undefined}
-            disabled={actionBusy}
-            title="删除"
-          >
-            <Trash2 size={14} strokeWidth={1.75} aria-hidden="true" />
-          </UiButton>
-        </div>
+              ))}
+            >
+              {session.isArchived
+                ? <ArchiveRestore size={16} aria-hidden="true" />
+                : <Archive size={16} aria-hidden="true" />}
+              {session.isArchived ? '取消归档' : '归档'}
+            </MenuItem>
+            <MenuSeparator />
+            <MenuItem
+              variant="destructive"
+              disabled={actionBusy}
+              onClick={handleDelete}
+            >
+              <Trash2 size={16} aria-hidden="true" />
+              删除
+            </MenuItem>
+          </MenuPopup>
+        </Menu>
       )}
     </div>
   );

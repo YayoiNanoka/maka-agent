@@ -92,6 +92,7 @@ class CellReportingBackend implements AgentBackend {
       costUsd: 0.0042,
       systemPromptHash: 'sha256:cell-prompt',
     };
+    yield { type: 'text_complete', id: 'cell-text', messageId: 'cell-message', turnId: input.turnId, ts, text: 'cell complete' };
     yield { type: 'complete', id: 'cell-complete', turnId: input.turnId, ts, stopReason: 'end_turn' };
   }
 
@@ -154,6 +155,7 @@ class StepCapThenCompleteBackend implements AgentBackend {
         rawFinishReason: 'tool-calls',
         runtimeSteps: 50,
       };
+      yield { type: 'text_complete', id: 'text-step-cap', messageId: 'step-cap-message', turnId: input.turnId, ts, text: 'continue' };
       yield { type: 'complete', id: 'complete-step-cap', turnId: input.turnId, ts, stopReason: 'end_turn' };
       return;
     }
@@ -169,6 +171,7 @@ class StepCapThenCompleteBackend implements AgentBackend {
       costUsd: 0.02,
       rawFinishReason: 'stop',
     };
+    yield { type: 'text_complete', id: 'text-done', messageId: 'done-message', turnId: input.turnId, ts, text: 'done' };
     yield { type: 'complete', id: 'complete-done', turnId: input.turnId, ts, stopReason: 'end_turn' };
   }
 
@@ -241,6 +244,7 @@ class NoisyStepCapThenCompleteBackend extends StepCapThenCompleteBackend {
       rawFinishReason: 'tool-calls',
       runtimeSteps: 50,
     };
+    yield { type: 'text_complete', id: 'text-step-cap-noisy', messageId: 'step-cap-noisy-message', turnId: input.turnId, ts, text: 'continue' };
     yield { type: 'complete', id: 'complete-step-cap-noisy', turnId: input.turnId, ts, stopReason: 'end_turn' };
   }
 }
@@ -273,6 +277,7 @@ class StepCapTwiceThenCompleteBackend extends StepCapThenCompleteBackend {
         rawFinishReason: 'tool-calls',
         runtimeSteps: 50,
       };
+      yield { type: 'text_complete', id: `text-step-cap-${this.prompts.length}`, messageId: `step-cap-message-${this.prompts.length}`, turnId: input.turnId, ts, text: 'continue' };
       yield { type: 'complete', id: `complete-step-cap-${this.prompts.length}`, turnId: input.turnId, ts, stopReason: 'end_turn' };
       return;
     }
@@ -288,6 +293,7 @@ class StepCapTwiceThenCompleteBackend extends StepCapThenCompleteBackend {
       costUsd: 0.02,
       rawFinishReason: 'stop',
     };
+    yield { type: 'text_complete', id: 'text-done', messageId: 'done-message', turnId: input.turnId, ts, text: 'done' };
     yield { type: 'complete', id: 'complete-done', turnId: input.turnId, ts, stopReason: 'end_turn' };
   }
 }
@@ -311,6 +317,7 @@ describe('runHarborCell', () => {
         cwd: workspaceDir,
         outputDir,
         storageRoot,
+        pricingProfile: 'deepseek-v4-flash-tbench-v1',
         registerBackends: registerCellBackend,
       });
 
@@ -319,12 +326,69 @@ describe('runHarborCell', () => {
       assert.equal(result.output.promptHash, 'sha256:cell-prompt');
       assert.equal(result.output.runtimeEventsPath, join(outputDir, HARBOR_CELL_RUNTIME_EVENTS_FILENAME));
       assert.equal(result.output.tokenSummary.costUsd, 0.0042);
+      assert.deepEqual(result.output.executionIdentity, {
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        systemPromptHash: `sha256:${createHash('sha256').update(JSON.stringify(config.systemPrompt)).digest('hex')}`,
+        pricingProfile: 'deepseek-v4-flash-tbench-v1',
+      });
 
       const outputJson = JSON.parse(await readFile(join(outputDir, HARBOR_CELL_OUTPUT_FILENAME), 'utf8'));
       assert.deepEqual(outputJson, result.output);
       const runtimeEvents = await readFile(join(outputDir, HARBOR_CELL_RUNTIME_EVENTS_FILENAME), 'utf8');
       assert.match(runtimeEvents, /"id":"cell-usage"/);
       assert.match(runtimeEvents, /"systemPromptHash":"sha256:cell-prompt"/);
+    });
+  });
+
+  test('writes execution identity before the first model call', async () => {
+    await withDirs(async ({ workspaceDir, outputDir, storageRoot }) => {
+      let observedIdentity: unknown;
+      class IdentityObservingBackend implements AgentBackend {
+        readonly kind: BackendKind = 'fake';
+        readonly sessionId: string;
+
+        constructor(sessionId: string) {
+          this.sessionId = sessionId;
+        }
+
+        async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+          observedIdentity = JSON.parse(await readFile(
+            join(outputDir, 'maka-cell-execution-identity.json'),
+            'utf8',
+          ));
+          yield {
+            type: 'complete',
+            id: 'identity-observed',
+            turnId: input.turnId,
+            ts: Date.now(),
+            stopReason: 'end_turn',
+          };
+        }
+
+        async stop(): Promise<void> {}
+        async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+        async dispose(): Promise<void> {}
+      }
+
+      await runHarborCell({
+        config,
+        instruction: 'observe identity',
+        cwd: workspaceDir,
+        outputDir,
+        storageRoot,
+        pricingProfile: 'deepseek-v4-flash-tbench-v1',
+        registerBackends: (registry) => {
+          registry.register('fake', (ctx) => new IdentityObservingBackend(ctx.sessionId));
+        },
+      });
+
+      assert.deepEqual(observedIdentity, {
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        systemPromptHash: `sha256:${createHash('sha256').update(JSON.stringify(config.systemPrompt)).digest('hex')}`,
+        pricingProfile: 'deepseek-v4-flash-tbench-v1',
+      });
     });
   });
 
@@ -883,6 +947,33 @@ describe('runHarborCell', () => {
     });
   });
 
+  test('host-side Harbor cell attests the configured pricing profile', async () => {
+    const { main } = await import(new URL('../../harbor/run-host-cell.mjs', import.meta.url).href) as {
+      main: (options?: { registerBackends?: (registry: BackendRegistry, context: HeadlessBackendContext) => void }) => Promise<void>;
+    };
+    await withDirs(async ({ workspaceDir, outputDir, storageRoot }) => {
+      const previousEnv = { ...process.env };
+      try {
+        process.env.MAKA_PROVIDER = 'openai';
+        process.env.MAKA_MODEL = 'openai/gpt-4o-mini';
+        process.env.MAKA_HOST_API_KEY = 'test-key';
+        process.env.MAKA_HARBOR_TOOL_EXECUTOR_URL = 'http://127.0.0.1:1';
+        process.env.MAKA_HARBOR_TOOL_EXECUTOR_TOKEN = 'token';
+        process.env.MAKA_INSTRUCTION = 'Finish the task.';
+        process.env.MAKA_WORKDIR = workspaceDir;
+        process.env.MAKA_OUTPUT_DIR = outputDir;
+        process.env.MAKA_STORAGE_ROOT = storageRoot;
+        process.env.MAKA_TRIAL_PRICING_SOURCE = 'frozen-pricing-profile';
+        await main({ registerBackends: registerCellBackend });
+      } finally {
+        process.env = previousEnv;
+      }
+
+      const output = JSON.parse(await readFile(join(outputDir, 'maka-cell-output.json'), 'utf8'));
+      assert.equal(output.executionIdentity.pricingProfile, 'frozen-pricing-profile');
+    });
+  });
+
   test('host-side Harbor cell config treats MAKA_ECONOMY_TASK_MODE=false as explicit disable', async () => {
     const { main } = await import(new URL('../../harbor/run-host-cell.mjs', import.meta.url).href) as {
       main: (options?: { registerBackends?: (registry: BackendRegistry, context: HeadlessBackendContext) => void }) => Promise<void>;
@@ -1247,6 +1338,52 @@ describe('runHarborCell', () => {
     });
   });
 
+  // Eager retrieval only hydrates stale-kind placeholders, so a retrieval arm
+  // is structurally inert unless a placeholder producer (stale prune) and the
+  // archive reader are wired alongside it. The #340-era arms enabled retrieval
+  // without stale prune and it never fired; this contract pins the live shape.
+  test('Harbor eager archive-retrieval arm gets a placeholder producer and archive reader by default', async () => {
+    await withDirs(async ({ workspaceDir, outputDir }) => {
+      const registry = new BackendRegistry();
+      const toolExecutor = fakeToolExecutor();
+      const register = buildAiSdkCellBackendRegistration({
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          MAKA_OUTPUT_DIR: outputDir,
+          MAKA_CONTEXT_ARCHIVE_RETRIEVAL: 'on',
+        },
+        now: () => 123,
+        newId: () => 'id',
+      });
+      await register(registry, {
+        config: {
+          id: 'harbor-ai-sdk',
+          backend: 'ai-sdk',
+          llmConnectionSlug: 'openai',
+          model: 'gpt-4o-mini',
+        },
+        task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        workspaceDir,
+        realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
+        toolExecutor,
+        permissionProfile: externalTestPermissionProfile(),
+      });
+
+      const backend = await registry.build('ai-sdk', backendContext(workspaceDir));
+      const backendInput = (backend as unknown as {
+        input: ReturnType<typeof buildHarborCellContextBudgetBackendOptions>;
+      }).input;
+      assert.equal(backendInput.contextBudget?.staleToolResultPrune?.enabled, true);
+      assert.equal(backendInput.contextBudget?.staleToolResultPrune?.minRecentTurnsFull, 2);
+      assert.equal(backendInput.contextBudget?.archiveRetrieval?.enabled, true);
+      assert.equal(backendInput.contextBudget?.archiveRetrieval?.mode, undefined);
+      assert.ok(backendInput.archiveToolResult, 'expected archive writer for the placeholder producer');
+      assert.ok(backendInput.readToolResultArchive, 'expected archive reader for eager hydration');
+    });
+  });
+
   test('Harbor ai-sdk backend leaves context budget policy off when explicitly disabled', async () => {
     await withDirs(async ({ workspaceDir }) => {
       const registry = new BackendRegistry();
@@ -1447,7 +1584,7 @@ describe('runHarborCell', () => {
   });
 
   test('Harbor context budget env treats explicit false-like booleans as disabled', () => {
-    // stale and archive default off; activeToolResultPrune defaults on, so disabling
+    // archive retrieval defaults off; stale and active prune default on, so disabling
     // stale/archive alone still leaves an enabled activeToolResultPrune policy.
     assert.deepEqual(
       buildHarborCellContextBudgetBackendOptions({ MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE: 'false' }).contextBudget?.activeToolResultPrune,
@@ -1488,14 +1625,49 @@ describe('runHarborCell', () => {
   });
 
   test('Harbor active tool result prune can be disabled with explicit off', () => {
-    assert.equal(
-      buildHarborCellContextBudgetBackendOptions({ MAKA_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE: 'off' }).contextBudget,
-      undefined,
-    );
-    assert.equal(
-      buildHarborCellContextBudgetPolicySnapshot({ MAKA_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE: 'off' }),
-      undefined,
-    );
+    const options = buildHarborCellContextBudgetBackendOptions({ MAKA_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE: 'off' });
+    assert.equal(options.contextBudget?.activeToolResultPrune, undefined);
+    assert.deepEqual(options.contextBudget?.staleToolResultPrune, { enabled: true, minRecentTurnsFull: 2 });
+  });
+
+  test('Harbor stale tool result prune is enabled by default without any env', () => {
+    const backend = buildHarborCellContextBudgetBackendOptions({});
+    // minRecentTurnsFull is set explicitly so the runtime protection window
+    // matches the policy snapshot and desktop default instead of the runtime's
+    // internal ?? 1 fallback.
+    assert.deepEqual(backend.contextBudget?.staleToolResultPrune, { enabled: true, minRecentTurnsFull: 2 });
+
+    const snapshot = buildHarborCellContextBudgetPolicySnapshot({});
+    assert.equal(snapshot?.enabled, true);
+    assert.equal(snapshot?.staleToolResultPrune?.enabled, true);
+    assert.equal(snapshot?.staleToolResultPrune?.maxResultEstimatedTokens, 2048);
+    assert.equal(snapshot?.staleToolResultPrune?.minRecentTurnsFull, 2);
+  });
+
+  test('Harbor stale tool result prune can be disabled with explicit off', () => {
+    const options = buildHarborCellContextBudgetBackendOptions({ MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE: 'off' });
+    assert.equal(options.contextBudget?.staleToolResultPrune, undefined);
+    assert.deepEqual(options.contextBudget?.activeToolResultPrune, { enabled: true });
+  });
+
+  test('Harbor stale tool result prune min recent turns falls back to MAKA_CONTEXT_MIN_RECENT_TURNS', () => {
+    const fallback = buildHarborCellContextBudgetBackendOptions({ MAKA_CONTEXT_MIN_RECENT_TURNS: '3' });
+    assert.equal(fallback.contextBudget?.staleToolResultPrune?.minRecentTurnsFull, 3);
+
+    const explicit = buildHarborCellContextBudgetBackendOptions({
+      MAKA_CONTEXT_MIN_RECENT_TURNS: '3',
+      MAKA_CONTEXT_STALE_TOOL_RESULT_MIN_RECENT_TURNS: '5',
+    });
+    assert.equal(explicit.contextBudget?.staleToolResultPrune?.minRecentTurnsFull, 5);
+  });
+
+  test('Harbor context budget is empty when both default-on prunes are explicitly off', () => {
+    const env = {
+      MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE: 'off',
+      MAKA_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE: 'off',
+    };
+    assert.equal(buildHarborCellContextBudgetBackendOptions({ ...env }).contextBudget, undefined);
+    assert.equal(buildHarborCellContextBudgetPolicySnapshot({ ...env }), undefined);
   });
 
   test('Harbor parses semantic compact policy for headless runs', () => {
@@ -1713,6 +1885,34 @@ describe('runHarborCell', () => {
     });
   });
 
+  test('env entrypoint carries max reasoning effort into config and execution identity', async () => {
+    await withDirs(async ({ workspaceDir, outputDir, storageRoot }) => {
+      const seenContexts: HeadlessBackendContext[] = [];
+      const result = await runHarborCellFromEnv({
+        MAKA_BACKEND: 'fake',
+        MAKA_INSTRUCTION: 'solve with max effort',
+        MAKA_MODEL: 'glm-5.2',
+        MAKA_LLM_CONNECTION_SLUG: 'zai-coding-plan',
+        MAKA_REASONING_EFFORT: 'max',
+        MAKA_WORKDIR: workspaceDir,
+        MAKA_OUTPUT_DIR: outputDir,
+        MAKA_STORAGE_ROOT: storageRoot,
+      }, {
+        registerBackends: (registry, context) => {
+          seenContexts.push(context);
+          registry.register('fake', (ctx) => new CellReportingBackend({
+            sessionId: ctx.sessionId,
+            header: ctx.header,
+            store: ctx.store,
+          }));
+        },
+      });
+
+      assert.equal(seenContexts[0]?.config.thinkingLevel, 'max');
+      assert.equal(result.output.executionIdentity?.reasoningEffort, 'max');
+    });
+  });
+
   test('env entrypoint registers the Pi CLI transport by default for pi-agent', async () => {
     await withDirs(async ({ workspaceDir, outputDir, storageRoot }) => {
       const piCommand = join(outputDir, 'fake-pi.mjs');
@@ -1790,6 +1990,7 @@ writeFileSync('pi-env.json', JSON.stringify({
   google: process.env.GOOGLE_API_KEY,
   xiaomi: process.env.XIAOMI_TOKEN_PLAN_CN_API_KEY,
 }));
+console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'pi ok' } }));
 console.log(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', usage: { input: 5, output: 2, totalTokens: 7 } }] }));
 `,
         'utf8',
@@ -1912,6 +2113,7 @@ const prompt = await new Promise((resolve) => {
 });
 writeFileSync('pi-long-argv.json', JSON.stringify(argv));
 writeFileSync('pi-long-prompt-length.txt', String(prompt.length));
+console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'pi ok' } }));
 console.log(JSON.stringify({ type: 'agent_end', messages: [{ role: 'assistant', usage: { input: 5, output: 2, totalTokens: 7 } }] }));
 `,
         'utf8',
@@ -2000,6 +2202,30 @@ setTimeout(() => {
     });
     assert.equal(deepseek.apiKey, 'fallback-key');
     assert.equal(deepseek.connection.baseUrl, 'https://fallback.example/v1');
+  });
+
+  test('resolves SiliconFlow only from SiliconFlow credential env', () => {
+    const resolved = resolveHarborCellAiSdkEnv({
+      provider: 'siliconflow',
+      model: 'moonshotai/Kimi-K2.6',
+      env: {
+        SILICONFLOW_API_KEY: 'siliconflow-key',
+        SILICONFLOW_BASE_URL: 'https://api.siliconflow.cn/v1',
+        OPENAI_API_KEY: 'openai-key',
+      },
+      ts: 1,
+    });
+
+    assert.equal(resolved.apiKey, 'siliconflow-key');
+    assert.equal(resolved.connection.baseUrl, 'https://api.siliconflow.cn/v1');
+
+    const missing = resolveHarborCellAiSdkEnv({
+      provider: 'siliconflow',
+      model: 'moonshotai/Kimi-K2.6',
+      env: { OPENAI_API_KEY: 'must-not-cross-provider-boundary' },
+      ts: 1,
+    });
+    assert.equal(missing.apiKey, '');
   });
 
   test('resolves ai-sdk api key from a *_API_KEY_FILE without exposing the secret on argv', async () => {

@@ -1,7 +1,10 @@
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 
-import { SIGKILL_GRACE_MS, terminateChildProcessTree } from '../shell-exec.js';
+import {
+  DEFAULT_PROCESS_TERMINATION_GRACE_MS,
+  terminateChildProcessTree,
+} from '../process-tree-terminator.js';
 
 export const FILESYSTEM_WORKER_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 export const FILESYSTEM_WORKER_MAX_STDERR_BYTES = 1024 * 1024;
@@ -57,7 +60,7 @@ async function observeWorker(
     const responseLimit = input.maxResponseBytes ?? FILESYSTEM_WORKER_MAX_RESPONSE_BYTES;
     const stderrLimit = input.maxStderrBytes ?? FILESYSTEM_WORKER_MAX_STDERR_BYTES;
     const timeoutMs = input.timeoutMs ?? FILESYSTEM_WORKER_DEFAULT_TIMEOUT_MS;
-    const killGraceMs = input.killGraceMs ?? SIGKILL_GRACE_MS;
+    const killGraceMs = input.killGraceMs ?? DEFAULT_PROCESS_TERMINATION_GRACE_MS;
     const stdoutChunks: Buffer[] = [];
     let stdoutBytes = 0;
     let stderrTail: Buffer<ArrayBufferLike> = Buffer.alloc(0);
@@ -115,8 +118,8 @@ async function observeWorker(
     function terminate(reason: 'timeout' | 'abort' | 'overflow'): void {
       if (termination || settled) return;
       termination = reason;
-      terminateChildProcessTree(child, 'SIGTERM');
-      killTimer = setTimeout(() => terminateChildProcessTree(child, 'SIGKILL'), killGraceMs);
+      void terminateChildProcessTree(child, 'SIGTERM');
+      killTimer = setTimeout(() => void terminateChildProcessTree(child, 'SIGKILL'), killGraceMs);
     }
 
     function cleanup(): void {

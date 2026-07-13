@@ -6,11 +6,11 @@
  * machinery: PermissionEngine (policy + park/resume), materializer,
  * AsyncEventQueue, SessionStore JSONL persistence.
  *
- * The agent loop (multi-step tool calling) is owned by ai-sdk's
- * `streamText` with `stopWhen: stepCountIs(N)`. Permission gating happens
- * inside each tool's `execute()` callback — that's the seam where we
- * consult PermissionEngine and either run, deny synthetically, or park
- * awaiting user.
+ * The agent loop (multi-step tool calling) is owned by ai-sdk's `streamText`.
+ * An explicit `maxSteps` uses `stopWhen: stepCountIs(N)`; otherwise the loop
+ * has no step cap. Permission gating happens inside each tool's `execute()`
+ * callback — that's the seam where we consult PermissionEngine and either run,
+ * deny synthetically, or park awaiting user.
  *
  * Design:
  *   send()
@@ -51,18 +51,22 @@ import type {
   ToolResultMessage,
   PermissionDecisionMessage,
   TokenUsageMessage,
+  SystemNoteMessage,
   BackendKind,
   SessionHeader,
 } from '@maka/core/session';
 import type {
+  AgentBackend,
+  BackendCompactHistoryInput,
+  BackendCompactHistoryResult,
   BackendSendInput,
   PermissionDecision,
 } from '@maka/core/backend-types';
 import type { AgentSpec } from '@maka/core/runtime-inputs';
 import type { LlmConnection } from '@maka/core/llm-connections';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
+import type { ToolPermissionRule } from '@maka/core/permission';
 import type {
-  CompactionDecisionDiagnostic,
   LlmCallRecord,
   PricingConfig,
   ToolInvocationRecord,
@@ -153,21 +157,29 @@ import {
 import {
   ARCHIVED_TOOL_RESULT_REWRITE_VERSION,
   applyRuntimeEventContextBudget,
+  buildContextBudgetDiagnosticShell,
+  buildHistorySearchSource,
   buildPromptSegmentEstimates,
   collectStaleToolResultArchiveCandidates,
+  evaluateHistoryCompactCheckpointReplay,
   estimateRuntimeEventsTokens,
-  historyCompactBlockToRuntimeEvent,
+  mergeContextBudgetDiagnostic,
+  mergeContextBudgetDiagnosticPatches,
+  mergeRuntimeEventsInOriginalOrder,
+  minimalContextBudgetDiagnostic,
   rawEvidenceRequestReason,
+  replaceHistoryCompactReplayBlocks,
   retrieveArchivedToolResultsForReplay,
+  retrieveReplayHistoryAroundSearchSource,
   retrieveRuntimeEventHistoryAround,
-  searchRuntimeEventHistory,
+  runtimeEventTurnKey,
   selectSynthesisCacheForReplay,
+  shouldAppendContextCompactedNote,
+  shouldAppendContextCompactionFailedOpenNote,
   type ContextBudgetPolicy,
   type HistoryCompactBlock,
   type ActiveArchivedToolResultPlaceholder,
   type ActiveToolResultArchiveCandidate,
-  type RuntimeEventHistoryAroundResult,
-  type RuntimeEventHistorySearchPolicy,
   type StaleToolResultArchiveCandidate,
   type SynthesisCacheBlock,
   type SynthesisSourceRef,
@@ -175,6 +187,12 @@ import {
   type ToolResultArchiveReader,
   type ToolResultArchiveRef,
 } from './context-budget.js';
+import {
+  buildHistoryCompactCheckpoint,
+  historyCompactCheckpointToRuntimeEvent,
+  matchHistoryCompactCheckpointPrefix,
+  type HistoryCompactCheckpoint,
+} from './history-compact-checkpoint.js';
 
 export {
   DEFAULT_PERMISSION_TIMEOUT_MS,
@@ -182,33 +200,20 @@ export {
   TOOL_ERROR_RESULT_MAX_CHARS,
   formatSyntheticToolErrorText,
 } from './tool-runtime.js';
-export type { MakaTool, MakaToolContext } from './tool-runtime.js';
 export { normalizeAiSdkUsage } from './model-adapter.js';
 export type { ModelFactory, ModelFactoryInput, RepairableAiSdkToolCall } from './model-adapter.js';
 export type { RunTraceEvent, RunTraceRecorder } from './run-trace.js';
 
 // ============================================================================
-// AgentBackend interface
+// AgentBackend interface — port contract now lives in @maka/core/backend-types;
+// re-exported here for backward compatibility with existing import sites.
 // ============================================================================
 
-export interface BackendCompactHistoryInput {
-  turnId: string;
-  runtimeContext: readonly RuntimeEvent[];
-}
-
-export interface BackendCompactHistoryResult {
-  contextBudget?: ContextBudgetDiagnostic;
-}
-
-export interface AgentBackend {
-  readonly kind: BackendKind;
-  readonly sessionId: string;
-  send(input: BackendSendInput): AsyncIterable<SessionEvent>;
-  compactHistory?(input: BackendCompactHistoryInput): Promise<BackendCompactHistoryResult>;
-  stop(reason: 'user_stop' | 'redirect'): Promise<void>;
-  respondToPermission(decision: PermissionDecision): Promise<void>;
-  dispose(): Promise<void>;
-}
+export type {
+  AgentBackend,
+  BackendCompactHistoryInput,
+  BackendCompactHistoryResult,
+} from '@maka/core/backend-types';
 
 export const INVALID_TOOL_NAME = 'invalid';
 
@@ -392,6 +397,15 @@ export type HistoryCompactLoader = (
 export type HistoryCompactWriter = (
   input: HistoryCompactWriteInput,
 ) => Promise<HistoryCompactWriteResult | void> | HistoryCompactWriteResult | void;
+export interface HistoryCompactSummaryInput extends HistoryCompactWriteInput {
+  previousCheckpoint?: HistoryCompactCheckpoint;
+  newlyFoldedRuntimeEvents?: RuntimeEvent[];
+}
+export type HistoryCompactSummarizer = (
+  input: HistoryCompactSummaryInput,
+) => Promise<string | undefined> | string | undefined;
+export type HistoryCompactCheckpointLoader = () => Promise<HistoryCompactCheckpoint | undefined> | HistoryCompactCheckpoint | undefined;
+export type HistoryCompactCheckpointRecorder = (checkpoint: HistoryCompactCheckpoint, turnId: string) => void | Promise<void>;
 export type ActiveFullCompactBlockRecorder = (block: ActiveFullCompactBlock) => void | Promise<void>;
 export type SemanticCompactBlockRecorder = (block: SemanticCompactBlock) => void | Promise<void>;
 
@@ -442,7 +456,7 @@ export interface AiSdkBackendInput {
   newId?: () => string;
   /** Clock; default `Date.now()`. */
   now?: () => number;
-  /** Cap on tool-call steps per turn; default 50. */
+  /** Optional cap on tool-call steps per turn; omitted means no step cap. */
   maxSteps?: number;
   /** Timeout before first SDK stream event; default 30s. */
   streamConnectTimeoutMs?: number;
@@ -450,6 +464,8 @@ export interface AiSdkBackendInput {
   streamIdleTimeoutMs?: number;
   /** Timeout for a renderer/user permission decision. Default 300s. */
   permissionTimeoutMs?: number;
+  /** Invocation-local allow/deny rules evaluated before the session mode. */
+  permissionRules?: readonly ToolPermissionRule[];
   /** Optional system prompt (skills + workspace AGENTS.md merged upstream). */
   systemPrompt?: string | ((context: SystemPromptContext) => string | undefined | Promise<string | undefined>);
   /** Optional provider-visible current-turn tail kept out of the durable system prefix. */
@@ -512,6 +528,12 @@ export interface AiSdkBackendInput {
   loadHistoryCompact?: HistoryCompactLoader;
   /** Optional best-effort source-bearing history compact block writer/summarizer. */
   writeHistoryCompact?: HistoryCompactWriter;
+  /** Preferred bounded V2 checkpoint loader. Legacy artifact blocks remain a read-only fallback. */
+  loadHistoryCompactCheckpoint?: HistoryCompactCheckpointLoader;
+  /** Produces a checkpoint summary from the prior summary plus newly evicted RuntimeEvents. */
+  summarizeHistoryCompact?: HistoryCompactSummarizer;
+  /** Best-effort durable recorder for accepted V2 checkpoints. */
+  recordHistoryCompactCheckpoint?: HistoryCompactCheckpointRecorder;
   /** Optional best-effort durable recorder for accepted active full compact blocks. */
   recordActiveFullCompactBlock?: ActiveFullCompactBlockRecorder;
   /** Optional best-effort durable recorder for accepted semantic compact blocks. */
@@ -540,7 +562,7 @@ export class AiSdkBackend implements AgentBackend {
   private readonly input: AiSdkBackendInput;
   private readonly newId: () => string;
   private readonly now: () => number;
-  private readonly maxSteps: number;
+  private readonly maxSteps: number | undefined;
   private readonly toolRuntime: ToolRuntime;
   private readonly modelAdapter: ModelAdapter;
   private readonly toolAvailabilityRuntime: ToolAvailabilityRuntime;
@@ -557,6 +579,12 @@ export class AiSdkBackend implements AgentBackend {
   private currentRunTrace: RunTrace | null = null;
   private currentUserIntent: string | undefined;
   private priorRequestShape: RequestShapeDiagnostic | undefined;
+  /**
+   * Id of the assistant step currently streaming. Read by ToolRuntime via
+   * `getCurrentStepId` so each tool call's `tool_start` carries the step it
+   * belongs to. Rotated at every step boundary in `send()`; null between turns.
+   */
+  private currentStepMessageId: string | null = null;
 
   constructor(input: AiSdkBackendInput) {
     if (!input.sandboxDiagnosticsSnapshot) {
@@ -566,7 +594,7 @@ export class AiSdkBackend implements AgentBackend {
     this.sessionId = input.sessionId;
     this.newId = input.newId ?? (() => crypto.randomUUID());
     this.now = input.now ?? (() => Date.now());
-    this.maxSteps = input.maxSteps ?? 50;
+    this.maxSteps = input.maxSteps;
     this.toolAvailabilityRuntime = new ToolAvailabilityRuntime(
       input.tools,
       input.toolAvailability,
@@ -597,6 +625,8 @@ export class AiSdkBackend implements AgentBackend {
       now: this.now,
       getPermissionPauseTarget: () => this.currentWatchdog,
       getCurrentRunId: () => this.currentRunId ?? undefined,
+      getCurrentStepId: () => this.currentStepMessageId ?? undefined,
+      permissionRules: input.permissionRules,
       spawnChildAgent: input.spawnChildAgent,
       listChildAgents: input.listChildAgents,
       readChildAgentOutput: input.readChildAgentOutput,
@@ -664,26 +694,53 @@ export class AiSdkBackend implements AgentBackend {
       if (
         budgeted?.historyCompactBlocks?.length &&
         contextBudget.historyCompact?.mode === 'read_write' &&
-        this.input.writeHistoryCompact
+        this.hasHistoryCompactWriter()
       ) {
         const loadedBlockIds = new Set((contextBudget.historyCompact.blocks ?? []).map((block) => block.blockId));
         const draftBlocks = budgeted.historyCompactBlocks.filter((block) => !loadedBlockIds.has(block.blockId));
         if (draftBlocks.length > 0) {
-          const writePatch = await this.writeHistoryCompactBlocks({
-            turnId: input.turnId,
-            contextBudget,
-            priorRuntimeContext: runtimeContext,
-            draftBlocks,
-            abortSignal: historyCompactAbortController.signal,
-          });
-          if (historyCompactAbortController.signal.aborted) return {};
-          if (writePatch.replacementBlocks.length === 0) {
-            contextBudgetDiagnostic = buildContextBudgetDiagnosticShell(runtimeContext, runtimeContext, contextBudget);
+          if (this.input.summarizeHistoryCompact && this.input.recordHistoryCompactCheckpoint) {
+            let writeContextBudget = contextBudget;
+            try {
+              const checkpoint = await Promise.resolve(this.input.loadHistoryCompactCheckpoint?.());
+              if (checkpoint) {
+                writeContextBudget = {
+                  ...contextBudget,
+                  historyCompact: { ...contextBudget.historyCompact!, checkpoint },
+                };
+              }
+            } catch {
+              // A missing previous checkpoint only loses rolling reuse; the current fold remains safe to summarize.
+            }
+            const writePatch = await this.writeHistoryCompactCheckpoint({
+              turnId: input.turnId,
+              contextBudget: writeContextBudget,
+              priorRuntimeContext: runtimeContext,
+              draftBlock: draftBlocks[0]!,
+              abortSignal: historyCompactAbortController.signal,
+            });
+            if (historyCompactAbortController.signal.aborted) return {};
+            contextBudgetDiagnostic = mergeContextBudgetDiagnostic(
+              contextBudgetDiagnostic ?? buildContextBudgetDiagnosticShell(runtimeContext, budgeted.events, contextBudget),
+              writePatch.diagnosticPatch,
+            );
+          } else {
+            const writePatch = await this.writeHistoryCompactBlocks({
+              turnId: input.turnId,
+              contextBudget,
+              priorRuntimeContext: runtimeContext,
+              draftBlocks,
+              abortSignal: historyCompactAbortController.signal,
+            });
+            if (historyCompactAbortController.signal.aborted) return {};
+            if (writePatch.replacementBlocks.length === 0) {
+              contextBudgetDiagnostic = buildContextBudgetDiagnosticShell(runtimeContext, runtimeContext, contextBudget);
+            }
+            contextBudgetDiagnostic = mergeContextBudgetDiagnostic(
+              contextBudgetDiagnostic ?? buildContextBudgetDiagnosticShell(runtimeContext, budgeted.events, contextBudget),
+              writePatch.diagnosticPatch,
+            );
           }
-          contextBudgetDiagnostic = mergeContextBudgetDiagnostic(
-            contextBudgetDiagnostic ?? buildContextBudgetDiagnosticShell(runtimeContext, budgeted.events, contextBudget),
-            writePatch.diagnosticPatch,
-          );
         }
       }
 
@@ -698,14 +755,19 @@ export class AiSdkBackend implements AgentBackend {
   private buildManualHistoryCompactPolicy(
     runtimeContext: readonly RuntimeEvent[],
   ): ContextBudgetPolicy | undefined {
-    if (runtimeContext.length === 0 || !this.input.contextBudget || !this.input.writeHistoryCompact) return undefined;
+    if (
+      runtimeContext.length === 0
+      || !this.input.contextBudget
+      || !this.hasHistoryCompactWriter()
+    ) return undefined;
     const base = this.input.contextBudget;
     const charsPerToken = base.charsPerToken ?? 4;
     const estimatedTokens = Math.max(1, estimateRuntimeEventsTokens(runtimeContext, charsPerToken));
     const current = base.historyCompact;
     const currentWithoutBlocks = { ...current };
     delete currentWithoutBlocks.blocks;
-    const maxHistoryEstimatedTokens = estimatedTokens;
+    delete currentWithoutBlocks.checkpoint;
+    const maxHistoryEstimatedTokens = base.maxHistoryEstimatedTokens ?? Math.max(estimatedTokens, 32_000);
     return {
       name: base.name ?? 'manual-history-compact',
       ...(base.charsPerToken !== undefined ? { charsPerToken: base.charsPerToken } : {}),
@@ -715,8 +777,9 @@ export class AiSdkBackend implements AgentBackend {
         ...currentWithoutBlocks,
         enabled: true,
         mode: 'read_write',
-        highWaterRatio: 0.01,
+        highWaterRatio: 0.000001,
         targetRatio: current?.targetRatio ?? 0.2,
+        tailEstimatedTokens: 1,
         minRecentTurns: current?.minRecentTurns ?? base.minRecentTurns ?? 1,
         maxBlocks: current?.maxBlocks ?? 1,
         maxEstimatedTokens: current?.maxEstimatedTokens ?? 2048,
@@ -724,6 +787,13 @@ export class AiSdkBackend implements AgentBackend {
         highWaterName: current?.highWaterName ?? `${base.name ?? 'manual'}-manual-history-compact`,
       },
     };
+  }
+
+  private hasHistoryCompactWriter(): boolean {
+    return Boolean(
+      this.input.writeHistoryCompact
+      || (this.input.summarizeHistoryCompact && this.input.recordHistoryCompactCheckpoint),
+    );
   }
 
   // --------------------------------------------------------------------------
@@ -742,11 +812,70 @@ export class AiSdkBackend implements AgentBackend {
     const queue = new AsyncEventQueue<SessionEvent>();
     this.currentQueue = queue;
 
-    const assistantMessageId = this.newId();
-    let assistantText = '';
-    let thinkingText = '';
-    let thinkingSignature: string | undefined;
+    // One AssistantMessage is flushed per AI SDK step (not per turn), so the
+    // ledger records the text↔tool timeline at step granularity and each step's
+    // Anthropic thinking signature stays paired with its own thinking text. The
+    // turn's first step reuses this id; every later step rotates to a fresh one
+    // at its step boundary (see the fullStream loop below).
+    this.currentStepMessageId = this.newId();
+    let stepText = '';
+    let stepThinking = '';
+    let stepSignature: string | undefined;
     const startedAt = this.now();
+
+    // Flush the current step's AssistantMessage (text + thinking) and the paired
+    // terminal thinking/text events, then clear the per-step accumulators.
+    // Persist when the step produced text OR reasoning — a thinking-only step
+    // (Anthropic's signed/omitted reasoning has empty text) still round-trips its
+    // signed block; a pure-tool step (no text, no thinking) writes nothing, so
+    // tool-only steps leave no placeholder assistant row. thinking_complete
+    // precedes text_complete so the read-model attaches this step's reasoning to
+    // this step's assistant row. Hoisted to send() scope so both the streaming
+    // path and the abort/error handler can flush a partial step.
+    const flushStep = async (): Promise<void> => {
+      const hasThinking = stepThinking.length > 0 || stepSignature !== undefined;
+      if (stepText.length === 0 && !hasThinking) return;
+      const stepId = this.currentStepMessageId ?? this.newId();
+      const msg: AssistantMessage = {
+        type: 'assistant',
+        id: stepId,
+        turnId,
+        ts: this.now(),
+        text: stepText,
+        modelId: this.input.modelId,
+        ...(hasThinking
+          ? {
+              thinking: {
+                text: stepThinking,
+                ...(stepSignature !== undefined ? { signature: stepSignature } : {}),
+              },
+            }
+          : {}),
+      };
+      await this.input.appendMessage(msg);
+      if (hasThinking) {
+        queue.push({
+          type: 'thinking_complete',
+          id: this.newId(),
+          turnId,
+          ts: this.now(),
+          messageId: stepId,
+          text: stepThinking,
+          ...(stepSignature !== undefined ? { signature: stepSignature } : {}),
+        } satisfies ThinkingCompleteEvent);
+      }
+      queue.push({
+        type: 'text_complete',
+        id: this.newId(),
+        turnId,
+        ts: this.now(),
+        messageId: stepId,
+        text: stepText,
+      } satisfies TextCompleteEvent);
+      stepText = '';
+      stepThinking = '';
+      stepSignature = undefined;
+    };
     let tokenUsage: NormalizedAiSdkUsage | undefined;
     let tokenUsageCostUsd: number | undefined;
     let streamStatus: LlmCallRecord['status'] = 'success';
@@ -756,6 +885,8 @@ export class AiSdkBackend implements AgentBackend {
     let requestShapeForTelemetry: RequestShapeDiagnostic | undefined;
     let promptSegmentsForTelemetry: PromptSegmentEstimate[] = [];
     let contextBudgetForTelemetry: ContextBudgetDiagnostic | undefined;
+    let contextCompactedNoteWritten = false;
+    let contextCompactionFailedOpenNoteWritten = false;
     const trace = new RunTrace({
       sessionId: this.sessionId,
       turnId,
@@ -1004,18 +1135,35 @@ export class AiSdkBackend implements AgentBackend {
         for await (const chunk of result.fullStream) {
           if (this.aborted) break;
           watchdog.markActivity();
-          if (chunk.type === 'step-finish') {
+          // Step boundary, version-tolerant: AI SDK v6 delimits steps with
+          // `start-step` / `finish-step`, older releases said `step-finish`.
+          // Missing the boundary would silently degrade back to one message per
+          // turn, so match both names. A duplicate boundary is harmless: the
+          // second flush no-ops (accumulators already cleared) and one extra id
+          // rotation just discards an unused id.
+          const isStepFinishChunk = chunk.type === 'finish-step' || chunk.type === 'step-finish';
+          if (isStepFinishChunk) {
             runtimeSteps += 1;
           }
-          if (chunk.type === 'finish' || chunk.type === 'step-finish') {
+          if (chunk.type === 'finish' || isStepFinishChunk) {
             rawFinishReason = rawFinishReasonString(chunk.finishReason) ?? rawFinishReason;
           }
-          this.modelAdapter.handleStreamChunk(chunk, turnId, assistantMessageId, queue, {
-            onText: (t) => { assistantText += t; },
-            onTextComplete: (t) => { assistantText = t; },
-            onThinking: (t) => { thinkingText += t; },
-            onThinkingSignature: (sig) => { thinkingSignature = sig; },
+          this.modelAdapter.handleStreamChunk(chunk, turnId, this.currentStepMessageId!, queue, {
+            onText: (t) => { stepText += t; },
+            onTextComplete: (t) => { stepText = t; },
+            onThinking: (t) => { stepThinking += t; },
+            onThinkingSignature: (sig) => { stepSignature = sig; },
           });
+          // The step's text/thinking deltas are all in (the fullStream is
+          // drained in order), so flush this step's AssistantMessage and rotate
+          // to a fresh id for the next step. The step's tool calls (appended
+          // mid-step via execute()) already carry the pre-rotation id via
+          // `getCurrentStepId`, so replay can regroup them with this step's
+          // reasoning even though they land before this row in the ledger.
+          if (isStepFinishChunk) {
+            await flushStep();
+            this.currentStepMessageId = this.newId();
+          }
         }
 
         // If the stream loop exited because stop() flipped this.aborted while a
@@ -1025,6 +1173,10 @@ export class AiSdkBackend implements AgentBackend {
         if (this.aborted) {
           throw Object.assign(new Error('aborted'), { name: 'AbortError' });
         }
+
+        // Catch-all: flush any residual step content if the provider closed the
+        // stream without a trailing `finish-step` for the last step.
+        await flushStep();
 
         // Same-turn deferred load: prepareStep expanded the provider tool set on
         // later steps, so refine the durable cost record + prefix baseline against
@@ -1037,87 +1189,14 @@ export class AiSdkBackend implements AgentBackend {
           publishTurnDiagnostics(computeTurnDiagnostics(finalActiveTools));
         }
 
-        // PR-AGENT-ITERATION-GRACE-0 (external bot research #A1): when the
-        // ai-sdk loop exits with `finishReason === 'tool-calls'` it
-        // means we tripped `stopWhen: stepCountIs(maxSteps)` mid-loop
-        // — the model wanted to keep calling tools but we capped it.
-        // The user previously saw no closing assistant text in that
-        // path; just the last tool result. Inject a deterministic
-        // "step cap reached" notice so the UI has SOMETHING and the
-        // user can choose to send "继续" for a fresh turn.
-        const finishReasonForGrace = await result.finishReason.catch(() => 'stop');
-        rawFinishReason = rawFinishReason ?? rawFinishReasonString(finishReasonForGrace);
-        if (finishReasonForGrace === 'tool-calls' && runtimeSteps < this.maxSteps) {
-          runtimeSteps = this.maxSteps;
-        }
-        if (
-          !this.aborted
-          && assistantText.length === 0
-          && finishReasonForGrace === 'tool-calls'
-        ) {
-          assistantText =
-            `⚠️ 已达到本轮 ${this.maxSteps} 步工具调用上限。\n\n`
-            + '上一步工具调用已落盘；如果还需要继续，请发一条新消息让对话进入下一回合（可以直接输入「继续」）。';
-        }
-
-        // Persist the assistant turn if it produced text OR reasoning. A turn
-        // that ends with only thinking (no final text) must still persist its
-        // reasoning; gating solely on text would drop it. The AssistantMessage
-        // carries an empty `text` in that case, and we still emit text_complete
-        // (empty) so the RuntimeEvent read-model has a same-turn assistant row
-        // to attach the thinking to — otherwise projectThinking has nothing to
-        // hang the reasoning on and discards it.
-        //
-        // A signature is thinking even with no text: Anthropic's omitted /
-        // redacted thinking returns a signed reasoning block whose text is
-        // empty. Dropping it would lose the signed block for provider-native
-        // replay (reasoning continuity). Persist `text: ''` + signature so the
-        // block round-trips faithfully; the render layer is responsible for not
-        // surfacing an empty thinking entry.
-        const hasThinking = thinkingText.length > 0 || thinkingSignature !== undefined;
-        if (assistantText.length > 0 || hasThinking) {
-          const msg: AssistantMessage = {
-            type: 'assistant',
-            id: assistantMessageId,
-            turnId,
-            ts: this.now(),
-            text: assistantText,
-            modelId: this.input.modelId,
-            ...(hasThinking
-              ? {
-                  thinking: {
-                    text: thinkingText,
-                    ...(thinkingSignature !== undefined ? { signature: thinkingSignature } : {}),
-                  },
-                }
-              : {}),
-          };
-          await this.input.appendMessage(msg);
-          // Emit the terminal thinking event before text_complete so the
-          // RuntimeEvent stream carries a non-partial `thinking` message. Only
-          // partial `thinking_delta`s were emitted during streaming, so without
-          // this the read-model projection (and materialized session) drops all
-          // reasoning. The read-model attaches this to the same-turn assistant
-          // text row emitted just below.
-          if (hasThinking) {
-            queue.push({
-              type: 'thinking_complete',
-              id: this.newId(),
-              turnId,
-              ts: this.now(),
-              messageId: assistantMessageId,
-              text: thinkingText,
-              ...(thinkingSignature !== undefined ? { signature: thinkingSignature } : {}),
-            } satisfies ThinkingCompleteEvent);
-          }
-          queue.push({
-            type: 'text_complete',
-            id: this.newId(),
-            turnId,
-            ts: this.now(),
-            messageId: assistantMessageId,
-            text: assistantText,
-          } satisfies TextCompleteEvent);
+        // With an explicit maxSteps, `finishReason === 'tool-calls'` means the
+        // model wanted another tool step but the configured budget stopped it.
+        const finishReason = await result.finishReason.catch(() => 'stop');
+        const stepLimit = this.maxSteps;
+        const stepLimitReached = stepLimit !== undefined && finishReason === 'tool-calls';
+        rawFinishReason = rawFinishReason ?? rawFinishReasonString(finishReason);
+        if (stepLimitReached && runtimeSteps < stepLimit) {
+          runtimeSteps = stepLimit;
         }
 
         // Final usage event. AI SDK `usage` is the last step only; `totalUsage`
@@ -1174,6 +1253,31 @@ export class AiSdkBackend implements AgentBackend {
               ...(contextBudgetForUsage ? { contextBudget: contextBudgetForUsage } : {}),
             };
             await this.input.appendMessage(tu).catch(() => {});
+            if (
+              !contextCompactionFailedOpenNoteWritten
+              && shouldAppendContextCompactionFailedOpenNote(contextBudgetForUsage)
+            ) {
+              contextCompactionFailedOpenNoteWritten = true;
+              const note: SystemNoteMessage = {
+                type: 'system_note',
+                id: this.newId(),
+                turnId,
+                ts: this.now(),
+                kind: 'context_compaction_failed_open',
+              };
+              await this.input.appendMessage(note).catch(() => {});
+            }
+            if (!contextCompactedNoteWritten && shouldAppendContextCompactedNote(contextBudgetForUsage)) {
+              contextCompactedNoteWritten = true;
+              const note: SystemNoteMessage = {
+                type: 'system_note',
+                id: this.newId(),
+                turnId,
+                ts: this.now(),
+                kind: 'context_compacted',
+              };
+              await this.input.appendMessage(note).catch(() => {});
+            }
             queue.push({
               type: 'token_usage',
               id: this.newId(),
@@ -1205,8 +1309,12 @@ export class AiSdkBackend implements AgentBackend {
           // best-effort; ai-sdk usage promise may reject on abort
         }
 
-        const finishReason = await result.finishReason.catch(() => 'stop');
-        const stopReason = this.mapFinishReason(finishReason);
+        // Nothing may await between this check and terminal emission: Stop must
+        // win even when it arrives during post-stream usage persistence.
+        if (this.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+        const stopReason = this.maxSteps !== undefined && finishReason === 'tool-calls'
+          ? 'step_limit'
+          : this.mapFinishReason(finishReason);
         trace.modelStreamCompleted(stopReason);
         queue.push({
           type: 'complete',
@@ -1218,6 +1326,12 @@ export class AiSdkBackend implements AgentBackend {
       } catch (err) {
         streamStatus = this.aborted ? 'aborted' : 'error';
         streamErrorClass = this.modelAdapter.classifyError(watchdogTimeoutError ?? err);
+        // Flush the in-flight step's partial text/thinking before the terminal
+        // abort/error events. Earlier steps already flushed at their
+        // `finish-step`; this keeps their and this step's streamed-out output on
+        // BOTH exits — user stop and provider error / watchdog timeout — so
+        // partialOutputRetained reflects what the user actually saw.
+        await flushStep().catch(() => {});
         if (this.aborted) {
           queue.push({
             type: 'abort',
@@ -1411,28 +1525,57 @@ export class AiSdkBackend implements AgentBackend {
     if (
       budgeted?.historyCompactBlocks?.length &&
       contextBudget?.historyCompact?.mode === 'read_write' &&
-      this.input.writeHistoryCompact
+      this.hasHistoryCompactWriter()
     ) {
       const loadedBlockIds = new Set((contextBudget.historyCompact.blocks ?? []).map((block) => block.blockId));
       const draftBlocks = budgeted.historyCompactBlocks.filter((block) => !loadedBlockIds.has(block.blockId));
       if (draftBlocks.length > 0) {
-        const writePatch = await this.writeHistoryCompactBlocks({
-          turnId: input.turnId,
-          contextBudget,
-          priorRuntimeContext,
-          draftBlocks,
-          abortSignal: this.abortController?.signal,
-        });
-        if (writePatch.replacementBlocks.length > 0) {
-          runtimeContext = replaceHistoryCompactReplayBlocks(runtimeContext, writePatch.replacementBlocks);
+        if (this.input.summarizeHistoryCompact && this.input.recordHistoryCompactCheckpoint) {
+          const writePatch = await this.writeHistoryCompactCheckpoint({
+            turnId: input.turnId,
+            contextBudget,
+            priorRuntimeContext,
+            draftBlock: draftBlocks[0]!,
+            abortSignal: this.abortController?.signal,
+          });
+          if (writePatch.replacementCheckpoint) {
+            runtimeContext = [
+              historyCompactCheckpointToRuntimeEvent(writePatch.replacementCheckpoint),
+              ...runtimeContext.filter((event) => !event.id.startsWith('history-compact:')),
+            ];
+          } else {
+            runtimeContext = writePatch.fallbackCheckpoint
+              ? buildHistoryCompactCheckpointFailOpenContext(
+                  writePatch.fallbackCheckpoint,
+                  priorRuntimeContext,
+                  contextBudget,
+                  runtimeContext.filter((event) => !event.id.startsWith('history-compact:')),
+                )
+              : runtimeContext.filter((event) => !event.id.startsWith('history-compact:'));
+          }
+          contextBudgetDiagnostic = mergeContextBudgetDiagnostic(
+            contextBudgetDiagnostic ?? buildContextBudgetDiagnosticShell(priorRuntimeContext, runtimeContext, contextBudget),
+            writePatch.diagnosticPatch,
+          );
         } else {
-          runtimeContext = priorRuntimeContext;
-          contextBudgetDiagnostic = buildContextBudgetDiagnosticShell(priorRuntimeContext, runtimeContext, contextBudget);
+          const writePatch = await this.writeHistoryCompactBlocks({
+            turnId: input.turnId,
+            contextBudget,
+            priorRuntimeContext,
+            draftBlocks,
+            abortSignal: this.abortController?.signal,
+          });
+          if (writePatch.replacementBlocks.length > 0) {
+            runtimeContext = replaceHistoryCompactReplayBlocks(runtimeContext, writePatch.replacementBlocks);
+          } else {
+            runtimeContext = priorRuntimeContext;
+            contextBudgetDiagnostic = buildContextBudgetDiagnosticShell(priorRuntimeContext, runtimeContext, contextBudget);
+          }
+          contextBudgetDiagnostic = mergeContextBudgetDiagnostic(
+            contextBudgetDiagnostic ?? buildContextBudgetDiagnosticShell(priorRuntimeContext, runtimeContext, contextBudget),
+            writePatch.diagnosticPatch,
+          );
         }
-        contextBudgetDiagnostic = mergeContextBudgetDiagnostic(
-          contextBudgetDiagnostic ?? buildContextBudgetDiagnosticShell(priorRuntimeContext, runtimeContext, contextBudget),
-          writePatch.diagnosticPatch,
-        );
       }
     }
 
@@ -1928,11 +2071,45 @@ export class AiSdkBackend implements AgentBackend {
     policy: ContextBudgetPolicy,
   ): Promise<{ policy: ContextBudgetPolicy; diagnosticPatch?: Partial<ContextBudgetDiagnostic> }> {
     const historyCompact = policy.historyCompact;
-    if (historyCompact?.enabled !== true || !this.input.loadHistoryCompact) {
+    if (
+      historyCompact?.enabled !== true
+      || (!this.input.loadHistoryCompactCheckpoint && !this.input.loadHistoryCompact)
+    ) {
       return { policy };
     }
-    if ((historyCompact.blocks?.length ?? 0) > 0) {
+    if (historyCompact.checkpoint !== undefined || (historyCompact.blocks?.length ?? 0) > 0) {
       return { policy };
+    }
+    let loadFailures = 0;
+    let checkpoint: HistoryCompactCheckpoint | undefined;
+    try {
+      checkpoint = await Promise.resolve(this.input.loadHistoryCompactCheckpoint?.());
+    } catch {
+      loadFailures += 1;
+    }
+    if (checkpoint) {
+      return {
+        policy: {
+          ...policy,
+          historyCompact: { ...historyCompact, checkpoint },
+        },
+        diagnosticPatch: {
+          historyCompactEnabled: true,
+          historyCompactMode: historyCompact.mode ?? 'deterministic',
+          historyCompactBlocksLoaded: 1,
+          historyCompactBlocksAvailable: 1,
+        },
+      };
+    }
+    if (!this.input.loadHistoryCompact) {
+      return loadFailures > 0 ? {
+        policy,
+        diagnosticPatch: {
+          historyCompactEnabled: true,
+          historyCompactMode: historyCompact.mode ?? 'deterministic',
+          historyCompactLoadFailures: loadFailures,
+        },
+      } : { policy };
     }
     try {
       // No maxBytes here: the block JSON carries per-event provenance and
@@ -1957,17 +2134,19 @@ export class AiSdkBackend implements AgentBackend {
           historyCompactMode: historyCompact.mode ?? 'deterministic',
           historyCompactBlocksLoaded: blocks.length,
           historyCompactBlocksAvailable: blocks.length,
+          ...(loadFailures > 0 ? { historyCompactLoadFailures: loadFailures } : {}),
           ...(result.skipped && result.skipped > 0 ? { historyCompactLoadSkipped: result.skipped } : {}),
           ...(result.skippedReasonCounts ? { historyCompactLoadSkippedReasonCounts: result.skippedReasonCounts } : {}),
         },
       };
     } catch {
+      loadFailures += 1;
       return {
         policy,
         diagnosticPatch: {
           historyCompactEnabled: true,
           historyCompactMode: historyCompact.mode ?? 'deterministic',
-          historyCompactLoadFailures: 1,
+          historyCompactLoadFailures: loadFailures,
         },
       };
     }
@@ -2079,6 +2258,163 @@ export class AiSdkBackend implements AgentBackend {
         synthesisCacheMode: 'read_write',
         synthesisCacheWritesAttempted: 1,
         synthesisCacheWriteFailures: 1,
+      };
+    }
+  }
+
+  private async writeHistoryCompactCheckpoint(input: {
+    turnId: string;
+    contextBudget: ContextBudgetPolicy;
+    priorRuntimeContext: readonly RuntimeEvent[];
+    draftBlock: HistoryCompactBlock;
+    abortSignal?: AbortSignal;
+  }): Promise<{
+    diagnosticPatch: Partial<ContextBudgetDiagnostic>;
+    replacementCheckpoint?: HistoryCompactCheckpoint;
+    fallbackCheckpoint?: HistoryCompactCheckpoint;
+  }> {
+    const summarizer = this.input.summarizeHistoryCompact;
+    const recorder = this.input.recordHistoryCompactCheckpoint;
+    if (!summarizer || !recorder) return { diagnosticPatch: {} };
+    const foldedIds = new Set(input.draftBlock.coverage.runtimeEventIds);
+    const foldedRuntimeEvents = input.priorRuntimeContext.filter((event) => foldedIds.has(event.id));
+    if (foldedRuntimeEvents.length === 0) {
+      return {
+        diagnosticPatch: {
+          historyCompactWritesAttempted: 0,
+          historyCompactWriteSkipped: 1,
+          historyCompactWriteSkippedReasonCounts: { source_missing: 1 },
+        },
+      };
+    }
+    const loadedCheckpoint = input.contextBudget.historyCompact?.checkpoint;
+    const checkpointMatch = loadedCheckpoint
+      ? matchHistoryCompactCheckpointPrefix(loadedCheckpoint, foldedRuntimeEvents)
+      : undefined;
+    const previousCheckpoint = checkpointMatch && !checkpointMatch.reason ? loadedCheckpoint : undefined;
+    const newlyFoldedRuntimeEvents = previousCheckpoint
+      ? foldedRuntimeEvents.slice(checkpointMatch!.coveredEventCount)
+      : foldedRuntimeEvents;
+    const retainedRuntimeEvents = input.priorRuntimeContext.filter((event) =>
+      !foldedIds.has(event.id) && !event.id.startsWith('history-compact:')
+    );
+    const previousCheckpointFitsCurrentLimits = previousCheckpoint !== undefined
+      && evaluateHistoryCompactCheckpointReplay(
+        previousCheckpoint,
+        retainedRuntimeEvents,
+        input.contextBudget,
+      ).fits;
+    if (previousCheckpoint && newlyFoldedRuntimeEvents.length === 0 && previousCheckpointFitsCurrentLimits) {
+      return {
+        fallbackCheckpoint: previousCheckpoint,
+        diagnosticPatch: {
+          historyCompactEnabled: true,
+          historyCompactMode: 'read_write',
+          historyCompactWritesAttempted: 0,
+          historyCompactWriteSkipped: 1,
+          historyCompactWriteSkippedReasonCounts: { already_compacted: 1 },
+          historyCompactBlocksAvailable: 1,
+          historyCompactBlocksSelected: 1,
+          historyCompactBlockIds: [previousCheckpoint.checkpointId],
+          historyCompactedTurns: previousCheckpoint.coverage.turnCount,
+          historyCompactedEvents: previousCheckpoint.coverage.eventCount,
+          historyCompactedEstimatedTokensAfter: previousCheckpoint.estimatedTokens,
+          historyCompactCoverageHashes: [previousCheckpoint.coverage.sourceDigest],
+          ...compactionDecisionDiagnosticPatch({
+            stage: 'priorReplay',
+            sourceKind: 'runtimeEvents',
+            decision: 'unchanged',
+            boundaryKind: 'historyCompact',
+            boundaryIds: [previousCheckpoint.checkpointId],
+            reason: 'already_compacted',
+          }),
+        },
+      };
+    }
+    try {
+      const summary = await Promise.resolve(summarizer({
+        sessionId: this.sessionId,
+        turnId: input.turnId,
+        source: { draftBlock: input.draftBlock, foldedRuntimeEvents },
+        limits: {
+          maxBlocks: 1,
+          maxBlockEstimatedTokens:
+            input.contextBudget.historyCompact?.maxBlockEstimatedTokens
+            ?? input.contextBudget.historyCompact?.maxSummaryEstimatedTokens
+            ?? 1_024,
+          maxEstimatedTokens: input.contextBudget.historyCompact?.maxEstimatedTokens ?? 2_048,
+          charsPerToken: input.contextBudget.charsPerToken ?? 4,
+        },
+        ...(previousCheckpoint ? { previousCheckpoint } : {}),
+        newlyFoldedRuntimeEvents,
+        requestShapeHashBefore: this.priorRequestShape?.requestShapeHash,
+        abortSignal: input.abortSignal,
+      }));
+      if (!summary?.trim()) {
+        return {
+          ...(previousCheckpoint ? { fallbackCheckpoint: previousCheckpoint } : {}),
+          diagnosticPatch: {
+            historyCompactEnabled: true,
+            historyCompactMode: 'read_write',
+            historyCompactWritesAttempted: 1,
+            historyCompactWriteFailures: 1,
+            historyCompactWriteSkippedReasonCounts: { empty_summary: 1 },
+            ...compactionDecisionDiagnosticPatch({
+              stage: 'priorReplay', sourceKind: 'runtimeEvents', decision: 'failedOpen',
+              boundaryKind: 'historyCompact', failOpenReason: 'empty_summary',
+            }),
+          },
+        };
+      }
+      const checkpoint = buildHistoryCompactCheckpoint({
+        sessionId: this.sessionId,
+        coveredRuntimeEvents: foldedRuntimeEvents,
+        summary,
+        highWaterName: input.draftBlock.highWaterName,
+        highWaterSeq: input.draftBlock.highWaterSeq,
+        maxSummaryEstimatedTokens: input.contextBudget.historyCompact?.maxBlockEstimatedTokens
+          ?? input.contextBudget.historyCompact?.maxSummaryEstimatedTokens,
+        ...(previousCheckpoint ? { previousCheckpointId: previousCheckpoint.checkpointId } : {}),
+        charsPerToken: input.contextBudget.charsPerToken,
+        now: this.now(),
+      });
+      if (!evaluateHistoryCompactCheckpointReplay(
+        checkpoint,
+        retainedRuntimeEvents,
+        input.contextBudget,
+      ).fits) {
+        throw new Error('History compact checkpoint exceeds current replay limits');
+      }
+      await Promise.resolve(recorder(checkpoint, input.turnId));
+      return {
+        replacementCheckpoint: checkpoint,
+        diagnosticPatch: {
+          historyCompactEnabled: true,
+          historyCompactMode: 'read_write',
+          historyCompactWritesAttempted: 1,
+          historyCompactBlocksWritten: 1,
+          historyCompactWrittenBlockIds: [checkpoint.checkpointId],
+          historyCompactWriteEstimatedTokens: checkpoint.estimatedTokens,
+          historyCompactBlockIds: [checkpoint.checkpointId],
+          historyCompactedEstimatedTokensAfter: checkpoint.estimatedTokens,
+          highWaterName: checkpoint.highWaterName,
+          highWaterSeq: checkpoint.highWaterSeq,
+          highWaterReason: 'history_compact',
+        },
+      };
+    } catch {
+      return {
+        ...(previousCheckpoint ? { fallbackCheckpoint: previousCheckpoint } : {}),
+        diagnosticPatch: {
+          historyCompactEnabled: true,
+          historyCompactMode: 'read_write',
+          historyCompactWritesAttempted: 1,
+          historyCompactWriteFailures: 1,
+          ...compactionDecisionDiagnosticPatch({
+            stage: 'priorReplay', sourceKind: 'runtimeEvents', decision: 'failedOpen',
+            boundaryKind: 'historyCompact', failOpenReason: 'write_failed',
+          }),
+        },
       };
     }
   }
@@ -2225,27 +2561,48 @@ export class AiSdkBackend implements AgentBackend {
     return true;
   }
 
+  /**
+   * Materialize a replay plan into provider messages, grouping each assistant
+   * step's reasoning + text + tool calls into ONE assistant message (Anthropic
+   * requires the signed thinking block to lead the tool-use assistant message).
+   *
+   * The ledger lands a step's parts as: tool_call(s), tool_result(s), thinking,
+   * text (the per-step AssistantMessage flushes at `finish-step`, after the
+   * step's tool events). Model text carries the step id and closes the step: it
+   * emits `[reasoning, text, tool-call…]` then the tool results. Steps with no
+   * text closer — a thinking + tool step (its empty text closer is skipped from
+   * the plan as `empty_text_skipped`) or a pure-tool step — flush grouped by
+   * stepId, claiming any parked reasoning for that step. Legacy per-turn items
+   * (no step id) keep the older shape: tool calls form a tool-only assistant,
+   * text/thinking become standalone messages.
+   */
   private async materializeRuntimeReplayPlan(plan: RuntimeEventModelReplayPlan): Promise<ModelMessage[]> {
+    type ToolCallItem = Extract<RuntimeEventModelReplayItem, { kind: 'tool_call' }>;
+    type ToolResultItem = Extract<RuntimeEventModelReplayItem, { kind: 'tool_result' }>;
+    type ThinkingItem = Extract<RuntimeEventModelReplayItem, { kind: 'thinking' }>;
     const out: ModelMessage[] = [];
-    let toolBlock: {
-      calls: Extract<RuntimeEventModelReplayItem, { kind: 'tool_call' }>[];
-      results: Map<string, Extract<RuntimeEventModelReplayItem, { kind: 'tool_result' }>>;
-      pending: Set<string>;
-    } | undefined;
-    const flushToolBlock = () => {
-      if (!toolBlock) return;
-      out.push({
-        role: 'assistant',
-        content: toolBlock.calls.map((item) => ({
-          type: 'tool-call',
-          toolCallId: item.toolCallId,
-          toolName: item.toolName,
-          input: item.input,
-        })),
-      });
-      for (const call of toolBlock.calls) {
-        const result = toolBlock.results.get(call.toolCallId);
+    let bufferedCalls: ToolCallItem[] = [];
+    const results = new Map<string, ToolResultItem>();
+    const reasoningByStep = new Map<string, ThinkingItem>();
+
+    const reasoningPart = (item: ThinkingItem) => ({
+      type: 'reasoning' as const,
+      text: item.text,
+      providerOptions: { anthropic: { signature: item.signature } },
+    });
+    // Tool results are emitted only when their tool_call claims them here. A
+    // result whose call never appears in the plan (sliced-away call, corrupt
+    // ledger) is INTENTIONALLY dropped at the end: a standalone tool message
+    // with no preceding tool_use in an assistant message is an Anthropic 400.
+    // The old item-by-item materializer emitted such orphans; do not "fix" this
+    // back — the plan flags them as `unmatched_tool_result` (a non-blocking
+    // diagnostic precisely so this drop path is reachable; see
+    // hasBlockingReplayDiagnostics).
+    const pushToolResults = (calls: readonly ToolCallItem[]) => {
+      for (const call of calls) {
+        const result = results.get(call.toolCallId);
         if (!result) continue;
+        results.delete(call.toolCallId);
         out.push({
           role: 'tool',
           content: [{
@@ -2256,26 +2613,95 @@ export class AiSdkBackend implements AgentBackend {
           }],
         });
       }
-      toolBlock = undefined;
+    };
+    // Emit one assistant message for a step: reasoning (if any), text (if any),
+    // then the step's tool calls, followed by those calls' tool results.
+    const emitStep = (reasoning: ThinkingItem | undefined, text: string, calls: readonly ToolCallItem[]) => {
+      const content: unknown[] = [];
+      if (reasoning) content.push(reasoningPart(reasoning));
+      if (text.length > 0) content.push({ type: 'text', text });
+      for (const call of calls) {
+        content.push({ type: 'tool-call', toolCallId: call.toolCallId, toolName: call.toolName, input: call.input });
+      }
+      if (content.length > 0) out.push({ role: 'assistant', content } as ModelMessage);
+      pushToolResults(calls);
+    };
+    // Emit tool calls no assistant text closed: a thinking + tool step with no
+    // text (its empty closer is skipped from the plan), a pure-tool step, or a
+    // legacy per-turn tool block. Group consecutive calls by stepId so each step
+    // stays one assistant message, and claim the step's parked reasoning by
+    // stepId — this is how the common Anthropic interleaved-thinking step shape
+    // (reasoning + tool call, no text) gets its reasoning merged ahead of its
+    // calls. Calls without a stepId group together (legacy shape, no reasoning).
+    const emitGroupedCalls = (calls: readonly ToolCallItem[]) => {
+      let group: ToolCallItem[] = [];
+      const emitGroup = () => {
+        if (group.length === 0) return;
+        const stepId = group[0]!.stepId;
+        const reasoning = stepId !== undefined ? reasoningByStep.get(stepId) : undefined;
+        if (stepId !== undefined) reasoningByStep.delete(stepId);
+        emitStep(reasoning, '', group);
+        group = [];
+      };
+      for (const call of calls) {
+        if (group.length > 0 && group[0]!.stepId !== call.stepId) emitGroup();
+        group.push(call);
+      }
+      emitGroup();
+    };
+    const flushLooseCalls = () => {
+      if (bufferedCalls.length === 0) return;
+      const calls = bufferedCalls;
+      bufferedCalls = [];
+      emitGroupedCalls(calls);
     };
 
     for (const item of plan.items) {
-      if (item.kind === 'tool_call') {
-        toolBlock ??= { calls: [], results: new Map(), pending: new Set() };
-        toolBlock.calls.push(item);
-        toolBlock.pending.add(item.toolCallId);
-        continue;
+      switch (item.kind) {
+        case 'tool_call':
+          bufferedCalls.push(item);
+          break;
+        case 'tool_result':
+          results.set(item.toolCallId, item);
+          break;
+        case 'thinking':
+          if (item.stepId !== undefined) {
+            reasoningByStep.set(item.stepId, item);
+          } else {
+            // Legacy standalone reasoning (pure-reasoning turn): emit on its own.
+            flushLooseCalls();
+            out.push({ role: 'assistant', content: [reasoningPart(item)] } as ModelMessage);
+          }
+          break;
+        case 'text':
+          if (item.role !== 'assistant') {
+            flushLooseCalls();
+            out.push(await this.materializeRuntimeReplayItem(item));
+            break;
+          }
+          if (item.stepId !== undefined) {
+            const stepId = item.stepId;
+            const thisCalls = bufferedCalls.filter((call) => call.stepId === stepId);
+            const otherCalls = bufferedCalls.filter((call) => call.stepId !== stepId);
+            bufferedCalls = [];
+            // Earlier steps' unclosed calls flush first (with their own parked
+            // reasoning, if any) so step order is preserved.
+            if (otherCalls.length > 0) emitGroupedCalls(otherCalls);
+            emitStep(reasoningByStep.get(stepId), item.content, thisCalls);
+            reasoningByStep.delete(stepId);
+          } else {
+            // Legacy per-turn assistant text: standalone after any tool block.
+            flushLooseCalls();
+            out.push({ role: 'assistant', content: item.content });
+          }
+          break;
       }
-      if (item.kind === 'tool_result' && toolBlock?.pending.has(item.toolCallId)) {
-        toolBlock.results.set(item.toolCallId, item);
-        toolBlock.pending.delete(item.toolCallId);
-        if (toolBlock.pending.size === 0) flushToolBlock();
-        continue;
-      }
-      flushToolBlock();
-      out.push(await this.materializeRuntimeReplayItem(item));
     }
-    flushToolBlock();
+    flushLooseCalls();
+    // Any reasoning whose closing text never arrived (defensive): emit standalone.
+    for (const reasoning of reasoningByStep.values()) {
+      out.push({ role: 'assistant', content: [reasoningPart(reasoning)] } as ModelMessage);
+    }
     return out;
   }
 
@@ -2423,6 +2849,7 @@ export class AiSdkBackend implements AgentBackend {
     this.currentRunId = null;
     this.currentRunTrace = null;
     this.currentUserIntent = undefined;
+    this.currentStepMessageId = null;
     this.toolRuntime.resetTurnState();
     this.aborted = false;
   }
@@ -2487,203 +2914,15 @@ function stableStringifyForSignature(value: unknown): string {
 }
 
 function hasBlockingReplayDiagnostics(plan: RuntimeEventModelReplayPlan): boolean {
+  // `unmatched_tool_result` is deliberately NOT blocking: the materializer
+  // drops an orphan tool result (its call sliced away or the ledger corrupt)
+  // on its own — see pushToolResults — so one orphan must not degrade the
+  // whole ledger to stored-message projection.
   return plan.diagnostics.some((diagnostic) =>
     diagnostic.code === 'unsupported_role' ||
     diagnostic.code === 'unsupported_content' ||
-    diagnostic.code === 'unmatched_tool_result' ||
     diagnostic.code === 'tool_id_mismatch'
   );
-}
-
-function mergeRuntimeEventsInOriginalOrder(
-  original: readonly RuntimeEvent[],
-  current: readonly RuntimeEvent[],
-  extra: readonly RuntimeEvent[],
-): RuntimeEvent[] {
-  const wantedIds = new Set<string>();
-  const byId = new Map<string, RuntimeEvent>();
-  for (const event of current) {
-    wantedIds.add(event.id);
-    byId.set(event.id, event);
-  }
-  for (const event of extra) {
-    wantedIds.add(event.id);
-    if (!byId.has(event.id)) byId.set(event.id, event);
-  }
-  const out: RuntimeEvent[] = [];
-  for (const event of original) {
-    if (!wantedIds.has(event.id)) continue;
-    out.push(byId.get(event.id) ?? event);
-  }
-  return out;
-}
-
-function buildContextBudgetDiagnosticShell(
-  before: readonly RuntimeEvent[],
-  after: readonly RuntimeEvent[],
-  policy: ContextBudgetPolicy | undefined,
-): ContextBudgetDiagnostic {
-  const charsPerToken = policy?.charsPerToken ?? 4;
-  const turnCountBefore = new Set(before.map((event) => runtimeEventTurnKey(event))).size;
-  const turnCountAfter = new Set(after.map((event) => runtimeEventTurnKey(event))).size;
-  return {
-    enabled: true,
-    ...(policy?.name ? { policyName: policy.name } : {}),
-    ...(policy?.maxHistoryEstimatedTokens !== undefined
-      ? { maxHistoryEstimatedTokens: policy.maxHistoryEstimatedTokens }
-      : {}),
-    ...(policy?.maxHistoryTurns !== undefined ? { maxHistoryTurns: policy.maxHistoryTurns } : {}),
-    estimatedTokensBefore: estimateRuntimeEventsTokens(before, charsPerToken),
-    estimatedTokensAfter: estimateRuntimeEventsTokens(after, charsPerToken),
-    keptTurns: turnCountAfter,
-    droppedTurns: Math.max(0, turnCountBefore - turnCountAfter),
-    keptEvents: after.length,
-    droppedEvents: Math.max(0, before.length - after.length),
-    ...(policy?.historyRewrite?.enabled === true
-      ? {
-          historyRewriteVersion: policy.historyRewrite.historyRewriteVersion,
-          historyRewriteResetReason: policy.historyRewrite.resetReason,
-          historyRewriteGate: policy.historyRewrite.name ?? 'history-rewrite',
-        }
-      : {}),
-  };
-}
-
-function runtimeEventTurnKey(event: RuntimeEvent): string {
-  return event.turnId || '<unknown-turn>';
-}
-
-function retrieveReplayHistoryAroundSearchSource(
-  replayEvents: readonly RuntimeEvent[],
-  searchEvents: readonly RuntimeEvent[],
-  query: string,
-  policy: RuntimeEventHistorySearchPolicy | undefined,
-  options: { charsPerToken?: number } = {},
-): RuntimeEventHistoryAroundResult {
-  if (policy?.enabled !== true) {
-    return { events: [], hits: [], diagnosticPatch: {} };
-  }
-  const charsPerToken = options.charsPerToken ?? 4;
-  const around = Math.max(0, Math.floor(policy.around ?? 1));
-  const maxEstimatedTokens = typeof policy.maxEstimatedTokens === 'number'
-    && Number.isFinite(policy.maxEstimatedTokens)
-    && policy.maxEstimatedTokens > 0
-    ? Math.floor(policy.maxEstimatedTokens)
-    : 4_096;
-  const hits = searchRuntimeEventHistory(searchEvents, policy.query ?? query, policy);
-  const selectedIndexes = new Set<number>();
-  const indexesByEventId = new Map(replayEvents.map((event, index) => [event.id, index]));
-  let skipped = 0;
-  for (const hit of hits) {
-    const index = indexesByEventId.get(hit.eventId);
-    if (index === undefined) {
-      skipped += 1;
-      continue;
-    }
-    for (let cursor = Math.max(0, index - around); cursor <= Math.min(replayEvents.length - 1, index + around); cursor += 1) {
-      selectedIndexes.add(cursor);
-    }
-  }
-
-  const selectedEvents: RuntimeEvent[] = [];
-  let selectedTokens = 0;
-  for (const index of [...selectedIndexes].sort((a, b) => a - b)) {
-    const event = replayEvents[index]!;
-    const estimate = estimateRuntimeEventsTokens([event], charsPerToken);
-    if (selectedTokens + estimate > maxEstimatedTokens) {
-      skipped += 1;
-      continue;
-    }
-    selectedEvents.push(event);
-    selectedTokens += estimate;
-  }
-
-  return {
-    events: selectedEvents,
-    hits,
-    diagnosticPatch: {
-      historySearchMatches: hits.length,
-      historyAroundRetrievedEvents: selectedEvents.length,
-      historyAroundEstimatedTokens: selectedTokens,
-      ...(skipped > 0 ? { historyAroundSkippedEvents: skipped } : {}),
-    },
-  };
-}
-
-function buildHistorySearchSource(
-  events: readonly RuntimeEvent[],
-  policy: ContextBudgetPolicy | undefined,
-): readonly RuntimeEvent[] {
-  if (policy?.staleToolResultPrune?.enabled !== true) return events;
-  return applyRuntimeEventContextBudget(events, {
-    ...policy,
-    maxHistoryEstimatedTokens: undefined,
-    maxHistoryTurns: undefined,
-    archiveRetrieval: undefined,
-    historySearch: undefined,
-    historyRewrite: undefined,
-  })?.events ?? events;
-}
-
-function mergeContextBudgetDiagnostic(
-  base: ContextBudgetDiagnostic,
-  patch: Partial<ContextBudgetDiagnostic>,
-): ContextBudgetDiagnostic {
-  return {
-    ...base,
-    ...patch,
-    archiveRetrievalFailureReasonCounts: mergeCountRecords(
-      base.archiveRetrievalFailureReasonCounts,
-      patch.archiveRetrievalFailureReasonCounts,
-    ),
-    archiveRetrievalSkippedReasonCounts: mergeCountRecords(
-      base.archiveRetrievalSkippedReasonCounts,
-      patch.archiveRetrievalSkippedReasonCounts,
-    ),
-    synthesisCacheSkippedReasonCounts: mergeCountRecords(
-      base.synthesisCacheSkippedReasonCounts,
-      patch.synthesisCacheSkippedReasonCounts,
-    ),
-    synthesisCacheInvalidationReasonCounts: mergeCountRecords(
-      base.synthesisCacheInvalidationReasonCounts,
-      patch.synthesisCacheInvalidationReasonCounts,
-    ),
-    synthesisCacheLoadSkippedReasonCounts: mergeCountRecords(
-      base.synthesisCacheLoadSkippedReasonCounts,
-      patch.synthesisCacheLoadSkippedReasonCounts,
-    ),
-    synthesisCacheWriteSkippedReasonCounts: mergeCountRecords(
-      base.synthesisCacheWriteSkippedReasonCounts,
-      patch.synthesisCacheWriteSkippedReasonCounts,
-    ),
-    synthesisCacheEvictionReasonCounts: mergeCountRecords(
-      base.synthesisCacheEvictionReasonCounts,
-      patch.synthesisCacheEvictionReasonCounts,
-    ),
-    historyCompactSkippedReasonCounts: mergeCountRecords(
-      base.historyCompactSkippedReasonCounts,
-      patch.historyCompactSkippedReasonCounts,
-    ),
-    historyCompactLoadSkippedReasonCounts: mergeCountRecords(
-      base.historyCompactLoadSkippedReasonCounts,
-      patch.historyCompactLoadSkippedReasonCounts,
-    ),
-    historyCompactWriteSkippedReasonCounts: mergeCountRecords(
-      base.historyCompactWriteSkippedReasonCounts,
-      patch.historyCompactWriteSkippedReasonCounts,
-    ),
-    ...mergeCompactionDecisionDiagnostics(base.compactionDecisions, patch.compactionDecisions),
-  };
-}
-
-function mergeContextBudgetDiagnosticPatches(
-  left: Partial<ContextBudgetDiagnostic> | undefined,
-  right: Partial<ContextBudgetDiagnostic> | undefined,
-): Partial<ContextBudgetDiagnostic> | undefined {
-  if (!left && !right) return undefined;
-  if (!left) return right;
-  if (!right) return left;
-  return mergeContextBudgetDiagnostic(left as ContextBudgetDiagnostic, right);
 }
 
 function mergeActiveToolResultPruneDiagnosticPatches(
@@ -2725,60 +2964,45 @@ function contextBudgetWithActivePrepareStepDiagnostics(
   return mergeContextBudgetDiagnostic(base ?? minimalContextBudgetDiagnostic(), mergedPatch);
 }
 
-function minimalContextBudgetDiagnostic(): ContextBudgetDiagnostic {
-  return {
-    enabled: true,
-    estimatedTokensBefore: 0,
-    estimatedTokensAfter: 0,
-    keptTurns: 0,
-    droppedTurns: 0,
-    keptEvents: 0,
-    droppedEvents: 0,
-  };
-}
-
-function mergeCountRecords(
-  left: Record<string, number> | undefined,
-  right: Record<string, number> | undefined,
-): Record<string, number> | undefined {
-  if (!left && !right) return undefined;
-  const out: Record<string, number> = { ...(left ?? {}) };
-  for (const [key, value] of Object.entries(right ?? {})) {
-    out[key] = (out[key] ?? 0) + value;
-  }
-  return out;
-}
-
-function mergeCompactionDecisionDiagnostics(
-  left: readonly CompactionDecisionDiagnostic[] | undefined,
-  right: readonly CompactionDecisionDiagnostic[] | undefined,
-): { compactionDecisions: CompactionDecisionDiagnostic[] } | Record<string, never> {
-  if (!left && !right) return {};
-  if (!right || right.length === 0) return { compactionDecisions: [...(left ?? [])] };
-  const replacesHistoryCompact = right.some((decision) =>
-    decision.stage === 'priorReplay'
-    && decision.boundaryKind === 'historyCompact'
-  );
-  const retainedLeft = replacesHistoryCompact
-    ? (left ?? []).filter((decision) =>
-        !(
-          decision.stage === 'priorReplay'
-          && decision.boundaryKind === 'historyCompact'
-        )
-      )
-    : (left ?? []);
-  return { compactionDecisions: [...retainedLeft, ...right] };
-}
-
-function replaceHistoryCompactReplayBlocks(
-  events: readonly RuntimeEvent[],
-  blocks: readonly HistoryCompactBlock[],
+function buildHistoryCompactCheckpointFailOpenContext(
+  checkpoint: HistoryCompactCheckpoint,
+  priorRuntimeContext: readonly RuntimeEvent[],
+  policy: ContextBudgetPolicy,
+  retainedCandidates: readonly RuntimeEvent[],
 ): RuntimeEvent[] {
-  if (blocks.length === 0) return [...events];
-  return [
-    ...blocks.map((block) => historyCompactBlockToRuntimeEvent(block)),
-    ...events.filter((event) => !event.id.startsWith('history-compact:')),
-  ];
+  const charsPerToken = policy.charsPerToken ?? 4;
+  const compactableEvents = priorRuntimeContext.filter((event) =>
+    estimateRuntimeEventsTokens([event], charsPerToken) > 0
+  );
+  const match = matchHistoryCompactCheckpointPrefix(checkpoint, compactableEvents);
+  if (match.reason) return [...retainedCandidates];
+  const coveredIds = new Set(match.coveredRuntimeEvents.map((event) => event.id));
+  const candidates = retainedCandidates.filter((event) => !coveredIds.has(event.id));
+  const turnOrder: string[] = [];
+  const byTurn = new Map<string, RuntimeEvent[]>();
+  for (const event of candidates) {
+    const group = byTurn.get(event.turnId);
+    if (group) group.push(event);
+    else {
+      turnOrder.push(event.turnId);
+      byTurn.set(event.turnId, [event]);
+    }
+  }
+  const checkpointEvent = historyCompactCheckpointToRuntimeEvent(checkpoint);
+  const maxTokens = policy.maxHistoryEstimatedTokens ?? Number.POSITIVE_INFINITY;
+  let selectedTokens = estimateRuntimeEventsTokens([checkpointEvent], charsPerToken);
+  const selectedGroups: RuntimeEvent[][] = [];
+  for (let index = turnOrder.length - 1; index >= 0; index -= 1) {
+    const group = byTurn.get(turnOrder[index]!) ?? [];
+    const groupTokens = estimateRuntimeEventsTokens(group, charsPerToken);
+    if (selectedTokens + groupTokens > maxTokens) break;
+    selectedGroups.unshift(group);
+    selectedTokens += groupTokens;
+  }
+  const replayTail = selectedGroups.flat();
+  return evaluateHistoryCompactCheckpointReplay(checkpoint, replayTail, policy).fits
+    ? [checkpointEvent, ...replayTail]
+    : [...retainedCandidates];
 }
 
 function incrementRecord(counts: Record<string, number>, key: string): void {

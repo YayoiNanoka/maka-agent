@@ -17,9 +17,19 @@
 // the process cannot be spawned at all. Each caller maps those facts to its own
 // contract.
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { buildShellSpawnPlan, defaultShellPlan, type ShellPlan } from './shell-detect.js';
 import { BashTailBuffer } from './bash-tail-buffer.js';
+import {
+  DEFAULT_PROCESS_TERMINATION_GRACE_MS,
+  terminateChildProcessTree,
+} from './process-tree-terminator.js';
 import { OUTPUT_RECOVERY_HINT } from './tool-output.js';
+import {
+  buildSpawnStdio,
+  writeChildFdInputs,
+  type ChildFdInput,
+} from './child-fd-input.js';
 
 // Per-stream cap on the output RETAINED for the result (~1MB). This only bounds
 // what is kept to return. The tool layer (truncateToolOutput) trims this further
@@ -33,12 +43,6 @@ export const BASH_MAX_RETAINED_CHARS = 1024 * 1024;
 // stream passes this, we emit one suppressed marker and stop forwarding live;
 // chunks keep flowing into the retained tail buffer.
 export const BASH_MAX_LIVE_EMIT_CHARS = 1024 * 1024;
-
-// Grace period after SIGTERM (on timeout/abort) before escalating to SIGKILL. A
-// well-behaved child exits on SIGTERM and 'close' fires well within this window;
-// a child that traps/ignores SIGTERM is force-killed so the promise still
-// settles promptly (bounded by this) rather than hanging.
-export const SIGKILL_GRACE_MS = 2000;
 
 // Emitted once per stream when live forwarding is suppressed. The full output is
 // not lost — it still feeds the retained tail and the returned result.
@@ -73,10 +77,14 @@ export interface BoundedProcessOptions {
   env?: NodeJS.ProcessEnv;
   /** Aborts the child (sets `aborted`). */
   abortSignal?: AbortSignal;
-  /** Grace after SIGTERM before SIGKILL on timeout/abort. Defaults to SIGKILL_GRACE_MS. */
+  /** Grace after SIGTERM before SIGKILL on timeout/abort. */
   killGraceMs?: number;
   /** Receives every raw chunk live, before tail-bounding. */
   emitOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void;
+  /** Shell to run the command with. Defaults to the process-wide detected shell. */
+  shell?: ShellPlan;
+  /** Binary payloads exposed to the child on inherited file descriptors. */
+  fdInputs?: readonly ChildFdInput[];
 }
 
 export interface BoundedProcessResult {
@@ -102,68 +110,67 @@ export type BoundedShellResult = BoundedProcessResult;
  * Run `command` in a shell, streaming output into a memory-bounded tail. Never
  * kills the command for producing too much output — it keeps only the last
  * `maxRetainedChars` per stream. On timeout/abort it SIGTERMs (then SIGKILLs
- * after a grace period) and resolves only once the child has actually exited, so
- * it never reports "timed out" while the process keeps running in the
- * background. Resolves with the result (including timeout / abort flags); rejects
+ * after a grace period) and resolves only once the managed shell has actually
+ * exited and its captured streams have closed. Resolves with the result
+ * (including timeout / abort flags); rejects
  * only when the process cannot be spawned.
  */
 export function runShellWithBoundedTail(
   command: string,
   options: BoundedShellOptions,
 ): Promise<BoundedShellResult> {
-  return runSpawnedProcessWithBoundedTail(() => spawn(command, {
-    cwd: options.cwd,
-    env: options.env,
-    shell: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    // POSIX: make the shell its own process-group leader (setsid) so we can
-    // signal the WHOLE tree on timeout/abort. Killing only the shell PID would
-    // leave its children running — and if one keeps the stdout/stderr pipe
-    // open, 'close' never fires and the runner hangs. Not unref'd: we keep
-    // tracking it until it exits. Windows has no process groups; we use
-    // taskkill /T instead (see terminateTree).
-    detached: process.platform !== 'win32',
-  }), options);
+  const plan = buildShellSpawnPlan(options.shell ?? defaultShellPlan(), command);
+  return runSpawnedProcessWithBoundedTail(plan.file, plan.args, plan.useShellOption, options);
 }
 
 /**
- * Run an argv command directly, without shell reparsing. This is used for
- * sandbox wrapper commands such as:
- *   ['/usr/bin/sandbox-exec', '-p', policy, '--', '/bin/zsh', '-lc', command]
- *
- * It shares the same bounded-output, timeout, abort, and process-tree
- * termination contract as runShellWithBoundedTail.
+ * Run an argv command directly, without a second shell parsing pass. Both the
+ * argv-first sandbox API and the program/args upstream API are supported.
  */
 export function runProcessWithBoundedTail(
   argv: readonly string[],
   options: BoundedProcessOptions,
+): Promise<BoundedProcessResult>;
+export function runProcessWithBoundedTail(
+  program: string,
+  args: readonly string[],
+  options: BoundedProcessOptions,
+): Promise<BoundedProcessResult>;
+export function runProcessWithBoundedTail(
+  programOrArgv: string | readonly string[],
+  argsOrOptions: readonly string[] | BoundedProcessOptions,
+  maybeOptions?: BoundedProcessOptions,
 ): Promise<BoundedProcessResult> {
-  const program = argv[0];
+  const argvStyle = typeof programOrArgv !== 'string';
+  const program = argvStyle ? programOrArgv[0] : programOrArgv;
+  const args = argvStyle ? programOrArgv.slice(1) : argsOrOptions as readonly string[];
+  const options = argvStyle ? argsOrOptions as BoundedProcessOptions : maybeOptions;
   if (!program) return Promise.reject(new Error('Cannot run process with empty argv'));
-  return runSpawnedProcessWithBoundedTail(() => spawn(program, argv.slice(1), {
-    cwd: options.cwd,
-    env: options.env,
-    shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: process.platform !== 'win32',
-  }), options);
+  if (!options) return Promise.reject(new Error('Process options are required'));
+  return runSpawnedProcessWithBoundedTail(program, args, false, options);
 }
 
 function runSpawnedProcessWithBoundedTail(
-  spawnChild: () => ChildProcess,
+  program: string,
+  args: readonly string[],
+  useShellOption: boolean,
   options: BoundedProcessOptions,
 ): Promise<BoundedProcessResult> {
   const cap = options.maxRetainedChars ?? BASH_MAX_RETAINED_CHARS;
   const liveCap = options.maxLiveEmitChars ?? BASH_MAX_LIVE_EMIT_CHARS;
-  const graceMs = options.killGraceMs ?? SIGKILL_GRACE_MS;
+  const graceMs = options.killGraceMs ?? DEFAULT_PROCESS_TERMINATION_GRACE_MS;
   return new Promise<BoundedProcessResult>((resolvePromise, reject) => {
-    let child: ChildProcess;
-    try {
-      child = spawnChild();
-    } catch (error) {
-      reject(error);
-      return;
-    }
+    const child = spawn(program, [...args], {
+      cwd: options.cwd,
+      env: options.env,
+      shell: useShellOption,
+      stdio: buildSpawnStdio(options.fdInputs),
+      // POSIX: make the shell its own process-group leader (setsid). Termination
+      // signals the group and removes descendants visible outside it at each
+      // process-table snapshot.
+      // Windows has no process groups; taskkill /T owns the equivalent cleanup.
+      detached: process.platform !== 'win32',
+    });
     const stdoutBuf = new BashTailBuffer(cap);
     const stderrBuf = new BashTailBuffer(cap);
     let stdoutChars = 0;
@@ -176,7 +183,9 @@ function runSpawnedProcessWithBoundedTail(
     // Set when timeout/abort begins terminating the child. 'close' is the single
     // resolve point, so this remembers WHY we resolve once the child is gone.
     let termination: { timedOut?: boolean; aborted?: boolean } | null = null;
+    let terminationTask: Promise<unknown> | undefined;
     let killTimer: NodeJS.Timeout | undefined;
+    let closeStarted = false;
 
     child.stdout?.setEncoding('utf8');
     child.stderr?.setEncoding('utf8');
@@ -185,7 +194,7 @@ function runSpawnedProcessWithBoundedTail(
     child.on('error', (error: Error) => {
       // The process could not be spawned at all (e.g. the shell binary is
       // missing). This is exceptional — reject so callers surface it.
-      if (settled) return;
+      if (settled || closeStarted) return;
       settled = true;
       cleanup();
       reject(error);
@@ -200,6 +209,14 @@ function runSpawnedProcessWithBoundedTail(
     if (options.abortSignal) {
       if (options.abortSignal.aborted) abort();
       else options.abortSignal.addEventListener('abort', abort, { once: true });
+    }
+    try {
+      writeChildFdInputs(child, options.fdInputs);
+    } catch (error) {
+      settled = true;
+      cleanup();
+      void terminateChildProcessTree(child, 'SIGKILL');
+      reject(error);
     }
 
     function append(stream: 'stdout' | 'stderr', chunk: string): void {
@@ -234,40 +251,45 @@ function runSpawnedProcessWithBoundedTail(
 
     // Begin terminating a still-running child (timeout or abort). SIGTERM first
     // so a well-behaved child can flush and exit; if it ignores SIGTERM, SIGKILL
-    // after a grace period guarantees it dies. We do NOT resolve here — 'close'
-    // is the single resolve point, so the promise settles only once the child is
-    // actually gone (no zombie left running, no output after resolve).
+    // after a grace period guarantees the managed group is force-signalled. We do
+    // NOT resolve here: 'close' remains the single process/output resolve point.
     function beginTermination(reason: { timedOut?: boolean; aborted?: boolean }): void {
       if (termination || settled) return;
       termination = reason;
-      terminateTree('SIGTERM');
-      killTimer = setTimeout(() => terminateTree('SIGKILL'), graceMs);
+      terminationTask = terminateTree('SIGTERM').then(() => {
+        if (settled || closeStarted) return;
+        killTimer = setTimeout(() => {
+          terminationTask = terminateTree('SIGKILL');
+        }, graceMs);
+      });
     }
 
-    // Signal the shell AND every process it launched. POSIX: the shell is a
-    // process-group leader (detached above), so a negative PID targets the whole
-    // group. Windows: no groups/SIGTERM — taskkill /T /F force-kills the tree in
-    // one shot (the later SIGKILL call is then a harmless no-op on a dead PID).
-    function terminateTree(signal: 'SIGTERM' | 'SIGKILL'): void {
-      terminateChildProcessTree(child, signal);
+    // Signal the managed process group and any detached descendants identifiable
+    // at the current snapshot. The later SIGKILL call is harmless when gone.
+    function terminateTree(signal: 'SIGTERM' | 'SIGKILL'): Promise<boolean> {
+      return terminateChildProcessTree(child, signal);
     }
 
     // Settle once, on 'close'. exitCode reflects how we terminated: 124 timeout,
     // 130 abort, else the child's own code (or 128+signal when signal-killed).
     function resolveOnce(code: number | null, signal: NodeJS.Signals | null): void {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      const stdout = shellTailValueWithUnsafeDropMarker(stdoutBuf);
-      const stderr = shellTailValueWithUnsafeDropMarker(stderrBuf);
-      resolvePromise({
-        exitCode: termination ? (termination.timedOut ? 124 : 130) : (code ?? (signal ? 128 : 1)),
-        stdout,
-        stderr,
-        stdoutTruncated: stdoutChars > stdout.length || stdoutBuf.hasDroppedUnsafe(),
-        stderrTruncated: stderrChars > stderr.length || stderrBuf.hasDroppedUnsafe(),
-        timedOut: !!termination?.timedOut,
-        aborted: !!termination?.aborted,
+      if (settled || closeStarted) return;
+      closeStarted = true;
+      void (terminationTask ?? Promise.resolve()).then(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        const stdout = shellTailValueWithUnsafeDropMarker(stdoutBuf);
+        const stderr = shellTailValueWithUnsafeDropMarker(stderrBuf);
+        resolvePromise({
+          exitCode: termination ? (termination.timedOut ? 124 : 130) : (code ?? (signal ? 128 : 1)),
+          stdout,
+          stderr,
+          stdoutTruncated: stdoutChars > stdout.length || stdoutBuf.hasDroppedUnsafe(),
+          stderrTruncated: stderrChars > stderr.length || stderrBuf.hasDroppedUnsafe(),
+          timedOut: !!termination?.timedOut,
+          aborted: !!termination?.aborted,
+        });
       });
     }
 
@@ -277,38 +299,4 @@ function runSpawnedProcessWithBoundedTail(
       if (options.abortSignal) options.abortSignal.removeEventListener('abort', abort);
     }
   });
-}
-
-export function terminateChildProcessTree(child: ChildProcess, signal: 'SIGTERM' | 'SIGKILL'): void {
-  const pid = child.pid;
-  if (!pid) return;
-  if (process.platform === 'win32') {
-    killWindowsTree(pid);
-    return;
-  }
-  try {
-    process.kill(-pid, signal);
-  } catch {
-    try { child.kill(signal); } catch { /* already exited */ }
-  }
-}
-
-/**
- * Force-kill a process tree on Windows, which has no process groups or SIGTERM
- * semantics (POSIX uses `process.kill(-pid)` on the detached group instead).
- * `taskkill /T` walks the tree by PID, `/F` forces it. Best-effort and untested
- * on non-Windows CI — exported so the error-handling path can be exercised on
- * any platform.
- *
- * The spawned taskkill MUST have an 'error' listener: a child process with no
- * 'error' handler turns an async spawn failure (e.g. taskkill not on PATH) into
- * an unhandled 'error' event that can crash the host process.
- */
-export function killWindowsTree(pid: number): void {
-  try {
-    const killer = spawn('taskkill', ['/pid', String(pid), '/t', '/f'], { stdio: 'ignore' });
-    killer.on('error', () => { /* taskkill unavailable / failed — nothing more we can do */ });
-  } catch {
-    /* synchronous spawn failure — nothing more we can do */
-  }
 }

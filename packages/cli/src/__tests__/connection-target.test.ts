@@ -1,9 +1,55 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { LlmConnection } from '@maka/core/llm-connections';
-import { resolveDefaultSessionTarget } from '../connection-target.js';
+import { listReadyModelChoices, resolveDefaultSessionTarget } from '../connection-target.js';
 
 describe('default session target resolver', () => {
+  test('resolves MiniMax Coding Plan credentials without rewriting the selected model id', async () => {
+    const connection = makeConnection({
+      slug: 'minimax-plan',
+      name: 'MiniMax Coding Plan',
+      providerType: 'minimax-coding-plan',
+      defaultModel: 'MiniMax-M2.7-highspeed',
+    });
+
+    const target = await resolveDefaultSessionTarget({
+      connectionStore: {
+        getDefault: async () => 'minimax-plan',
+        get: async (slug) => slug === 'minimax-plan' ? connection : null,
+      },
+      credentialStore: {
+        getSecret: async (_slug, kind) => kind === 'api_key' ? 'minimax-plan-test-key' : null,
+      },
+    });
+
+    assert.equal(target.connection.providerType, 'minimax-coding-plan');
+    assert.equal(target.apiKey, 'minimax-plan-test-key');
+    assert.equal(target.model, 'MiniMax-M2.7-highspeed');
+  });
+
+  test('resolves a SiliconFlow registry connection without rewriting its model id', async () => {
+    const connection = makeConnection({
+      slug: 'siliconflow',
+      name: 'SiliconFlow',
+      providerType: 'siliconflow',
+      defaultModel: 'moonshotai/Kimi-K2.6',
+    });
+
+    const target = await resolveDefaultSessionTarget({
+      connectionStore: {
+        getDefault: async () => 'siliconflow',
+        get: async (slug) => slug === 'siliconflow' ? connection : null,
+      },
+      credentialStore: {
+        getSecret: async (_slug, kind) => kind === 'api_key' ? 'sf-test-key' : null,
+      },
+    });
+
+    assert.equal(target.connection.providerType, 'siliconflow');
+    assert.equal(target.apiKey, 'sf-test-key');
+    assert.equal(target.model, 'moonshotai/Kimi-K2.6');
+  });
+
   test('uses the default ready connection and requested model', async () => {
     const connection = makeConnection({
       slug: 'local',
@@ -144,6 +190,95 @@ describe('default session target resolver', () => {
       }),
       /NO_REAL_CONNECTION:missing_default_connection/,
     );
+  });
+});
+
+describe('listReadyModelChoices', () => {
+  test('lists models across every ready connection and skips fake / not-ready', async () => {
+    const zai = makeConnection({
+      slug: 'zai',
+      name: 'Z.ai',
+      providerType: 'ollama', // authKind none → ready without a stored secret
+      defaultModel: 'glm-5.2',
+      models: [{ id: 'glm-5.2' }, { id: 'glm-5-air' }],
+    });
+    const openai = makeConnection({
+      slug: 'openai',
+      name: 'OpenAI',
+      providerType: 'openai', // needs an api key
+      defaultModel: 'gpt-5.5',
+      models: [{ id: 'gpt-5.5' }],
+    });
+    const openaiNoKey = makeConnection({
+      slug: 'openai-2',
+      name: 'OpenAI 2',
+      providerType: 'openai',
+      defaultModel: 'gpt-5.5',
+    });
+    const fake = makeConnection({ slug: 'fake', name: 'Fake', providerType: 'ollama', defaultModel: 'x' });
+
+    const choices = await listReadyModelChoices({
+      connectionStore: {
+        list: async () => [zai, openai, openaiNoKey, fake],
+        getDefault: async () => 'zai',
+      },
+      credentialStore: {
+        getSecret: async (slug) => (slug === 'openai' ? 'sk-real' : null),
+      },
+    });
+
+    // Two ready connections contribute; the keyless OpenAI and the fake are skipped.
+    assert.deepEqual(
+      choices.filter((choice) => choice.connectionSlug === 'zai').map((choice) => choice.model),
+      ['glm-5.2', 'glm-5-air'],
+    );
+    assert.deepEqual(
+      choices.filter((choice) => choice.connectionSlug === 'openai').map((choice) => choice.model),
+      ['gpt-5.5'],
+    );
+    assert.equal(choices.some((choice) => choice.connectionSlug === 'openai-2'), false);
+    assert.equal(choices.some((choice) => choice.connectionSlug === 'fake'), false);
+    // The default connection is flagged so the picker can mark it.
+    assert.equal(choices.find((choice) => choice.connectionSlug === 'zai')?.isDefaultConnection, true);
+    assert.equal(choices.find((choice) => choice.connectionSlug === 'openai')?.isDefaultConnection, false);
+    assert.equal(choices.find((choice) => choice.connectionSlug === 'zai')?.connectionName, 'Z.ai');
+  });
+
+  test('skips a connection whose credential read throws instead of failing the whole list', async () => {
+    // A local keyless connection plus an API connection whose stored credentials
+    // are corrupt/legacy, so reading its secret throws.
+    const local = makeConnection({
+      slug: 'local',
+      name: 'Local',
+      providerType: 'ollama', // authKind none → no secret read
+      defaultModel: 'qwen',
+      models: [{ id: 'qwen' }],
+    });
+    const broken = makeConnection({
+      slug: 'openai',
+      name: 'OpenAI',
+      providerType: 'openai', // needs a secret → getSecret is called and throws
+      defaultModel: 'gpt-5.5',
+      models: [{ id: 'gpt-5.5' }],
+    });
+
+    const choices = await listReadyModelChoices({
+      connectionStore: {
+        list: async () => [local, broken],
+        getDefault: async () => 'local',
+      },
+      credentialStore: {
+        getSecret: async (slug) => {
+          if (slug === 'openai') throw new Error('credentials.json is unreadable');
+          return null;
+        },
+      },
+    });
+
+    // The broken connection is skipped; the keyless local model still lists, so
+    // startup (which awaits this) survives an unrelated corrupt credential file.
+    assert.deepEqual(choices.map((choice) => choice.connectionSlug), ['local']);
+    assert.deepEqual(choices.map((choice) => choice.model), ['qwen']);
   });
 });
 

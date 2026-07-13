@@ -1,6 +1,6 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { SettingsSection, ThemePreference } from '@maka/core';
-import type { AssistantStreamSlot, PermissionQueues, ToolActivityItem } from '@maka/ui';
+import type { LiveTurnProjection, PermissionQueues } from '@maka/ui';
 import type { NavSelection } from '@maka/ui';
 import { applyTheme } from './theme';
 
@@ -15,28 +15,26 @@ export function createAppShellVisualSmokeActions(options: {
   openSettingsSection: (section: SettingsSection) => void;
   refreshSessions: () => Promise<unknown>;
   setActiveId: (sessionId: string | undefined) => void;
-  setLiveToolsBySession: StateUpdater<Record<string, ToolActivityItem[]>>;
+  setLiveBrowserSessionIds: Dispatch<SetStateAction<string[]>>;
+  setLiveTurnBySession: StateUpdater<Record<string, LiveTurnProjection>>;
   setNavSelection: Dispatch<SetStateAction<NavSelection>>;
   setPermissionBySession: StateUpdater<PermissionQueues>;
   setSearchModalOpen: Dispatch<SetStateAction<boolean>>;
   setSessionListCollapsed: Dispatch<SetStateAction<boolean>>;
-  setStreamingBySession: StateUpdater<Record<string, AssistantStreamSlot>>;
   setThemePref: Dispatch<SetStateAction<ThemePreference>>;
-  setThinkingBySession: StateUpdater<Record<string, string>>;
 }): AppShellVisualSmokeActions {
   const {
     openPalette,
     openSettingsSection,
     refreshSessions,
     setActiveId,
-    setLiveToolsBySession,
+    setLiveBrowserSessionIds,
+    setLiveTurnBySession,
     setNavSelection,
     setPermissionBySession,
     setSearchModalOpen,
     setSessionListCollapsed,
-    setStreamingBySession,
     setThemePref,
-    setThinkingBySession,
   } = options;
 
   async function applyVisualSmokeFixture() {
@@ -50,27 +48,8 @@ export function createAppShellVisualSmokeActions(options: {
       Date.now = () => state.now!;
     }
     document.documentElement.setAttribute('data-maka-visual-smoke', 'true');
-    if (state.streamingBySession) {
-      // PR-UI-Cx fixup v2: `VisualSmokeState.streamingBySession` is a
-      // `Record<string, string>` (fixture-side contract; can stay
-      // simple since fixtures are pre-canned safe text). Map each
-      // entry into the combined `AssistantStreamSlot` shape on
-      // hydration. `truncated: false` because fixture text is
-      // explicitly authored and never exceeds caps.
-      const seed = state.streamingBySession;
-      setStreamingBySession((current) => {
-        const next = { ...current };
-        for (const [sid, text] of Object.entries(seed)) {
-          next[sid] = { text, truncated: false, phase: 'streaming' };
-        }
-        return next;
-      });
-    }
-    if (state.thinkingBySession) {
-      // PR-UI-LAYOUT-42: mirror streamingBySession init pattern so
-      // visual smoke fixtures can seed the ReasoningPanel mid-stream
-      // and capture a deterministic screenshot of the live state.
-      setThinkingBySession((current) => ({ ...current, ...state.thinkingBySession }));
+    if (state.liveTurnBySession) {
+      setLiveTurnBySession((current) => ({ ...current, ...state.liveTurnBySession }));
     }
     if (state.permissionBySession) {
       const seeded: PermissionQueues = {};
@@ -78,9 +57,6 @@ export function createAppShellVisualSmokeActions(options: {
         if (request) seeded[seedSessionId] = [request];
       }
       setPermissionBySession((current) => ({ ...current, ...seeded }));
-    }
-    if (state.liveToolsBySession) {
-      setLiveToolsBySession((current) => ({ ...current, ...state.liveToolsBySession }));
     }
     // PR-IR-01b: theme override applied BEFORE the persisted user pref so
     // the screenshot variant matches `<theme>-<viewport>-<motion>.png`
@@ -129,6 +105,13 @@ export function createAppShellVisualSmokeActions(options: {
     if (state.activeSessionId) {
       setActiveId(state.activeSessionId);
     }
+    // #819: seed live browser session ids so BrowserPanel mounts for the
+    // active session (app-shell gates on `activeId &&
+    // liveBrowserSessionIds.includes(activeId)`). Only the `browser-empty`
+    // scenario sets this; real users never receive a visual smoke state.
+    if (state.liveBrowserSessionIds) {
+      setLiveBrowserSessionIds(state.liveBrowserSessionIds);
+    }
     if (state.sidebarCollapsed !== undefined) {
       setSessionListCollapsed(state.sidebarCollapsed);
     }
@@ -161,9 +144,9 @@ export function createAppShellVisualSmokeActions(options: {
     // PR-SIDEBAR-IA-0 Phase 3 P0 fixup v4 (WAWQAQ msg `5dd1c348`,
     // kenji `b3d156e9`): when the fixture sets `focusActiveRow`,
     // focus the active row's button after the next paint so the
-    // row's `:focus-within` triggers and the `.maka-list-row-actions`
-    // overlay becomes visible. The auto-capture then shows the
-    // actions cluster against the slim row, proving the time meta
+    // row's `:focus-within` triggers and the `.maka-list-row-menu-trigger`
+    // becomes visible. The auto-capture then shows the overflow
+    // trigger against the slim row, proving the time meta
     // + unread dot are hidden underneath (no overlap with the
     // action icons — the bug WAWQAQ flagged). Two RAFs let React
     // commit the active selection before we query the DOM.
@@ -198,7 +181,7 @@ export function createAppShellVisualSmokeActions(options: {
             // PR-SIDEBAR-IA-0 Phase 3 P0 fixup v4 exception (WAWQAQ
             // msg `5dd1c348`): when the fixture asks for a focused
             // active row (e.g. the `sidebar-row-actions-visible`
-            // scenario, which proves the action overlay doesn't
+            // scenario, which proves the overflow action doesn't
             // overlap the time meta), the blur step would defeat the
             // whole point of the capture. Skip the blur in that
             // narrow case; other captures still get a clean (focusless)

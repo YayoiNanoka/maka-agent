@@ -3,7 +3,12 @@ import { mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { writeFile } from 'node:fs/promises';
 import { basename, delimiter, join } from 'node:path';
 import { promisify } from 'node:util';
-import { validateHarborCellOutput, type HarborCellOutput } from './cell-output.js';
+import {
+  validateHarborCellExecutionIdentity,
+  validateHarborCellOutput,
+  type HarborCellExecutionIdentity,
+  type HarborCellOutput,
+} from './cell-output.js';
 import {
   FixedPromptBudgetExhaustedError,
   type FixedPromptBudgetExhaustedError as FixedPromptBudgetExhaustedErrorType,
@@ -11,11 +16,14 @@ import {
   HarborTaskRunOutput,
   HarborTaskRunner,
 } from './fixed-prompt-controller.js';
+import { startProviderAuthProxy } from './provider-auth-proxy.js';
+import { requireProviderCredentialEnv } from './provider-env.js';
 
 const execFileAsync = promisify(execFile);
 
 const CONTAINER_MAKA_REPO = '/opt/maka-agent';
 const TRIAL_CELL_OUTPUT = 'agent/maka-cell-output.json';
+const TRIAL_EXECUTION_IDENTITY = 'agent/maka-cell-execution-identity.json';
 const TRIAL_RUNTIME_EVENTS = 'agent/runtime-events.jsonl';
 const TRIAL_REWARD = 'verifier/reward.txt';
 const TRIAL_VERIFIER_STDOUT = 'verifier/test-stdout.txt';
@@ -43,12 +51,17 @@ export interface HarborTaskPricing {
 export interface HarborTaskRunnerOptions {
   /** Host path to the maka repo, mounted read-only at /opt/maka-agent. */
   makaRepoPath: string;
+  /** Harbor adapter under test (default: Maka). */
+  agent?: 'maka' | 'opencode';
+  /** Version passed to Harbor's installed-agent adapter (used to pin OpenCode). */
+  agentVersion?: string;
   /** Base directory under which each task gets an isolated per-task job dir. */
   jobsDir: string;
   /** MAKA_MODEL, e.g. "deepseek/deepseek-v4-flash". */
   model: string;
   /** MAKA_PROVIDER, e.g. "deepseek". */
   provider?: string;
+  reasoningEffort?: 'high' | 'max';
   /** Host path to an API key file. The key stays in the Harbor control process;
    * the task container receives no provider key env, key-file path, or secret mount. */
   apiKeyFile?: string;
@@ -85,6 +98,7 @@ export interface HarborRunRequest {
 }
 
 const DEFAULT_HARBOR_TIMEOUT_MS = 45 * 60_000;
+const HARBOR_SETUP_TEARDOWN_GRACE_MS = 15 * 60_000;
 
 export interface HarborRunResult {
   exitCode: number;
@@ -96,19 +110,25 @@ export interface HarborRunResult {
 
 export type HarborProcessRunner = (request: HarborRunRequest) => Promise<HarborRunResult>;
 
-const PROVIDER_SECRET_ENV: Record<string, { key: string; file: string; baseUrl: string }> = {
-  deepseek: { key: 'DEEPSEEK_API_KEY', file: 'DEEPSEEK_API_KEY_FILE', baseUrl: 'DEEPSEEK_BASE_URL' },
-  openai: { key: 'OPENAI_API_KEY', file: 'OPENAI_API_KEY_FILE', baseUrl: 'OPENAI_BASE_URL' },
-  'openai-compatible': { key: 'OPENAI_API_KEY', file: 'OPENAI_API_KEY_FILE', baseUrl: 'OPENAI_BASE_URL' },
-  moonshot: { key: 'MOONSHOT_API_KEY', file: 'MOONSHOT_API_KEY_FILE', baseUrl: 'MOONSHOT_BASE_URL' },
-  google: { key: 'GOOGLE_API_KEY', file: 'GOOGLE_API_KEY_FILE', baseUrl: 'GOOGLE_BASE_URL' },
-  anthropic: { key: 'ANTHROPIC_API_KEY', file: 'ANTHROPIC_API_KEY_FILE', baseUrl: 'ANTHROPIC_BASE_URL' },
-};
+const EXPERIMENT_IDENTITY_ENV_KEYS = new Set([
+  'MAKA_BACKEND',
+  'MAKA_MODEL',
+  'MAKA_PROVIDER',
+  'MAKA_LLM_CONNECTION_SLUG',
+  'MAKA_REASONING_EFFORT',
+  'MAKA_OPENCODE_VARIANT',
+  'MAKA_SYSTEM_PROMPT',
+  'MAKA_TRIAL_INPUT_USD_PER_1M',
+  'MAKA_TRIAL_OUTPUT_USD_PER_1M',
+  'MAKA_TRIAL_CACHE_READ_USD_PER_1M',
+  'MAKA_TRIAL_CACHE_WRITE_USD_PER_1M',
+  'MAKA_TRIAL_PRICING_SOURCE',
+]);
 
 export function createHarborTaskRunner(options: HarborTaskRunnerOptions): HarborTaskRunner {
   const runHarbor = options.runHarbor ?? defaultHarborProcessRunner;
   const harborBin = options.harborBin ?? 'harbor';
-  // The bare `maka_agent:MakaAgent` import path resolves only when the adapter
+  // The bare local adapter import paths resolve only when the adapter
   // directory is on harbor's PYTHONPATH; harbor is a uv-installed tool, so its cwd
   // is not enough. Prepend it (keeping any inherited PYTHONPATH).
   const harborAdapterDir = join(options.makaRepoPath, 'packages', 'headless', 'harbor');
@@ -133,36 +153,41 @@ export function createHarborTaskRunner(options: HarborTaskRunnerOptions): Harbor
       agentEnv: mergeAgentEnv(options.agentEnv, input.agentEnv),
     };
     assertNoProviderSecretsInAgentEnv(runnerOptions.agentEnv);
-    const hostProviderEnv = hostSideProviderEnv(runnerOptions);
+    const hasHostProviderAuth = runnerOptions.apiKeyFile !== undefined;
     const configPath = join(jobsDir, 'job-config.json');
     const { agentEnv: _attemptAgentEnv, ...inputWithoutAttemptEnv } = input;
     const config = buildHarborJobConfig(inputWithoutAttemptEnv, {
       ...runnerOptions,
       jobsDir,
       jobName,
-      ...(hostProviderEnv ? { agentEnv: taskAgentEnvWithoutProviderSecrets(runnerOptions) } : {}),
+      ...(hasHostProviderAuth ? { agentEnv: taskAgentEnvWithoutProviderSecrets(runnerOptions) } : {}),
     });
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 
     const args = ['run', '--config', configPath, '--yes'];
     let result: HarborRunResult;
     try {
-      result = await runHarbor({
-        harborBin,
-        configPath,
-        jobName,
-        jobsDir,
-        args,
-        cwd: options.makaRepoPath,
-        timeoutMs: options.harborTimeoutMs ?? DEFAULT_HARBOR_TIMEOUT_MS,
-        env: { PYTHONPATH: pythonPath, ...(hostProviderEnv ?? {}) },
-      });
+      const providerRuntime = await hostSideProviderRuntime(runnerOptions);
+      try {
+        result = await runHarbor({
+          harborBin,
+          configPath,
+          jobName,
+          jobsDir,
+          args,
+          cwd: options.makaRepoPath,
+          timeoutMs: resolveHarborTimeoutMs(runnerOptions, input),
+          env: { PYTHONPATH: pythonPath, ...(providerRuntime?.env ?? {}) },
+        });
+      } finally {
+        await providerRuntime?.close?.();
+      }
     } catch (error) {
       if (isBudgetExhaustedError(error)) throw error;
       throw new HarborInfraError(`harbor run failed to launch for task ${input.task.id}`, errorText(error));
     }
     if (result.timedOut) {
-      throw new FixedPromptBudgetExhaustedError(
+      throw new HarborInfraError(
         `harbor run timed out for task ${input.task.id}`,
         tail(result.stderr || result.stdout),
       );
@@ -182,9 +207,11 @@ export function createHarborTaskRunner(options: HarborTaskRunnerOptions): Harbor
 
     const trialException = await readTrialException(resultPath);
     if (trialException && isBudgetExhaustedTrialException(trialException)) {
+      const artifactRefs = await readTimedOutTrialArtifacts(trialDir, input.task.id);
       throw new FixedPromptBudgetExhaustedError(
         `agent budget exhausted for task ${input.task.id}`,
         trialException,
+        artifactRefs ?? undefined,
       );
     }
     const reward = await readReward(rewardPath, resultPath, input.task.id);
@@ -217,6 +244,57 @@ export function createHarborTaskRunner(options: HarborTaskRunnerOptions): Harbor
       },
     };
   };
+}
+
+function resolveHarborTimeoutMs(
+  options: HarborTaskRunnerOptions,
+  input: HarborTaskRunInput,
+): number {
+  if (options.harborTimeoutMs !== undefined) return options.harborTimeoutMs;
+  const agentSec = input.task.metadata?.agentTimeoutSec ?? 0;
+  const verifierSec = input.task.metadata?.verifierTimeoutSec ?? 0;
+  const nativePhasesMs = (agentSec + verifierSec) * (options.timeoutMultiplier ?? 1) * 1_000;
+  return Math.max(DEFAULT_HARBOR_TIMEOUT_MS, nativePhasesMs + HARBOR_SETUP_TEARDOWN_GRACE_MS);
+}
+
+async function readOptionalCellOutput(cellOutputPath: string, taskId: string): Promise<HarborCellOutput | null> {
+  try {
+    return await readCellOutput(cellOutputPath, taskId);
+  } catch {
+    return null;
+  }
+}
+
+function cellArtifactRefs(cell: HarborCellOutput, hostEventsPath: string, trialDir: string) {
+  const traceEventsPath = join(
+    trialDir,
+    TRIAL_TRACE_EVENTS_ROOT,
+    cell.runtimeRefs.sessionId,
+    'runs',
+    cell.runtimeRefs.runId,
+    'events.jsonl',
+  );
+  return {
+    runtimeEventsPath: hostEventsPath,
+    traceEventsPath,
+    tokenSummary: cell.tokenSummary,
+    cellOutput: { ...cell, runtimeEventsPath: hostEventsPath, traceEventsPath },
+  };
+}
+
+async function readTimedOutTrialArtifacts(trialDir: string, taskId: string) {
+  const cell = await readOptionalCellOutput(join(trialDir, TRIAL_CELL_OUTPUT), taskId);
+  if (cell) return cellArtifactRefs(cell, join(trialDir, TRIAL_RUNTIME_EVENTS), trialDir);
+  const executionIdentity = await readOptionalExecutionIdentity(join(trialDir, TRIAL_EXECUTION_IDENTITY));
+  return executionIdentity ? { executionIdentity } : null;
+}
+
+async function readOptionalExecutionIdentity(path: string): Promise<HarborCellExecutionIdentity | null> {
+  try {
+    return validateHarborCellExecutionIdentity(JSON.parse(await readFile(path, 'utf8')));
+  } catch {
+    return null;
+  }
 }
 
 async function readOptionalText(path: string): Promise<string | null> {
@@ -293,19 +371,27 @@ export function buildHarborJobConfig(
 ): Record<string, unknown> {
   const attemptAgentEnv = mergeAgentEnv(options.agentEnv, input.agentEnv);
   assertNoProviderSecretsInAgentEnv(attemptAgentEnv);
+  assertNoExperimentIdentityOverrides(attemptAgentEnv);
   const provider = options.provider ?? 'deepseek';
-  const model = modelIdForProvider(options.model, provider);
+  const makaModel = modelIdForProvider(options.model, provider);
+  const adapter = options.agent ?? 'maka';
+  const agentModel = adapter === 'opencode' ? modelForOpenCode(options.model, provider) : makaModel;
   const mounts: Array<Record<string, unknown>> = [
     { type: 'bind', source: options.makaRepoPath, target: CONTAINER_MAKA_REPO, read_only: true },
   ];
 
   const agentEnv: Record<string, string> = {
     MAKA_BACKEND: 'ai-sdk',
-    MAKA_MODEL: model,
+    MAKA_MODEL: makaModel,
     MAKA_PROVIDER: provider,
+    MAKA_LLM_CONNECTION_SLUG: provider,
     // Verbatim — the controller hashes exactly these bytes and verifies the round-trip.
     MAKA_SYSTEM_PROMPT: input.systemPrompt,
   };
+  if (options.reasoningEffort) {
+    agentEnv.MAKA_REASONING_EFFORT = options.reasoningEffort;
+    if (adapter === 'opencode') agentEnv.MAKA_OPENCODE_VARIANT = options.reasoningEffort;
+  }
 
   if (options.pricing) {
     agentEnv.MAKA_TRIAL_INPUT_USD_PER_1M = String(options.pricing.inputUsdPer1M);
@@ -322,7 +408,9 @@ export function buildHarborJobConfig(
   }
 
   Object.assign(agentEnv, attemptAgentEnv ?? {});
-  const cellTimeoutSec = positiveIntEnv(agentEnv.MAKA_CELL_TIMEOUT_SEC);
+  const cellTimeoutSec = positiveIntEnv(agentEnv.MAKA_CELL_TIMEOUT_SEC)
+    ?? input.task.metadata?.agentTimeoutSec;
+  if (cellTimeoutSec !== undefined) agentEnv.MAKA_CELL_TIMEOUT_SEC = String(cellTimeoutSec);
 
   return {
     job_name: options.jobName,
@@ -341,10 +429,14 @@ export function buildHarborJobConfig(
     metrics: [{ type: 'mean', kwargs: {} }],
     agents: [
       {
-        name: 'maka',
-        import_path: 'maka_agent:MakaAgent',
-        model_name: model,
-        kwargs: { backend: 'ai-sdk' },
+        name: adapter,
+        import_path: adapter === 'opencode' ? 'opencode_agent:MakaOpenCodeAgent' : 'maka_agent:MakaAgent',
+        model_name: agentModel,
+        kwargs: adapter === 'maka'
+          ? { backend: 'ai-sdk' }
+          : options.agentVersion
+            ? { version: options.agentVersion }
+            : {},
         env: agentEnv,
         ...(cellTimeoutSec !== undefined ? { max_timeout_sec: cellTimeoutSec } : {}),
       },
@@ -363,28 +455,46 @@ function positiveIntEnv(raw: string | undefined): number | undefined {
   return Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
-function providerSecretEnv(provider: string): { key: string; file: string; baseUrl: string } {
-  return PROVIDER_SECRET_ENV[provider] ?? PROVIDER_SECRET_ENV.openai!;
-}
-
-function hostSideProviderEnv(options: HarborTaskRunnerOptions): Record<string, string> | null {
+async function hostSideProviderRuntime(options: HarborTaskRunnerOptions): Promise<{
+  env: Record<string, string>;
+  close?: () => Promise<void>;
+} | null> {
   if (!options.apiKeyFile) return null;
   const provider = options.provider ?? 'deepseek';
-  const providerEnv = providerSecretEnv(provider);
-  const baseUrl = options.agentEnv?.[providerEnv.baseUrl] ?? options.agentEnv?.MAKA_BASE_URL ?? options.agentEnv?.OPENAI_BASE_URL;
+  const providerEnv = requireProviderCredentialEnv(provider);
+  const [primaryBaseUrl, ...fallbackBaseUrls] = providerEnv.baseUrls;
+  const baseUrl = (primaryBaseUrl ? options.agentEnv?.[primaryBaseUrl] : undefined)
+    ?? options.agentEnv?.MAKA_BASE_URL
+    ?? fallbackBaseUrls.map((name) => options.agentEnv?.[name]).find(Boolean);
+  if (options.agent === 'opencode') {
+    if (!baseUrl) throw new Error(`OpenCode provider ${provider} requires a base URL`);
+    const proxy = await startProviderAuthProxy({
+      upstreamBaseUrl: baseUrl,
+      apiKeyFile: options.apiKeyFile,
+    });
+    return {
+      env: {
+        MAKA_OPENCODE_PROVIDER_PROXY_URL: proxy.baseUrl,
+        MAKA_OPENCODE_PROVIDER_PROXY_TOKEN: proxy.token,
+      },
+      close: proxy.close,
+    };
+  }
   return {
-    MAKA_HOST_REPO_ROOT: options.makaRepoPath,
-    MAKA_HOST_API_KEY_FILE: options.apiKeyFile,
-    MAKA_HOST_API_KEY_ENV_NAME: normalizeRawKeyEnvName(options.apiKeyEnvName ?? providerEnv.key),
-    ...(baseUrl ? { MAKA_HOST_BASE_URL: baseUrl } : {}),
+    env: {
+      MAKA_HOST_REPO_ROOT: options.makaRepoPath,
+      MAKA_HOST_API_KEY_FILE: options.apiKeyFile,
+      MAKA_HOST_API_KEY_ENV_NAME: normalizeRawKeyEnvName(options.apiKeyEnvName ?? providerEnv.apiKeys[0]!),
+      ...(baseUrl ? { MAKA_HOST_BASE_URL: baseUrl } : {}),
+    },
   };
 }
 
 function taskAgentEnvWithoutProviderSecrets(options: HarborTaskRunnerOptions): Record<string, string> {
-  const providerEnv = providerSecretEnv(options.provider ?? 'deepseek');
+  const providerEnv = requireProviderCredentialEnv(options.provider ?? 'deepseek');
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(options.agentEnv ?? {})) {
-    if (key === providerEnv.key || key === providerEnv.file || key === providerEnv.baseUrl) continue;
+    if (providerEnv.apiKeys.includes(key) || key === providerEnv.apiKeyFile || providerEnv.baseUrls.includes(key)) continue;
     if (/_API_KEY(_FILE)?$/.test(key)) continue;
     result[key] = value;
   }
@@ -395,6 +505,13 @@ function assertNoProviderSecretsInAgentEnv(agentEnv: Record<string, string> | un
   const forbidden = Object.keys(agentEnv ?? {}).filter((key) => /_API_KEY(_FILE)?$/.test(key));
   if (forbidden.length > 0) {
     throw new Error(`agentEnv must not contain provider secrets: ${forbidden.sort().join(', ')}`);
+  }
+}
+
+function assertNoExperimentIdentityOverrides(agentEnv: Record<string, string> | undefined): void {
+  const forbidden = Object.keys(agentEnv ?? {}).filter((key) => EXPERIMENT_IDENTITY_ENV_KEYS.has(key));
+  if (forbidden.length > 0) {
+    throw new Error(`agentEnv must not override experiment identity: ${forbidden.sort().join(', ')}`);
   }
 }
 
@@ -578,6 +695,10 @@ function isBudgetExhaustedError(error: unknown): error is FixedPromptBudgetExhau
 export function modelIdForProvider(model: string, provider: string): string {
   const prefix = `${provider}/`;
   return model.startsWith(prefix) ? model.slice(prefix.length) : model;
+}
+
+function modelForOpenCode(model: string, provider: string): string {
+  return model.includes('/') ? model : `${provider}/${model}`;
 }
 
 function sanitize(value: string): string {

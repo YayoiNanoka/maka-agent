@@ -62,7 +62,7 @@ describe('bot readiness settings contract', () => {
    * PR-HEALTH-1 (xuan msg `e4887ffd`, I1) — write-path single-authority
    * gate: persisted `readiness` must be coerced to be consistent with
    * current credential state. Locks F1 / F3 from the audit catalog
-   * (`notes/pr-health-0-audit-report.md`).
+   * (the original health audit).
    *
    * Without this gate, a `mergeSettings({channels:{telegram:{token:''}}})`
    * over `{readiness:'credentials_valid', token:'X'}` would persist
@@ -350,6 +350,38 @@ describe('theme palette settings contract (PR-UI-D1, @kenji msg 68bf2b13)', () =
     });
     const normalized = normalizeSettings(patched);
     expect(normalized.appearance.palette).toBe('default');
+  });
+});
+
+describe('run-completion notification settings contract', () => {
+  test('createDefaultSettings enables run-complete notifications by default', () => {
+    const defaults = createDefaultSettings();
+    expect(defaults.notifications.runComplete).toBe(true);
+  });
+
+  test('migration: settings.json without a notifications section defaults to enabled', () => {
+    const legacy = { appearance: { theme: 'dark' as const } };
+    const normalized = normalizeSettings(legacy);
+    expect(normalized.notifications.runComplete).toBe(true);
+  });
+
+  test('mergeSettings carries the toggle through the patch surface', () => {
+    const current = createDefaultSettings();
+    const patched = mergeSettings(current, { notifications: { runComplete: false } });
+    expect(patched.notifications.runComplete).toBe(false);
+  });
+
+  test('fail-closed: a non-boolean runComplete normalizes back to enabled', () => {
+    for (const bad of [1, 0, 'yes', null, {}, []]) {
+      const malformed = { notifications: { runComplete: bad } };
+      const normalized = normalizeSettings(malformed);
+      expect(normalized.notifications.runComplete).toBe(true);
+    }
+  });
+
+  test('a valid disabled toggle survives normalize untouched', () => {
+    const normalized = normalizeSettings({ notifications: { runComplete: false } });
+    expect(normalized.notifications.runComplete).toBe(false);
   });
 });
 

@@ -1,16 +1,8 @@
 /**
- * @maka/runtime — barrel export.
+ * @maka/runtime public exports.
  *
- * Surface in V0.1 (Sprint 0):
- *  - SessionManager    — top-level Runtime entry point (createSession, sendMessage, ...)
- *  - BackendRegistry   — factory dispatch by BackendKind
- *  - PermissionEngine  — wraps core's pure preToolUse() with state + parking
- *  - AiSdkBackend      — AgentBackend over Vercel AI SDK providers
- *  - Materializer      — JSONL → ChatItem[] for UI render
- *  - AsyncEventQueue   — internal helper, also useful for FakeBackend
- *
- * Not yet implemented:
- *  - FakeBackend       — text-only stub for UI development
+ * Keep supported cross-package integration on this barrel. See the
+ * package README and root ARCHITECTURE.md for responsibility boundaries.
  */
 
 export { SessionManager, BackendRegistry, headerToSummary, changesBackendConfig } from './session-manager.js';
@@ -91,6 +83,7 @@ export type {
 } from './sandbox-escalation.js';
 
 export { AiSdkBackend } from './ai-sdk-backend.js';
+export type { MakaTool, MakaToolContext } from './tool-runtime.js';
 export type {
   AgentBackend,
   BackendCompactHistoryInput,
@@ -98,8 +91,6 @@ export type {
   AiSdkBackendInput,
   AppendMessageFn,
   AttachmentByteReader,
-  MakaTool,
-  MakaToolContext,
   ModelFactory,
   ModelFactoryInput,
   RunTraceEvent,
@@ -110,6 +101,10 @@ export type {
   HistoryCompactWriter,
   HistoryCompactWriteInput,
   HistoryCompactWriteResult,
+  HistoryCompactCheckpointLoader,
+  HistoryCompactCheckpointRecorder,
+  HistoryCompactSummarizer,
+  HistoryCompactSummaryInput,
   SynthesisCacheLoader,
   SynthesisCacheLoadInput,
   SynthesisCacheLoadResult,
@@ -135,10 +130,11 @@ export type {
   MakaToolContext as BuiltinMakaToolContext,
 } from './builtin-tools.js';
 export {
-  buildBackgroundBashTool,
+  buildManagedBashTool,
   buildForegroundBashTool,
   buildLocalForegroundBashTool,
   buildStopBackgroundTaskTool,
+  buildWriteStdinTool,
   shapeTerminalResult,
   bashSandboxPermissionsSchema,
 } from './shell-tools.js';
@@ -146,36 +142,38 @@ export type {
   BuildForegroundBashToolOptions,
   ForegroundBashExecuteInput,
   ForegroundBashResult,
-  ShellRunToolController,
   BashSandboxPermissionsDeclaration,
+  ShellRunLauncher,
 } from './shell-tools.js';
 export {
-  DEFAULT_BASH_YIELD_TIME_MS,
   DEFAULT_BASH_TIMEOUT_MS,
   DEFAULT_MAX_LIVE_SHELL_RUNS,
+  DEFAULT_MAX_LIVE_PTY_RUNS,
   DEFAULT_SHELL_RUN_FLUSH_BYTES,
   DEFAULT_SHELL_RUN_FLUSH_INTERVAL_MS,
-  MAX_BASH_YIELD_TIME_MS,
+  MAX_FOREGROUND_BASH_TIMEOUT_MS,
+  MAX_PTY_COLS,
+  MAX_PTY_ROWS,
   MAX_SHELL_RUN_TIMEOUT_MS,
-  MIN_BASH_YIELD_TIME_MS,
+  MAX_WRITE_STDIN_INPUT_BYTES,
+  MIN_PTY_COLS,
+  MIN_PTY_ROWS,
   SHELL_RUN_CONTEXT_SUMMARY_LIMIT,
   SHELL_RUN_RESOURCE_PREFIX,
-  ShellRunProcessManager,
-  ShellRunSandboxError,
+  isWellFormedTerminalInput,
   isShellRunResourceRef,
   shellRunResourceRef,
-} from './shell-run-manager.js';
+} from './shell-run-contract.js';
 export type {
+  BackgroundTaskStopper,
+  PtyControlWriter,
+  RuntimeResourceReader,
   ShellRunBashInput,
-  ShellRunChildProcess,
   ShellRunProcessManagerInput,
-  ShellRunProcessSpawner,
-  ShellRunSandboxContextFailureReason,
-  ShellRunSandboxContextProvider,
-  ShellRunSandboxContextResult,
-  ShellRunSandboxErrorReason,
-  ShellRunSpawnRequest,
-} from './shell-run-manager.js';
+  ShellRunWriteInput,
+} from './shell-run-contract.js';
+export { ShellRunProcessManager } from './shell-run-manager.js';
+export type { ShellRunUpdate } from '@maka/core';
 export {
   LOCAL_WORKSPACE_EXECUTOR_FACTS,
   LocalWorkspaceExecutor,
@@ -268,13 +266,21 @@ export type {
   BoundedShellOptions,
   BoundedShellResult,
 } from './shell-exec.js';
+export type { ChildFdInput } from './child-fd-input.js';
+export { detectShell, defaultShellPlan, buildShellSpawnPlan, bashToolShellGuidance } from './shell-detect.js';
+export type { ShellPlan, ShellKind, ShellSpawnPlan, DetectShellInput } from './shell-detect.js';
 export {
   MACOS_SEATBELT_BASE_POLICY,
   MACOS_SEATBELT_EXECUTABLE,
   MACOS_SEATBELT_PLATFORM_DEFAULTS_POLICY,
   MacosSeatbeltBackend,
+  LinuxBubblewrapBackend,
   SandboxManager,
+  buildBubblewrapArgv,
+  buildNetworkSeccompFilter,
+  discoverNestedProtectedMetadataPaths,
   buildSeatbeltPolicy,
+  createBuiltinSandboxManager,
   createDefaultSandboxManager,
   createExternalSandboxCapabilities,
   createPermissionAwareSandboxContext,
@@ -288,6 +294,7 @@ export {
   sandboxErrorMetadata,
   serializeSandboxError,
   toSandboxRunTraceProjection,
+  detectLinuxSandboxCapability,
 } from './sandbox/index.js';
 export type {
   ActiveSandboxCapabilities,
@@ -295,18 +302,23 @@ export type {
   BuildSandboxDiagnosticsSnapshotInput,
   BuildSeatbeltPolicyInput,
   BuildSeatbeltPolicyResult,
+  BuildBubblewrapArgvInput,
   CreateSeatbeltExecArgsInput,
+  CreateSessionSandboxContextProviderInput,
+  DetectLinuxSandboxCapabilityInput,
+  LinuxBubblewrapBackendOptions,
+  LinuxSandboxCapability,
   ProbeActiveSandboxCapabilitiesInput,
+  SandboxCapabilityUnavailableReason,
   SandboxDiagnosticCapability,
   SandboxDiagnosticFileSystemMode,
   SandboxDiagnosticNetworkMode,
   SandboxDiagnosticsSnapshot,
   SandboxRunTraceProjection,
-  SandboxCapabilityUnavailableReason,
-} from './sandbox/index.js';
-export type {
-  CreateSessionSandboxContextProviderInput,
   SandboxSessionHeader,
+  ShellRunSandboxContextFailureReason,
+  ShellRunSandboxContextProvider,
+  ShellRunSandboxContextResult,
 } from './sandbox/index.js';
 export type {
   SandboxBackend,
@@ -318,6 +330,8 @@ export type {
   SandboxSelectionReason,
   SandboxSelectionResult,
   SandboxTransformFailureReason,
+  SandboxTransformManager,
+  SandboxEnforcementManager,
   SandboxTransformRequest,
   SandboxTransformResult,
   SandboxType,
@@ -450,7 +464,7 @@ export type {
   CompactionSourceKind,
   CompactionStage,
 } from './compaction-boundary.js';
-export { buildDefaultContextBudgetPolicy, buildManualCompactLookupPolicy } from './context-budget-policy.js';
+export { buildDefaultContextBudgetPolicy, buildManualCompactLookupPolicy, resolveSelectedModelContextWindow } from './context-budget-policy.js';
 export type {
   BuildDefaultContextBudgetPolicyOptions,
   BuildManualCompactLookupPolicyOptions,
@@ -463,6 +477,12 @@ export type {
   HistoryCompactArtifactStore,
   PersistHistoryCompactBlocksDeps,
 } from './history-compact-artifacts.js';
+export { cleanupLegacyHistoryCompactArtifacts } from './history-compact-cleanup.js';
+export type {
+  HistoryCompactCleanupDiagnostic,
+  HistoryCompactCleanupResult,
+  HistoryCompactCleanupSkip,
+} from './history-compact-cleanup.js';
 export { buildLlmHistorySummarizer } from './history-compact-summarizer.js';
 export type {
   BuildLlmHistorySummarizerOptions,
@@ -632,7 +652,7 @@ export type {
 } from './bots/index.js';
 
 // ───────────────────────────────────────────────────────────────────────────
-// Runtime v2 seam (Phase 1–4 increments).
+// Runtime event and recovery public seam.
 //
 // Subpath imports (e.g. `@maka/runtime/runtime-runner`) remain canonical;
 // the barrel re-exports below are for convenience. `InvocationContext` is the
@@ -813,3 +833,85 @@ export {
   buildSandboxAuthorityPromptFragment,
   renderSandboxTurnTailPrompt,
 } from './system-prompt/sandbox-authority-prompt.js';
+
+// ───────────────────────────────────────────────────────────────────────────
+// Unified Automation (Codex-style: heartbeat + cron, single tool).
+// ───────────────────────────────────────────────────────────────────────────
+export { AutomationManager, computeNextCronFire, computeJitter, matchesCronField } from './automation-state.js';
+export type {
+  AutomationDefinition,
+  AutomationKind,
+  AutomationSchedule,
+  AutomationStatus,
+  AutomationManagerDeps,
+} from './automation-state.js';
+export { AutomationScheduler, FIRE_CHECK_INTERVAL_MS, DEFER_WINDOW_MS } from './automation-scheduler.js';
+export type { AutomationSchedulerDeps, AutomationFireResult } from './automation-scheduler.js';
+export { buildAutomationTool, AUTOMATION_TOOL_NAME } from './automation-tools.js';
+export type { AutomationToolDeps } from './automation-tools.js';
+export { evaluateAutomationCanFire, HEARTBEAT_IDLE_STATUSES } from './automation-can-fire.js';
+export type { CanFireSessionHeader, EvaluateAutomationCanFireDeps } from './automation-can-fire.js';
+
+// ───────────────────────────────────────────────────────────────────────────
+// Goal execution (Issue #15 Primitive 6).
+// ───────────────────────────────────────────────────────────────────────────
+export { GoalManager, TERMINAL_GOAL_STATUSES, DEFAULT_MAX_ITERATIONS, DEFAULT_BLOCK_CAP } from './goal-state.js';
+export type { GoalState, GoalStatus, GoalManagerDeps } from './goal-state.js';
+export {
+  evaluateGoal,
+  buildGoalEvaluationPrompt,
+  parseGoalEvaluation,
+  DEFAULT_EVALUATOR_TIMEOUT_MS,
+} from './goal-evaluator.js';
+export type { GoalEvaluation, GoalEvaluatorDeps } from './goal-evaluator.js';
+export {
+  buildGoalTools,
+  GOAL_SET_TOOL_NAME,
+  GOAL_CLEAR_TOOL_NAME,
+  GOAL_STATUS_TOOL_NAME,
+  GOAL_PAUSE_TOOL_NAME,
+  GOAL_RESUME_TOOL_NAME,
+} from './goal-tools.js';
+export type { GoalToolsDeps } from './goal-tools.js';
+export { handleGoalContinuation } from './goal-continuation.js';
+export type { GoalContinuationDeps, GoalContinuationOutcome } from './goal-continuation.js';
+
+export {
+  MAX_SKILL_BODY_CHARS,
+  MAX_SKILL_TOOL_BODY_CHARS,
+  MAX_SKILLS_PROMPT_CHARS,
+  MIN_SKILLS_PROMPT_TOKENS,
+  MAX_SKILLS_PROMPT_TOKENS,
+  SKILLS_PROMPT_CONTEXT_RATIO,
+  resolveSkillsPromptCharBudget,
+  scanWorkspaceSkills,
+  scanSkills,
+  resolveSkillDiscoveryPaths,
+  buildSkillsPromptFragment,
+  loadSkillInstructions,
+  buildSkillAgentTool,
+  gateSkillsByHostCapabilities,
+  parseSkillFrontMatter,
+  readSkillRuntimeState,
+  writeSkillRuntimeState,
+  readContainedRegularFile,
+  readContainedRegularTextFile,
+  writeContainedRegularTextFile,
+  isContainedPath,
+  isSafeSkillId,
+  isRecord,
+} from './skills.js';
+export type {
+  SkillRuntimeStatus,
+  RuntimeSkillDefinition,
+  ScannedSkill,
+  HostCapabilities,
+  SkillCatalogBudgetOptions,
+  SkillHostCompatibility,
+  GatedSkill,
+  LoadedSkillInstructions,
+  LoadSkillInstructionsResult,
+  SkillRuntimeStateReadResult,
+  SkillSource,
+  SkillDiscoveryEntry,
+} from './skills.js';

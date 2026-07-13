@@ -53,7 +53,6 @@ describe('Settings form accessibility labels', () => {
     // orphan classes (no TSX consumer); the comma-grouped rule
     // collapsed to `.settingsRow` alone.
     const providerSurfaces = styles.match(/\.settingsRow\s*\{[\s\S]*?\}/g)?.at(0) ?? '';
-    const catalogTabsButton = styles.match(/\.catalogTab\s*\{[\s\S]*?\}/)?.[0] ?? '';
     // PR-MODEL-PAGE-ITEM-GOVERNANCE: the provider catalog moved off the
     // hand-written .providerCatalogCard grid onto the shared shadcn Item
     // primitive (.providerCatalogRow) in a seamless single-column list, so
@@ -85,7 +84,6 @@ describe('Settings form accessibility labels', () => {
     // orphan; only `.settingsRow` remains in the live rule. The
     // border-radius / shadow geometry still applies via the same
     // rule which is captured by `providerSurfaces` now.
-    assert.match(catalogTabsButton, /border-radius:\s*var\(--radius-surface\);/, 'Settings model category tabs should use reference implementation rounded-lg geometry');
     assert.match(providerMarketGridRule, /grid-template-columns:\s*1fr;/, 'Settings provider catalog should render as a seamless single-column row list, not a card grid');
     assert.ok(providerCatalogRow, 'Settings provider catalog rows should be governed by the shared .providerCatalogRow (Item) class');
     // PR-DELETE-ORPHAN-CSS: providerIcon assertion removed (orphan).
@@ -119,7 +117,7 @@ describe('Settings form accessibility labels', () => {
 
     assert.match(settings, /SettingsSelect,/);
     assert.match(settingsSelect, /SelectItem,[\s\S]*SelectPopup,[\s\S]*SelectPortal,[\s\S]*SelectPositioner,[\s\S]*SelectRoot,[\s\S]*SelectTrigger,[\s\S]*SelectValue,/);
-    assert.match(passwordInput, /import \{ Button, Input, useToast \} from '@maka\/ui';/);
+    assert.match(passwordInput, /import \{ Button, Input, useMountedRef, useToast \} from '@maka\/ui';/);
     // ProvidersPanel sources its UI from the shared @maka/ui primitives;
     // tolerant of single- vs multi-line import formatting.
     const providersPanelUiImports = providersPanel.match(/import \{[^}]*\} from '@maka\/ui';/g)?.join('\n') ?? '';
@@ -151,9 +149,17 @@ describe('Settings form accessibility labels', () => {
     assert.ok(themeBlockRange.start >= 0 && themeBlockRange.end > themeBlockRange.start, 'ThemeSettingsPage block must exist for the radio-card exception window');
     const settingsExceptTheme =
       settings.slice(0, themeBlockRange.start) + settings.slice(themeBlockRange.end);
+    // Item's Base UI `render` target is the semantic element the primitive
+    // enhances, not a separate hand-rolled control. Keep the same exception
+    // already used for ProvidersPanel below so Settings pages can adopt Item
+    // without layering Button chrome onto full-row navigation targets.
+    const settingsPrimitiveButtons = settingsExceptTheme.replace(
+      /render=\{\s*\(\s*<button[\s\S]*?\/>\s*\)\s*\}/g,
+      'render={<primitiveTarget/>}',
+    );
 
     for (const [path, source] of [
-      ['SettingsModal.tsx (outside ThemeSettingsPage)', settingsExceptTheme],
+      ['SettingsModal.tsx (outside ThemeSettingsPage)', settingsPrimitiveButtons],
       ['password-input.tsx', passwordInput],
     ] as const) {
       assert.doesNotMatch(source, /<input\b/, `${path} must use the shared Input primitive for Settings text fields`);
@@ -190,11 +196,11 @@ describe('Settings form accessibility labels', () => {
 
     assert.match(passwordInput, /const toast = useToast\(\)/);
     assert.match(passwordInput, /const copyingRef = useRef\(false\)/);
-    assert.match(passwordInput, /const mountedRef = useRef\(true\)/);
+    assert.match(passwordInput, /const mountedRef = useMountedRef\(\)/);
     assert.match(passwordInput, /const copyFeedbackTimerRef = useRef<number \| null>\(null\)/);
     assert.match(
       passwordInput,
-      /return \(\) => \{[\s\S]*mountedRef\.current = false;[\s\S]*copyingRef\.current = false;[\s\S]*window\.clearTimeout\(copyFeedbackTimerRef\.current\);/,
+      /return \(\) => \{[\s\S]*copyingRef\.current = false;[\s\S]*window\.clearTimeout\(copyFeedbackTimerRef\.current\);/,
       'PasswordInput must clear pending copy-feedback timers and invalidate clipboard state when it unmounts',
     );
     assert.match(
@@ -297,6 +303,25 @@ describe('Settings form accessibility labels', () => {
       activeRule,
       /inset\s+\d+px\s+0\s+0\s+var\(--accent\)|border-left|border-inline-start/,
       'Settings active nav item must not draw the left green accent rail',
+    );
+  });
+
+  // Alignment-governance round (maintainer report: 每日回顾 switches sat
+  // mid-page while every other row control hugs the right rail). The
+  // original end-align rule was tag-qualified (`button[role="switch"]`)
+  // but Base UI renders the Switch root as a SPAN — the selector matched
+  // nothing and rotted silently for weeks. Two pins: the rule exists in
+  // tag-agnostic form, and no settings CSS ever tag-qualifies role
+  // selectors again (role is the contract; the rendered tag is not).
+  it('end-aligns settings row switches with a tag-agnostic role selector', async () => {
+    const styles = await readRendererContractCss();
+    const alignRule = styles.match(/\.settingsRow\s*>\s*\[role="switch"\]\s*\{[\s\S]*?\}/)?.[0] ?? '';
+    assert.ok(alignRule, '.settingsRow > [role="switch"] rule must exist');
+    assert.match(alignRule, /justify-self:\s*end;/, 'settings row switches must end-align like every other row control');
+    assert.doesNotMatch(
+      styles,
+      /button\[role="switch"\]/,
+      'never tag-qualify role selectors — Base UI renders the Switch root as a span, so button[role="switch"] silently matches nothing',
     );
   });
 });

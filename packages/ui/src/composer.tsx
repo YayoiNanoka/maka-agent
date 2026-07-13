@@ -24,6 +24,13 @@ import {
   rememberComposerHistoryEntry,
 } from './composer-helpers.js';
 import { readGlobalInputHistory, saveGlobalInputHistoryEntry } from './input-history.js';
+import {
+  createChatInputActionOwner,
+  fileTransferContainsFiles,
+  focusTextInputAtEnd,
+  isChatInputComposing,
+  type ChatInputActionOwner,
+} from './chat-input-behavior.js';
 import type { AttachmentRef, PermissionMode, ProviderType, SessionSummary } from '@maka/core';
 import { Button as UiButton } from './ui.js';
 import { Textarea as UiTextarea } from './primitives/textarea.js';
@@ -50,10 +57,14 @@ const COMPOSER_COPY_BY_LOCALE: Record<UiLocale, {
   awaitingPermission: string;
   sending: string;
   streamingHintPrefix: string;
+  streamingHintProcessingPrefix: string;
+  streamingHintContinuingPrefix: string;
   streamingHintInterrupt: string;
 }> = {
   zh: {
-    placeholder: '描述任务  /  快捷调用  @  添加上下文',
+    // Placeholder honesty: '/' quick-invoke and '@' context syntax do not
+    // exist yet — the old copy advertised affordances the input can't honor.
+    placeholder: '描述任务…',
     textareaAriaLabel: '消息输入框',
     awaitingPermission: '等待你确认权限…',
     sending: '正在发送…',
@@ -63,6 +74,12 @@ const COMPOSER_COPY_BY_LOCALE: Record<UiLocale, {
     // extended-thinking stream). Composer = output-streaming;
     // ReasoningPanel = reasoning-streaming; distinct signals, distinct copy.
     streamingHintPrefix: 'Maka 正在回答…',
+    // #646: before the first token, nothing is being answered yet — match the
+    // timeline's "正在处理…" model-wait indicator so the two aren't at odds.
+    streamingHintProcessingPrefix: 'Maka 正在处理…',
+    // #646: a mid-turn step-to-step lull after content has already streamed —
+    // matches the timeline's calm "继续中…" hint, never re-showing "正在处理…".
+    streamingHintContinuingPrefix: 'Maka 继续中…',
     streamingHintInterrupt: '或点停止中断',
   },
   en: {
@@ -74,6 +91,10 @@ const COMPOSER_COPY_BY_LOCALE: Record<UiLocale, {
     // `is thinking`, so it doesn't collide with the ReasoningPanel's
     // `Thinking…` label.
     streamingHintPrefix: 'Maka is responding…',
+    // #646: pre-first-token wait — Maka is working, not yet answering.
+    streamingHintProcessingPrefix: 'Maka is working…',
+    // #646: mid-turn step-to-step lull after content — calmer than the head wait.
+    streamingHintContinuingPrefix: 'Maka is continuing…',
     streamingHintInterrupt: 'or click Stop to interrupt',
   },
 };
@@ -100,11 +121,26 @@ export const Composer = forwardRef<
     disabled?: boolean;
     hidden?: boolean;
     /**
-     * When true, the assistant is currently streaming a response.
-     * Toolbar swaps to a "Maka 正在回答…" hint and the Stop button is
-     * the only visible action — Send is hidden because the model is busy.
+     * When true, a turn is in flight — live output OR (with `processing`) the
+     * pre-first-token wait. Toolbar swaps to a working hint ("Maka 正在回答…" or
+     * "正在处理…") and the Stop button is the only visible action — Send is hidden
+     * because the model is busy.
      */
     streaming?: boolean;
+    /**
+     * #646: the `streaming` window is the pre-first-token wait (the model is
+     * being awaited with nothing streaming yet), not live output. Only changes
+     * the hint copy — "Maka 正在处理…" instead of "正在回答…", matching the
+     * timeline's model-wait indicator. Ignored unless `streaming` is true.
+     */
+    processing?: boolean;
+    /**
+     * #646: a mid-turn step-to-step lull after content has already streamed. Only
+     * changes the hint copy — "Maka 继续中…", matching the timeline's calm hint —
+     * so the Stop button stays up without re-showing "正在处理…". Ignored unless
+     * `streaming` is true; mutually exclusive with `processing`.
+     */
+    continuing?: boolean;
     /** True while the current streaming session is processing a stop request. */
     stopPending?: boolean;
     /** Runtime-only key used to keep unsent drafts isolated per session. */
@@ -194,7 +230,13 @@ export const Composer = forwardRef<
   const activeDraftKeyRef = useRef<string | undefined>(props.draftKey);
   const composerMountedRef = useRef(true);
   const sendPendingRef = useRef(false);
-  const pendingImportActionRef = useRef<ComposerImportActionId | null>(null);
+  const compositionActiveRef = useRef(false);
+  const importActionOwnerRef = useRef<ChatInputActionOwner<ComposerImportActionId> | null>(null);
+  if (!importActionOwnerRef.current) {
+    importActionOwnerRef.current = createChatInputActionOwner((action) => {
+      if (composerMountedRef.current) setPendingImportAction(action);
+    });
+  }
   const promptHistoryRef = useRef<ComposerHistoryState>({ entries: readGlobalInputHistory() ?? [], index: -1, savedDraft: '' });
   // PR-UI-15: locale-aware copy for placeholder + toolbar states. We
   // detect once per render (cheap) rather than memoizing — the locale
@@ -210,7 +252,7 @@ export const Composer = forwardRef<
     return () => {
       composerMountedRef.current = false;
       sendPendingRef.current = false;
-      pendingImportActionRef.current = null;
+      importActionOwnerRef.current?.reset();
     };
   }, []);
 
@@ -269,10 +311,8 @@ export const Composer = forwardRef<
         el.value = text;
         saveCurrentDraft(text);
         autoResize();
-        el.focus();
         // Move caret to end so the user can keep typing.
-        const length = el.value.length;
-        el.setSelectionRange(length, length);
+        focusTextInputAtEnd(el);
       },
       appendText(text: string) {
         const el = textareaRef.current;
@@ -281,9 +321,7 @@ export const Composer = forwardRef<
         el.value = appendPromptContextDraft(el.value, text);
         saveCurrentDraft(el.value);
         autoResize();
-        el.focus();
-        const length = el.value.length;
-        el.setSelectionRange(length, length);
+        focusTextInputAtEnd(el);
       },
       focus() {
         textareaRef.current?.focus();
@@ -293,7 +331,7 @@ export const Composer = forwardRef<
   );
 
   async function sendCurrent() {
-    if (props.disabled || sendPendingRef.current || pendingImportActionRef.current) return;
+    if (props.disabled || sendPendingRef.current || importActionOwnerRef.current?.pending) return;
     const textarea = textareaRef.current;
     const form = formRef.current;
     const text = (textarea?.value ?? '').trim();
@@ -335,22 +373,15 @@ export const Composer = forwardRef<
   }
 
   async function runImportAction(actionId: ComposerImportActionId, action: (() => void | Promise<void>) | undefined) {
-    if (!action || props.disabled || props.streaming || pendingImportActionRef.current) return;
-    pendingImportActionRef.current = actionId;
-    setPendingImportAction(actionId);
-    try {
+    if (!action || props.disabled || props.streaming) return;
+    await importActionOwnerRef.current?.run(actionId, async () => {
       await action();
-    } finally {
-      if (pendingImportActionRef.current === actionId) {
-        pendingImportActionRef.current = null;
-        if (composerMountedRef.current) setPendingImportAction(null);
-      }
-    }
+    });
   }
 
   function onTextareaKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     // Skip when an IME composition is active so CJK input isn't interrupted.
-    if (event.nativeEvent.isComposing || event.key === 'Process') return;
+    if (isChatInputComposing(event, compositionActiveRef.current)) return;
     // Esc while a drag-active highlight is showing should clear it
     // immediately. The existing useEffect listens for blur/dragend/drop
     // but not keydown, so a user who hits Esc to cancel a stuck drag
@@ -433,15 +464,15 @@ export const Composer = forwardRef<
   }
 
   function canAcceptDroppedFiles(): boolean {
-    return Boolean(props.onAttachFilePaths && !props.disabled && !props.streaming && !pendingImportActionRef.current);
+    return Boolean(props.onAttachFilePaths && !props.disabled && !props.streaming && !importActionOwnerRef.current?.pending);
   }
 
   function hasDraggedFiles(event: DragEvent<HTMLFormElement>): boolean {
-    return Array.from(event.dataTransfer.types).includes('Files');
+    return fileTransferContainsFiles(event.dataTransfer.types, event.dataTransfer.files.length);
   }
 
   function hasPastedFiles(event: ClipboardEvent<HTMLTextAreaElement>): boolean {
-    return Array.from(event.clipboardData.types).includes('Files') || event.clipboardData.files.length > 0;
+    return fileTransferContainsFiles(event.clipboardData.types, event.clipboardData.files.length);
   }
 
   function onComposerDragOver(event: DragEvent<HTMLFormElement>) {
@@ -480,8 +511,7 @@ export const Composer = forwardRef<
     // TypeScript types don't acknowledge that.) Use a narrow `in` check
     // + a typed cast so this compiles AND keeps working when the
     // browser does expose the flag.
-    const native = event.nativeEvent;
-    if ('isComposing' in native && (native as { isComposing?: boolean }).isComposing) return;
+    if (isChatInputComposing(event, compositionActiveRef.current)) return;
     if (!hasPastedFiles(event)) return;
     if (!canAcceptDroppedFiles()) return;
     const files = Array.from(event.clipboardData.files);
@@ -547,12 +577,14 @@ export const Composer = forwardRef<
           ref={textareaRef}
           unstyled
           name="text"
-          className="maka-composer-textarea min-h-11 resize-none"
+          className="maka-composer-textarea resize-none"
           placeholder={copy.placeholder}
           aria-label={copy.textareaAriaLabel}
           disabled={props.disabled}
           onKeyDown={onTextareaKeyDown}
           onPaste={onTextareaPaste}
+          onCompositionStart={() => { compositionActiveRef.current = true; }}
+          onCompositionEnd={() => { compositionActiveRef.current = false; }}
           onInput={onTextareaInput}
           rows={1}
           autoComplete="off"
@@ -578,7 +610,7 @@ export const Composer = forwardRef<
                 data-pending={pendingImportAction === 'pick' ? 'true' : undefined}
                 title="添加附件"
               >
-                <Plus size={15} strokeWidth={1.85} aria-hidden="true" />
+                <Plus size={15} aria-hidden="true" />
               </UiButton>
             ) : null}
             {/* PR-MOVE-PERMISSION-MODE: the static "通用" role chip
@@ -597,7 +629,7 @@ export const Composer = forwardRef<
                   void props.onPermissionModeChange?.(mode);
                 }}
                 align="start"
-                disabled={props.permissionModePending === true || Boolean(props.permissionModeDisabledReason)}
+                disabled={props.disabled || props.permissionModePending === true || Boolean(props.permissionModeDisabledReason)}
                 disabledReason={props.permissionModeDisabledReason}
               />
             ) : null}
@@ -622,7 +654,11 @@ export const Composer = forwardRef<
             ) : props.streaming ? (
               <span className="maka-composer-streaming-hint">
                 <span className="maka-composer-streaming-dot" aria-hidden="true" />
-                {copy.streamingHintPrefix} <Kbd className="maka-shortcut-kbd">Esc</Kbd> {copy.streamingHintInterrupt}
+                {props.processing
+                  ? copy.streamingHintProcessingPrefix
+                  : props.continuing
+                    ? copy.streamingHintContinuingPrefix
+                    : copy.streamingHintPrefix} <Kbd className="maka-shortcut-kbd">Esc</Kbd> {copy.streamingHintInterrupt}
               </span>
             ) : (
               null
@@ -670,6 +706,7 @@ export const Composer = forwardRef<
               <UiButton
                 className="maka-button"
                 variant="default"
+                size="sm"
                 type="button"
                 disabled={props.stopPending}
                 onClick={() => {
@@ -693,7 +730,7 @@ export const Composer = forwardRef<
                 data-pending={sendPending ? 'true' : undefined}
                 title={buttonCopy.sendLabel}
               >
-                <ArrowUp size={16} strokeWidth={2.1} aria-hidden="true" />
+                <ArrowUp size={16} aria-hidden="true" />
               </UiButton>
             )}
           </div>
@@ -727,11 +764,11 @@ export const Composer = forwardRef<
                     ? `选择工作目录：${wp.label ?? '当前工作目录'}，当前分支 ${wp.branch}`
                     : `选择工作目录：${wp.label ?? '当前工作目录'}`}
                 >
-                  <FolderOpen size={13} strokeWidth={1.7} aria-hidden="true" />
+                  <FolderOpen size={13} aria-hidden="true" />
                   {wp.label
                     ? <span className="maka-composer-workspace-current">{wp.label}</span>
                     : <span>选择工作目录</span>}
-                  <ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" />
+                  <ChevronDown size={12} aria-hidden="true" />
                 </UiButton>
               )}
             />
@@ -741,20 +778,20 @@ export const Composer = forwardRef<
                   <>
                     {wp.recentWorkspaces.map((wsp) => (
                       <MenuItem key={wsp} onClick={() => { wp.onSelect(wsp); }}>
-                        <History size={13} strokeWidth={1.7} aria-hidden="true" />
+                        <History size={13} aria-hidden="true" />
                         <span>{basenameFromPath(wsp)}</span>
                       </MenuItem>
                     ))}
                     <MenuSeparator />
                     <MenuItem onClick={() => { wp.onOpen(); }}>
-                      <FolderOpen size={13} strokeWidth={1.7} aria-hidden="true" />
+                      <FolderOpen size={13} aria-hidden="true" />
                       <span>选择其他目录...</span>
                     </MenuItem>
                   </>
                 )
                 : (
                   <MenuItem onClick={() => { wp.onOpen(); }}>
-                    <FolderOpen size={13} strokeWidth={1.7} aria-hidden="true" />
+                    <FolderOpen size={13} aria-hidden="true" />
                     <span>选择工作目录...</span>
                   </MenuItem>
                 )}
@@ -783,9 +820,9 @@ export const Composer = forwardRef<
                         ? `切换分支：${bp.branch}`
                         : '选择分支'}
                     >
-                      <GitBranch size={13} strokeWidth={1.7} aria-hidden="true" />
+                      <GitBranch size={13} aria-hidden="true" />
                       <span className="maka-composer-branch-current">{bp.branch ?? '—'}</span>
-                      <ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" />
+                      <ChevronDown size={12} aria-hidden="true" />
                     </UiButton>
                   )}
                 />
@@ -802,10 +839,10 @@ export const Composer = forwardRef<
                           void bp.onSelect(b);
                         }}
                       >
-                        <GitBranch size={13} strokeWidth={1.7} aria-hidden="true" />
+                        <GitBranch size={13} aria-hidden="true" />
                         <span>{b}</span>
                         {b === bp.branch && (
-                          <Check size={12} strokeWidth={2} aria-hidden="true" className="maka-composer-branch-check" />
+                          <Check size={12} aria-hidden="true" className="maka-composer-branch-check" />
                         )}
                       </MenuItem>
                     ))

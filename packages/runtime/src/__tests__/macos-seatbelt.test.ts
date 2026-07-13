@@ -179,6 +179,17 @@ describe('buildSeatbeltPolicy', () => {
     assert.doesNotMatch(result.policy, /WRITABLE_ROOT_2/);
   });
 
+  it('allows packaged command runtimes to load from common macOS toolchain prefixes', () => {
+    const policy = policyText(createWorkspaceWritePermissionProfile());
+
+    assert.match(
+      policy,
+      /\(allow file-read\* file-test-existence file-map-executable\n  \(subpath "\/opt\/homebrew"\)\n  \(subpath "\/usr\/local"\)\)/,
+    );
+    assert.doesNotMatch(policy, /\(allow file-write\*[^)]*\/opt\/homebrew/s);
+    assert.doesNotMatch(policy, /\(allow file-write\*[^)]*\/usr\/local/s);
+  });
+
   it('protects metadata names with require-not regex under writable workspace roots', () => {
     const policy = policyText(createWorkspaceWritePermissionProfile());
 
@@ -230,7 +241,6 @@ describe('buildSeatbeltPolicy', () => {
     assert.match(policyText(createWorkspaceWritePermissionProfile()), /\(deny network\*\)/);
     assert.match(policyText(restrictedProfileWithEnabledNetwork()), /\(allow network\*\)/);
   });
-
   it('renders exact path entries as literal and subtree entries as subpath', () => {
     const profile: PermissionProfile = {
       type: 'managed',

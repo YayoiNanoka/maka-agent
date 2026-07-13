@@ -16,7 +16,7 @@ function blockBetween(source: string, start: string, end: string): string {
 describe('Daily Review copy feedback contract', () => {
   it('lets the app shell own clipboard success and failure feedback', async () => {
     const ui = await readFile(resolve(REPO_ROOT, 'packages/ui/src/daily-review-panel.tsx'), 'utf8');
-    const chatView = await readFile(resolve(REPO_ROOT, 'packages/ui/src/chat-view.tsx'), 'utf8');
+    const modulePages = await readFile(resolve(REPO_ROOT, 'packages/ui/src/module-pages.tsx'), 'utf8');
     const main = await readRendererShellSources([
       'daily-review-actions.ts',
       'app-shell-daily-review-actions.ts',
@@ -24,14 +24,14 @@ describe('Daily Review copy feedback contract', () => {
       'app-shell.tsx',
     ]);
 
-    assert.match(chatView, /onCopyDailyReviewMarkdown\?: \(input:/);
-    assert.match(chatView, /onCopyMarkdown=\{props\.onCopyDailyReviewMarkdown\}/);
+    assert.match(modulePages, /onCopyMarkdown\?: \(input:/);
+    assert.match(modulePages, /<DailyReviewPanel \{\.\.\.props\} bridge=\{props\.bridge\}/);
     assert.match(ui, /onCopyMarkdown\?: \(input:/);
     assert.match(ui, /props\.onCopyMarkdown\?\.\(\{\s*markdown:\s*md,\s*label:\s*dayLabel,\s*summary: visibleSummary\s*\}\)/);
     assert.match(ui, /const hasDailyReviewActions = Boolean\(props\.onCopyMarkdown \|\| props\.onAppendMarkdown \|\| props\.onSaveMarkdown\)/);
     assert.match(ui, /visibleSummary && visibleSummary\.totals\.sessionCount \+ visibleSummary\.totals\.requestCount > 0 && hasDailyReviewActions/);
     assert.doesNotMatch(ui, /navigator\.clipboard\.writeText\(md\)\.catch\(\(\) => \{\}\)/);
-    assert.match(main, /onCopyDailyReviewMarkdown=\{\(input\) => copyDailyReviewMarkdown\(input, \{ shouldShowFeedback: isDailyReviewSurfaceActive \}\)\}/);
+    assert.match(main, /onCopyMarkdown=\{\(input\) => copyDailyReviewMarkdown\(input, \{ shouldShowFeedback: isDailyReviewSurfaceActive \}\)\}/);
     assert.match(main, /async function copyDailyReviewMarkdown\([\s\S]*?await navigator\.clipboard\.writeText\(input\.markdown\)/);
     assert.match(
       main,
@@ -75,16 +75,16 @@ describe('Daily Review copy feedback contract', () => {
 
   it('lets the Daily Review main panel append the current range to the composer', async () => {
     const ui = await readFile(resolve(REPO_ROOT, 'packages/ui/src/daily-review-panel.tsx'), 'utf8');
-    const chatView = await readFile(resolve(REPO_ROOT, 'packages/ui/src/chat-view.tsx'), 'utf8');
+    const modulePages = await readFile(resolve(REPO_ROOT, 'packages/ui/src/module-pages.tsx'), 'utf8');
     const main = await readRendererShellCombinedSource();
     const panelBlock = extractFunctionBlock(ui, 'DailyReviewPanel');
     const appendBlock = main.match(/function appendDailyReviewMarkdown\(input: DailyReviewMarkdownInput\): void \{[\s\S]*?^\s*}/m)?.[0] ?? '';
 
-    assert.match(chatView, /onAppendDailyReviewMarkdown\?: \(input:/);
-    assert.match(chatView, /onAppendMarkdown=\{props\.onAppendDailyReviewMarkdown\}/);
+    assert.match(modulePages, /onAppendMarkdown\?: \(input:/);
+    assert.match(modulePages, /<DailyReviewPanel \{\.\.\.props\} bridge=\{props\.bridge\}/);
     assert.match(panelBlock, /props\.onAppendMarkdown\?\.\(\{\s*markdown:\s*md,\s*label:\s*dayLabel,\s*summary: visibleSummary\s*\}\)/);
     assert.match(panelBlock, /pendingDailyReviewAction === 'append' \? '追加中…' : '粘到输入框'/);
-    assert.match(main, /onAppendDailyReviewMarkdown=\{appendDailyReviewMarkdown\}/);
+    assert.match(main, /onAppendMarkdown=\{appendDailyReviewMarkdown\}/);
     assert.match(appendBlock, /composerRef\.current\?\.appendText\(input\.markdown\)/);
     assert.match(appendBlock, /toastApi\.success\(\s*`已追加\$\{input\.label\}回顾到输入框`/);
     assert.doesNotMatch(appendBlock, /composerRef\.current\?\.setText\(input\.markdown\)/);
@@ -144,12 +144,12 @@ describe('Daily Review copy feedback contract', () => {
     assert.match(panelBlock, /保存中…/);
     assert.doesNotMatch(
       main,
-      /onSaveDailyReviewMarkdown=\{\(input\) => void saveDailyReviewMarkdown\(input\)\}/,
+      /onSaveMarkdown=\{\(input\) => void saveDailyReviewMarkdown\(input\)\}/,
       'renderer must return the save Promise to the Daily Review pending gate',
     );
     assert.match(
       main,
-      /onSaveDailyReviewMarkdown=\{\(input\) => saveDailyReviewMarkdown\(input, \{ shouldShowFeedback: isDailyReviewSurfaceActive \}\)\}/,
+      /onSaveMarkdown=\{\(input\) => saveDailyReviewMarkdown\(input, \{ shouldShowFeedback: isDailyReviewSurfaceActive \}\)\}/,
       'Daily Review save feedback must be gated to the active Daily Review surface',
     );
   });
@@ -188,7 +188,7 @@ describe('Daily Review copy feedback contract', () => {
   it('guards Daily Review archive body loads against stale async responses', async () => {
     const ui = await readFile(resolve(REPO_ROOT, 'packages/ui/src/daily-review-panel.tsx'), 'utf8');
     const panelBlock = extractFunctionBlock(ui, 'DailyReviewPanel');
-    const archiveLoadBlock = panelBlock.match(/useEffect\(\(\) => \{\s*const getArchive = props\.bridge\.getArchive;[\s\S]*?\}, \[archiveReloadToken, selectedArchiveId, props\.bridge\]\);/)?.[0] ?? '';
+    const archiveLoadBlock = panelBlock.match(/useEffect\(\(\) => \{\s*const getArchive = bridgeRef\.current\.getArchive;[\s\S]*?\}, \[archiveReloadToken, selectedArchiveId\]\);/)?.[0] ?? '';
     assert.ok(archiveLoadBlock, 'archive load effect not found in DailyReviewPanel');
 
     assert.match(panelBlock, /const archiveLoadRequestRef = useRef\(0\)/);
@@ -226,6 +226,46 @@ describe('Daily Review copy feedback contract', () => {
     );
   });
 
+  it('decouples Daily Review data-fetching effects from the bridge object reference (PR-582 follow-up)', async () => {
+    const ui = await readFile(resolve(REPO_ROOT, 'packages/ui/src/daily-review-panel.tsx'), 'utf8');
+    const panelBlock = extractFunctionBlock(ui, 'DailyReviewPanel');
+
+    assert.match(
+      panelBlock,
+      /const bridgeRef = useRef\(props\.bridge\)/,
+      'DailyReviewPanel must track bridge via ref so effects survive bridge reference changes',
+    );
+    assert.match(
+      panelBlock,
+      /bridgeRef\.current = props\.bridge/,
+      'bridgeRef must be updated on every render so effects always use the latest bridge',
+    );
+
+    const fetchDayEffect = panelBlock.match(/useEffect\(\(\) => \{[\s\S]*?bridgeRef\.current\s*\n\s*\.fetchDay\([\s\S]*?\}, \[([^\]]*)\]\);/)?.[1] ?? '';
+    assert.ok(fetchDayEffect, 'fetchDay effect not found');
+    assert.doesNotMatch(
+      fetchDayEffect,
+      /props\.bridge/,
+      'fetchDay effect must not depend on props.bridge — use bridgeRef instead',
+    );
+
+    const listArchivesEffect = panelBlock.match(/useEffect\(\(\) => \{[\s\S]*?bridgeRef\.current\.listArchives[\s\S]*?\}, \[([^\]]*)\]\);/)?.[1] ?? '';
+    assert.ok(listArchivesEffect, 'listArchives effect not found');
+    assert.doesNotMatch(
+      listArchivesEffect,
+      /props\.bridge/,
+      'listArchives effect must not depend on props.bridge — use bridgeRef instead',
+    );
+
+    const getArchiveEffect = panelBlock.match(/useEffect\(\(\) => \{[\s\S]*?bridgeRef\.current\.getArchive[\s\S]*?\}, \[([^\]]*)\]\);/)?.[1] ?? '';
+    assert.ok(getArchiveEffect, 'getArchive effect not found');
+    assert.doesNotMatch(
+      getArchiveEffect,
+      /props\.bridge/,
+      'getArchive effect must not depend on props.bridge — use bridgeRef instead',
+    );
+  });
+
   it('gates Daily Review settings saves and manual runs with mounted ref owners', async () => {
     const settings = await readSettingsCombinedSource();
     const pageBlock = blockBetween(settings, 'function DailyReviewSettingsPage', 'function VoiceModelsSettingsPage');
@@ -236,7 +276,7 @@ describe('Daily Review copy feedback contract', () => {
     assert.match(pageBlock, /const runningModeRef = useRef<DailyReviewMode \| null>\(null\)/);
     assert.match(
       pageBlock,
-      /return \(\) => \{\s*mountedRef\.current = false;\s*savingKeyRef\.current = null;\s*runningModeRef\.current = null;\s*\};/,
+      /return \(\) => \{\s*savingKeyRef\.current = null;\s*runningModeRef\.current = null;\s*\};/,
       'Daily Review Settings async owners must be invalidated when Settings closes',
     );
     assert.match(

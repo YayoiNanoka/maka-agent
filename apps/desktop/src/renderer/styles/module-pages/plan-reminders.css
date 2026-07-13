@@ -16,7 +16,7 @@
    定时任务 page (header → banner → tabs → grid sit straight on the white card).
    Removed the inner border/radius/shadow/1080-center so there's no card-in-card,
    and opened up the padding so the page breathes like the reference. */
-/* Phase 2 — atlas-driven rewrite (notes/reference-atlas.md §10). Plan/Reminder
+/* Plan/Reminder
    page card uses the universal recipe: 1px hairline border + 6px radius +
    single 4% lift + 1px inner top highlight. Tight 4-6px internal gaps
    (`--card-gap`) replace the old 14-18px loose stacking. */
@@ -82,39 +82,12 @@
   flex-wrap: wrap;
 }
 
-/* PR-UI-PIXEL-3: signature off-black CTA, matching the reference's restrained
-   primary command treatment without using the app accent. Pure #000 is banned
-   per design-taste rules — use oklch off-black (charcoal) for premium feel. */
+/* Detail round 7: the CTA rides UiButton variant="default" untouched — the
+   former charcoal re-skin (hardcoded oklch literals + radius-pill) diverged
+   from every other module-page primary (skills 添加, daily-review 生成每日回顾).
+   Only the icon/label gap remains. */
 .maka-plan-new-task-button {
   gap: var(--space-1);
-  border-color: oklch(0.20 0 0);
-  border-radius: var(--radius-pill);
-  background: oklch(0.18 0 0);
-  box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 0.15),
-    0 1px 2px oklch(from var(--foreground) l c h / 0.10);
-  color: oklch(1 0 0);
-  font-size: var(--font-size-caption);
-  font-weight: var(--font-weight-semibold);
-  transition:
-    background-color var(--duration-base) var(--ease-out-strong),
-    border-color var(--duration-base) var(--ease-out-strong),
-    transform var(--duration-emphasized) var(--ease-out-strong),
-    box-shadow var(--duration-emphasized) var(--ease-out-strong);
-}
-
-.maka-plan-new-task-button:hover {
-  border-color: oklch(0.28 0 0);
-  background: oklch(0.26 0 0);
-  color: oklch(1 0 0);
-  transform: translateY(var(--lift-hover));
-  box-shadow:
-    inset 0 1px 0 oklch(1 0 0 / 0.20),
-    0 4px 14px -8px oklch(from var(--foreground) l c h / 0.32);
-}
-
-.maka-plan-new-task-button:active:not(:disabled) {
-  background: oklch(0.14 0 0);
 }
 
 .maka-plan-refresh-button {
@@ -243,7 +216,7 @@
 }
 
 .maka-plan-template-strip[data-layout="cards"] .maka-plan-template-title {
-  font-size: var(--font-size-base);
+  font-size: var(--font-size-heading);
   line-height: var(--leading-snug);
 }
 
@@ -335,10 +308,6 @@
   display: flex;
   align-items: center;
   gap: var(--space-1-5);
-}
-
-.maka-plan-system-alert-main [data-slot="alert-description"] {
-  display: none;
 }
 
 .maka-plan-system-alert-main > [class*="lucide"] {
@@ -720,7 +689,7 @@
   margin: 0;
   min-width: 0;
   color: var(--foreground);
-  font-size: var(--font-size-base);
+  font-size: var(--font-size-heading);
   font-weight: var(--font-weight-semibold);
   line-height: var(--leading-snug);
   overflow: hidden;
@@ -808,25 +777,9 @@
   padding: var(--space-1-5) var(--space-2-5);
 }
 
-.maka-plan-run-status {
-  border-radius: var(--radius-pill);
-  background: var(--foreground-3);
-  color: var(--foreground-secondary);
-  font-size: var(--font-size-caption);
-  font-weight: var(--font-weight-semibold);
-  padding: var(--space-0-5) var(--space-1-5);
-}
-
-.maka-plan-run-status[data-status="triggered"] {
-  background: oklch(from var(--success) l c h / 0.10);
-  color: var(--success-text);
-}
-
-.maka-plan-run-status[data-status="blocked"],
-.maka-plan-run-status[data-status="failed"] {
-  background: oklch(from var(--warning) l c h / 0.10);
-  color: var(--warning-text);
-}
+/* .maka-plan-run-status is now the Chip primitive (squared status label);
+   its tone→alpha comes from chip.tsx and the triggered/blocked/failed mapping
+   from planRunStatusChipTone in plan-reminder-panel.tsx. No bespoke CSS. */
 
 .maka-plan-run-main {
   display: grid;

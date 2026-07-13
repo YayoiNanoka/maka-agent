@@ -1,15 +1,12 @@
 /**
  * Session disk format: JSONL with SessionHeader as line 1 + append-only
  * StoredMessage lines.
- *
- * Source: V0.1_TECH_SPEC.md §4.2
- *
  * Storage layer enforces append-only for messages and read-rewrite-write
  * (atomic temp + rename) for header. Per-session write queue invariant
- * documented in spec §5.2.
+ * is enforced by the storage implementation.
  */
 
-import type { AttachmentRef, ToolResultContent } from './events.js';
+import type { AttachmentRef, ToolActivityKind, ToolResultContent } from './events.js';
 import type { PermissionMode } from './permission.js';
 import type {
   CacheMissInputSource,
@@ -146,6 +143,7 @@ export type SessionChangedReason =
   | 'mode-change'
   | 'status-change'
   | 'turn-status-change'
+  | 'goal-change'
   | 'rebound';
 
 export interface SessionChangedEvent {
@@ -178,6 +176,9 @@ export interface UserMessage {
   ts: number;
   text: string;
   attachments?: AttachmentRef[];
+  /** Non-user trigger source (automation fire). Lets the chat mark turns the
+   *  user did not hand-type. Mirrors TurnOrigin in runtime-inputs. */
+  origin?: { kind: 'automation'; automationId: string };
 }
 
 export interface AssistantMessage {
@@ -191,9 +192,19 @@ export interface AssistantMessage {
     /** Anthropic signed thinking for replay. */
     signature?: string;
   };
+  /**
+   * First-observed order of visible content inside this assistant step.
+   * RuntimeEvent projection records partial text/thinking and the paired tool
+   * call before dropping partial rows, so live and persisted timelines can use
+   * the same append-only order. Absent on legacy rows, which retain the older
+   * semantic thinking → text → tools fallback.
+   */
+  contentOrder?: AssistantStepContentKind[];
   /** Actual model used for this turn. */
   modelId: string;
 }
+
+export type AssistantStepContentKind = 'thinking' | 'text' | 'tools';
 
 export interface ToolCallMessage {
   type: 'tool_call';
@@ -202,9 +213,20 @@ export interface ToolCallMessage {
   turnId: string;
   ts: number;
   toolName: string;
+  /** Stable semantic category for presentation; absent on legacy rows. */
+  activityKind?: ToolActivityKind;
   displayName?: string;
   intent?: string;
   args: unknown;
+  /**
+   * Assistant step this call belongs to (equals the step's AssistantMessage
+   * id, stamped from the same source as ToolStartEvent.stepId). Optional for
+   * legacy rows written before per-step persistence. First consumer is the UI
+   * timeline (materializeTurns), which orders a step's thinking/text ahead of
+   * the tools whose stepId matches that step; the backfill path also reads it
+   * to re-pair tools with their step after a restart.
+   */
+  stepId?: string;
 }
 
 export interface ToolResultMessage {
@@ -309,11 +331,17 @@ export interface SystemNoteMessage {
     | 'session_resume'
     | 'mode_change'
     | 'model_change'
+    | 'context_compacted'
+    | 'context_compaction_failed_open'
+    | 'step_limit'
     | 'error'
     | 'abort';
   /** Shape depends on `kind`. */
   data?: unknown;
 }
+
+export const STEP_LIMIT_NOTICE_TEXT =
+  'Reached the configured step limit. The task may be incomplete. Send “continue” to resume.';
 
 export function deriveTurnRecords(messages: readonly StoredMessage[]): TurnRecord[] {
   const order: string[] = [];

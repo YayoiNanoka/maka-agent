@@ -3,6 +3,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { describe, test } from 'node:test';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { defaultShellPlan } from '@maka/runtime';
 import { createHarborCellLocalToolExecutor } from '../harbor-cell.js';
 import { buildIsolatedBashTool } from '../tools.js';
 
@@ -29,12 +30,12 @@ describe('Harbor local executor Bash (real spawn, >10MB)', () => {
     const result = (await bash.impl(
       { command: 'echo HEAD_SENTINEL; seq 1 3000000; echo TAIL_SENTINEL' },
       toolCtx(cwd),
-    )) as { exitCode: number; stdout: string };
+    )) as { exitCode: number; output: { stdout: string } };
 
     assert.equal(result.exitCode, 0); // ran to completion — not killed by maxBuffer
-    assert.ok(result.stdout.includes('TAIL_SENTINEL'), 'true tail retained');
-    assert.ok(!result.stdout.includes('HEAD_SENTINEL'), 'head dropped — it is a tail, not the head');
-    assert.ok(result.stdout.includes('truncated'), 'model-budget truncation marker present');
+    assert.ok(result.output.stdout.includes('TAIL_SENTINEL'), 'true tail retained');
+    assert.ok(!result.output.stdout.includes('HEAD_SENTINEL'), 'head dropped — it is a tail, not the head');
+    assert.ok(result.output.stdout.includes('truncated'), 'model-budget truncation marker present');
   });
 
   test('keeps a bounded TAIL of >10MB stderr without being killed', async () => {
@@ -43,11 +44,19 @@ describe('Harbor local executor Bash (real spawn, >10MB)', () => {
     const result = (await bash.impl(
       { command: '{ echo HEAD_SENTINEL; seq 1 3000000; echo TAIL_SENTINEL; } 1>&2' },
       toolCtx(cwd),
-    )) as { exitCode: number; stderr: string };
+    )) as { exitCode: number; output: { stderr: string } };
 
     assert.equal(result.exitCode, 0);
-    assert.ok(result.stderr.includes('TAIL_SENTINEL'), 'true stderr tail retained');
-    assert.ok(!result.stderr.includes('HEAD_SENTINEL'), 'stderr head dropped');
-    assert.ok(result.stderr.includes('truncated'), 'stderr truncation marker present');
+    assert.ok(result.output.stderr.includes('TAIL_SENTINEL'), 'true stderr tail retained');
+    assert.ok(!result.output.stderr.includes('HEAD_SENTINEL'), 'stderr head dropped');
+    assert.ok(result.output.stderr.includes('truncated'), 'stderr truncation marker present');
+  });
+
+  test('declares the same shell it spawns in — no selection-without-declaration gap', () => {
+    // The executor runs commands through defaultShellPlan() (PowerShell on
+    // Windows). It must expose that same plan so buildIsolatedBashTool declares
+    // the dialect to the model instead of leaving it to guess (shell-detect.ts).
+    const executor = createHarborCellLocalToolExecutor();
+    assert.deepEqual(executor.shell, defaultShellPlan());
   });
 });

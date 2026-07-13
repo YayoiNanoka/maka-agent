@@ -9,6 +9,8 @@ import { buildAbRunManifest } from './ab-manifest.js';
 import { runAbComparison } from './ab-run.js';
 import type { AbArmSpec, AbComparisonSummary, AbRunManifest, AbRunManifestInput } from './ab-types.js';
 import type { Config } from './contracts.js';
+import { withAbRunLock } from './ab-run-lock.js';
+import type { RuntimePolicyAbExecutionProfile } from './runtime-policy-ab-profile.js';
 import {
   HARBOR_CELL_CONTEXT_ENV_KEYS,
   normalizeHarborCellContextEnv,
@@ -33,13 +35,15 @@ export interface RuntimePolicyAbArmInput {
 
 export interface RunRuntimePolicyAbComparisonInput {
   runId: string;
+  runRoot: string;
   config: Config;
   systemPromptPath: string;
   resultsJsonlPath: string;
   evaluationTasks: readonly FixedPromptTask[];
   arms: readonly [RuntimePolicyAbArmInput, RuntimePolicyAbArmInput];
   reps?: number;
-  maxConcurrency?: number;
+  executionProfile: RuntimePolicyAbExecutionProfile;
+  roundIdPrefix?: string;
   resumeFingerprint?: string;
   budgetMs?: number;
   nonInferiorityMargin?: number;
@@ -51,23 +55,34 @@ export interface RunRuntimePolicyAbComparisonInput {
 
 export type RuntimePolicyAbComparisonSummary = AbComparisonSummary;
 
-export interface RuntimePolicyAbRunManifestInput extends Omit<AbRunManifestInput, 'experimentKind' | 'arms'> {
+export interface RuntimePolicyAbRunManifestInput extends Omit<AbRunManifestInput, 'experimentKind' | 'arms' | 'taskBudgetSec' | 'harborTimeoutMs' | 'observedCostStopUsd' | 'maxConcurrency' | 'maxConcurrentAttempts'> {
   arms: readonly [RuntimePolicyAbArmInput, RuntimePolicyAbArmInput];
   promptHash: string;
-  provider: string;
-  baseUrl: string;
-  model: string;
   sharedAgentEnv?: Partial<Record<RuntimePolicySharedAgentEnvKey, string>>;
+  executionProfile: RuntimePolicyAbExecutionProfile;
 }
 
 export type RuntimePolicyAbRunManifest = AbRunManifest;
 
 export function buildRuntimePolicyAbRunManifest(input: RuntimePolicyAbRunManifestInput): RuntimePolicyAbRunManifest {
-  const { arms, promptHash, provider, baseUrl, model, sharedAgentEnv: rawSharedAgentEnv, ...abInput } = input;
+  const { arms, promptHash, executionProfile, sharedAgentEnv: rawSharedAgentEnv, ...abInput } = input;
+  const maxConcurrency = pairConcurrency(executionProfile.maxConcurrentAttempts);
   const sharedAgentEnv = sanitizeSharedAgentEnv(rawSharedAgentEnv ?? {});
-  const sharedMetadata = { promptHash, provider, baseUrl, model, sharedAgentEnv };
+  const sharedMetadata = {
+    promptHash,
+    provider: executionProfile.provider,
+    baseUrl: executionProfile.baseUrl,
+    model: executionProfile.model,
+    executionProfile,
+    sharedAgentEnv,
+  };
   return buildAbRunManifest({
     ...abInput,
+    taskBudgetSec: executionProfile.taskBudgetSec,
+    harborTimeoutMs: executionProfile.harborTimeoutMs,
+    observedCostStopUsd: executionProfile.observedCostStopUsd,
+    maxConcurrency,
+    maxConcurrentAttempts: executionProfile.maxConcurrentAttempts,
     experimentKind: 'runtime',
     arms: [
       runtimeArmSpec(arms[0], sharedMetadata),
@@ -79,26 +94,30 @@ export function buildRuntimePolicyAbRunManifest(input: RuntimePolicyAbRunManifes
 export async function runRuntimePolicyAbComparison(
   input: RunRuntimePolicyAbComparisonInput,
 ): Promise<RuntimePolicyAbComparisonSummary> {
-  const sharedConfigFingerprint = runtimePolicySharedConfigFingerprint(input.config);
+  return withAbRunLock(input.runRoot, () => runRuntimePolicyAbComparisonUnlocked(input));
+}
+
+export async function runRuntimePolicyAbComparisonUnlocked(
+  input: RunRuntimePolicyAbComparisonInput,
+): Promise<RuntimePolicyAbComparisonSummary> {
+  assertProfileIdentity(input.executionProfile, input.config);
+  const maxConcurrency = pairConcurrency(input.executionProfile.maxConcurrentAttempts);
   const sharedAgentEnv = sanitizeSharedAgentEnv(input.sharedAgentEnv ?? {});
   return runAbComparison({
     runId: input.runId,
     arms: [runtimeArmSpec(input.arms[0]), runtimeArmSpec(input.arms[1])],
     evaluationTasks: input.evaluationTasks,
     ...(input.reps !== undefined ? { reps: input.reps } : {}),
-    ...(input.maxConcurrency !== undefined ? { maxConcurrency: input.maxConcurrency } : {}),
+    maxConcurrency,
+    observedCostStopUsd: input.executionProfile.observedCostStopUsd,
+    ...(input.roundIdPrefix ? { roundIdPrefix: input.roundIdPrefix } : {}),
     ...(input.budgetMs !== undefined ? { budgetMs: input.budgetMs } : {}),
     ...(input.nonInferiorityMargin !== undefined ? { nonInferiorityMargin: input.nonInferiorityMargin } : {}),
     runArm: async ({ roundId, arm, task }) => {
       const runtimeArm = input.arms.find((candidate) => candidate.id === arm.id);
       if (!runtimeArm) throw new Error(`runtime policy A/B arm ${arm.id} is not configured`);
       const contextEnv = sanitizeContextEnv(runtimeArm.contextEnv);
-      const resumeFingerprint = runtimePolicyResumeFingerprint({
-        sharedConfigFingerprint,
-        sharedAgentEnvFingerprint: sharedAgentEnvFingerprint(sharedAgentEnv),
-        armContextEnvFingerprint: contextEnvFingerprint(contextEnv),
-        callerResumeFingerprint: input.resumeFingerprint,
-      });
+      const resumeFingerprint = runtimePolicyArmResumeFingerprint(input, runtimeArm);
       const agentEnv = { ...sharedAgentEnv, ...contextEnv };
       const result = await runFixedPromptController({
         runId: input.runId,
@@ -108,6 +127,8 @@ export async function runRuntimePolicyAbComparison(
         resultsJsonlPath: input.resultsJsonlPath,
         resultsTsvPath: `${input.resultsJsonlPath}.${roundId}.tsv`,
         tasks: [task],
+        requireExecutionIdentity: true,
+        expectedPricingProfile: input.executionProfile.id,
         resumeFingerprint,
         harborRunner: (runnerInput) => input.harborRunner({ ...runnerInput, agentEnv }),
         ...(input.now ? { now: input.now } : {}),
@@ -118,6 +139,19 @@ export async function runRuntimePolicyAbComparison(
       return event;
     },
   });
+}
+
+function pairConcurrency(maxConcurrentAttempts: number): number {
+  if (!Number.isSafeInteger(maxConcurrentAttempts) || maxConcurrentAttempts < 2 || maxConcurrentAttempts % 2 !== 0) {
+    throw new Error('maxConcurrentAttempts must be an even integer of at least 2 so each A/B pair starts together');
+  }
+  return maxConcurrentAttempts / 2;
+}
+
+function assertProfileIdentity(profile: RuntimePolicyAbExecutionProfile, config: Pick<Config, 'llmConnectionSlug' | 'model'>): void {
+  if (config.llmConnectionSlug !== profile.llmConnectionSlug || config.model !== profile.model) {
+    throw new Error(`runtime policy A/B config must match execution profile ${profile.id}`);
+  }
 }
 
 export function renderRuntimePolicyAbComparisonMarkdown(summary: RuntimePolicyAbComparisonSummary): string {
@@ -185,6 +219,18 @@ function runtimePolicyResumeFingerprint(input: {
     armContextEnvFingerprint: input.armContextEnvFingerprint,
     callerResumeFingerprint: input.callerResumeFingerprint,
   })).digest('hex')}`;
+}
+
+export function runtimePolicyArmResumeFingerprint(
+  input: Pick<RunRuntimePolicyAbComparisonInput, 'config' | 'sharedAgentEnv' | 'resumeFingerprint'>,
+  arm: RuntimePolicyAbArmInput,
+): string {
+  return runtimePolicyResumeFingerprint({
+    sharedConfigFingerprint: runtimePolicySharedConfigFingerprint(input.config),
+    sharedAgentEnvFingerprint: sharedAgentEnvFingerprint(sanitizeSharedAgentEnv(input.sharedAgentEnv ?? {})),
+    armContextEnvFingerprint: contextEnvFingerprint(sanitizeContextEnv(arm.contextEnv)),
+    callerResumeFingerprint: input.resumeFingerprint,
+  });
 }
 
 function canonicalJson(value: unknown): string {

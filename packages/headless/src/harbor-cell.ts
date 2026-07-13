@@ -13,6 +13,7 @@ import type {
   RuntimeEvent,
 } from '@maka/core';
 import { PROVIDER_DEFAULTS } from '@maka/core';
+import { isThinkingLevel } from '@maka/core';
 import {
   AiSdkBackend,
   BackendRegistry,
@@ -22,6 +23,7 @@ import {
   buildProviderOptions,
   buildSandboxDiagnosticsSnapshot,
   createExternalSandboxCapabilities,
+  defaultShellPlan,
   getAIModel,
   getBuiltinPricing,
   runShellWithBoundedTail,
@@ -39,6 +41,7 @@ import {
 import { registerFakeBackend } from './backends.js';
 import {
   buildHarborCellOutput,
+  hashHarborSystemPrompt,
   validateHarborCellOutput,
   type HarborCellContextBudgetPolicySnapshot,
   type HarborCellOutput,
@@ -50,6 +53,7 @@ import type { HeadlessBackendContext, IsolatedToolExecutor, RealBackendIsolation
 import { ISOLATED_HEADLESS_TOOL_NAMES, validateRealBackendIsolation } from './isolation.js';
 import { externalPermissionProfileForIsolation } from './external-sandbox-context.js';
 import { PiCliJsonTransport } from './pi-cli-json-transport.js';
+import { providerCredentialEnv, requireProviderCredentialEnv } from './provider-env.js';
 import { backendNeedsIsolation } from './runner.js';
 import { buildIsolatedHeadlessToolAvailability, buildIsolatedHeadlessTools, type BuildIsolatedHeadlessToolsOptions } from './tools.js';
 import {
@@ -59,6 +63,7 @@ import {
 
 export const HARBOR_CELL_OUTPUT_FILENAME = 'maka-cell-output.json';
 export const HARBOR_CELL_RUNTIME_EVENTS_FILENAME = 'runtime-events.jsonl';
+export const HARBOR_CELL_EXECUTION_IDENTITY_FILENAME = 'maka-cell-execution-identity.json';
 const execAsync = promisify(nodeExec);
 const HARBOR_CELL_TOOL_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 
@@ -68,6 +73,7 @@ export interface RunHarborCellInput {
   cwd: string;
   outputDir: string;
   storageRoot: string;
+  pricingProfile?: string;
   registerBackends?: (
     registry: BackendRegistry,
     context: HeadlessBackendContext,
@@ -114,6 +120,10 @@ export interface RunHarborCellResult {
 }
 
 export type RunHarborCellEnv = Record<string, string | undefined>;
+
+export function providerApiKeyEnvName(provider: string): string {
+  return requireProviderCredentialEnv(provider).apiKeys[0]!;
+}
 
 export const HARBOR_CELL_DEFAULT_CONTINUATION_PROMPT = 'Continue the same benchmark task from the current workspace state. Do not restart. If the task is complete, provide the final response.';
 const HARBOR_CELL_DEFAULT_MAX_STEPS_PER_TURN = 50;
@@ -302,6 +312,20 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
         }
       : {}),
   });
+  if (!config.model) throw new Error('Harbor cell config must include a model for execution identity');
+  const executionIdentity = {
+    llmConnectionSlug: config.llmConnectionSlug,
+    model: config.model,
+    ...(config.thinkingLevel ? { reasoningEffort: config.thinkingLevel } : {}),
+    systemPromptHash: hashHarborSystemPrompt(config.systemPrompt ?? ''),
+    pricingProfile: input.pricingProfile ?? 'unconfigured',
+  };
+  await mkdir(input.outputDir, { recursive: true });
+  await writeFile(
+    join(input.outputDir, HARBOR_CELL_EXECUTION_IDENTITY_FILENAME),
+    `${JSON.stringify(executionIdentity, null, 2)}\n`,
+    'utf8',
+  );
 
   let invocation: InvocationResult | undefined;
   const manager = new SessionManager({
@@ -322,6 +346,7 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
     backend: input.config.backend,
     llmConnectionSlug: config.llmConnectionSlug,
     model: config.model,
+    ...(config.thinkingLevel ? { thinkingLevel: config.thinkingLevel } : {}),
     permissionMode: 'execute',
     name: `harbor-cell:${input.config.id}`,
   });
@@ -381,6 +406,7 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
   const output = validateHarborCellOutput(buildHarborCellOutput({
     invocation: combinedInvocation,
     runtimeEventsPath,
+    executionIdentity,
     ...(input.contextBudgetPolicy ? { contextBudgetPolicy: input.contextBudgetPolicy } : {}),
     ...(continuationSummary ? { continuationSummary } : {}),
     ...(input.taskToolSummaryEnabled !== undefined ? { taskToolSummaryEnabled: input.taskToolSummaryEnabled } : {}),
@@ -405,9 +431,11 @@ export async function runHarborCellFromEnv(
   const economyTaskMode = economyTaskModeFromEnv(resolvedEnv.MAKA_ECONOMY_TASK_MODE);
   const taskLedgerExperimentPolicy = buildHarborCellTaskLedgerExperimentPolicy(resolvedEnv);
   const maxSteps = harborCellMaxStepsFromEnv(resolvedEnv);
+  const reasoningEffort = reasoningEffortFromEnv(resolvedEnv.MAKA_REASONING_EFFORT);
   const baseConfig = {
     id: resolvedEnv.MAKA_CONFIG_ID ?? 'harbor-cell',
     backend,
+    ...(reasoningEffort ? { thinkingLevel: reasoningEffort } : {}),
     ...(resolvedEnv.MAKA_SYSTEM_PROMPT !== undefined ? { systemPrompt: resolvedEnv.MAKA_SYSTEM_PROMPT } : {}),
     ...(economyTaskMode !== undefined ? { economyTaskMode } : {}),
   };
@@ -480,6 +508,7 @@ export async function runHarborCellFromEnv(
     cwd: resolvedEnv.MAKA_WORKDIR ?? process.cwd(),
     outputDir,
     storageRoot,
+    pricingProfile: resolvedEnv.MAKA_TRIAL_PRICING_SOURCE ?? 'unconfigured',
     ...(contextBudgetPolicy ? { contextBudgetPolicy } : {}),
     ...(continuationPolicy ? { continuationPolicy } : {}),
     ...(taskLedgerExperimentPolicy ? { taskToolSummaryEnabled: true } : {}),
@@ -496,6 +525,12 @@ export async function runHarborCellFromEnv(
     ...(options.now ? { now: options.now } : {}),
     ...(options.newId ? { newId: options.newId } : {}),
   });
+}
+
+export function reasoningEffortFromEnv(value: string | undefined): import('@maka/core').ThinkingLevel | undefined {
+  if (value === undefined) return undefined;
+  if (!isThinkingLevel(value)) throw new Error(`unsupported MAKA_REASONING_EFFORT: ${value}`);
+  return value;
 }
 
 function economyTaskModeFromEnv(value: string | undefined): boolean | undefined {
@@ -724,7 +759,7 @@ export function buildHarborCellContextBudgetBackendOptions(
     env.MAKA_HARBOR_CONTEXT_STALE_TOOL_RESULT_PRUNE ??
     env.MAKA_TOOL_RESULT_PRUNE,
     'MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE',
-  ) ?? false;
+  ) ?? true;
   const activePruneEnabled = booleanEnv(
     env.MAKA_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE ??
     env.MAKA_HARBOR_CONTEXT_ACTIVE_TOOL_RESULT_PRUNE ??
@@ -780,7 +815,9 @@ export function buildHarborCellContextBudgetBackendOptions(
     contextBudget.staleToolResultPrune = {
       enabled: true,
       ...(maxResultEstimatedTokens !== undefined ? { maxResultEstimatedTokens } : {}),
-      ...(minRecentTurnsFull !== undefined ? { minRecentTurnsFull } : {}),
+      // Explicit so the runtime protection window matches the policy snapshot
+      // and desktop default (2) instead of the runtime's internal ?? 1 fallback.
+      minRecentTurnsFull: minRecentTurnsFull ?? minRecentTurns ?? 2,
     };
   }
 
@@ -1191,7 +1228,13 @@ export function createHarborCellLocalToolExecutor(env: RunHarborCellEnv = proces
   // Terminal-Bench tasks build or test for longer than the 2-minute default, so
   // the floor is operator-configurable instead of a hard-coded failure source.
   const defaultTimeoutMs = numericEnv(env.MAKA_CELL_COMMAND_TIMEOUT_MS) ?? HARBOR_CELL_DEFAULT_COMMAND_TIMEOUT_MS;
+  // The shell this executor spawns in (PowerShell on Windows). Exposed as
+  // `shell` so buildIsolatedBashTool DECLARES the dialect to the model, and
+  // passed to runShellWithBoundedTail so the declaration matches execution —
+  // selection without declaration is the original Windows bug (shell-detect.ts).
+  const shell = defaultShellPlan();
   return {
+    shell,
     exec: async ({ command, cwd, timeoutMs, boundedTail }) => {
       if (boundedTail) {
         // Bash opted in: stream into a bounded tail (shared with the in-process
@@ -1203,6 +1246,7 @@ export function createHarborCellLocalToolExecutor(env: RunHarborCellEnv = proces
             cwd,
             env: childEnv,
             timeoutMs: timeoutMs ?? defaultTimeoutMs,
+            shell,
           });
           return {
             exitCode: result.timedOut ? 124 : result.exitCode,
@@ -1546,57 +1590,15 @@ function connectionFromEnv(
 }
 
 function providerBaseUrl(provider: ProviderType, env: RunHarborCellEnv): string | undefined {
-  switch (provider) {
-    case 'deepseek':
-      return env.DEEPSEEK_BASE_URL ?? env.OPENAI_BASE_URL;
-    case 'openai':
-    case 'openai-compatible':
-      return env.OPENAI_BASE_URL;
-    case 'moonshot':
-      return env.MOONSHOT_BASE_URL;
-    case 'zai-coding-plan':
-      return env.ZAI_BASE_URL;
-    case 'MiniMax':
-    case 'MiniMax-cn':
-      return env.MINIMAX_BASE_URL;
-    default:
-      return undefined;
+  for (const name of providerCredentialEnv(provider)?.baseUrls ?? []) {
+    const value = env[name];
+    if (value) return value;
   }
+  return undefined;
 }
 
 function apiKeyFromEnv(provider: ProviderType, env: RunHarborCellEnv, connectionSlug: string): string {
-  const names: string[] = [];
-  switch (provider) {
-    case 'deepseek':
-      names.push('DEEPSEEK_API_KEY', 'OPENAI_API_KEY');
-      break;
-    case 'openai':
-    case 'openai-compatible':
-      names.push('OPENAI_API_KEY');
-      break;
-    case 'moonshot':
-      names.push('MOONSHOT_API_KEY', 'OPENAI_API_KEY');
-      break;
-    case 'zai-coding-plan':
-      names.push('ZAI_API_KEY', 'ZAI_CODING_CN_API_KEY', 'OPENAI_API_KEY');
-      break;
-    case 'google':
-      names.push('GOOGLE_API_KEY');
-      break;
-    case 'anthropic':
-    case 'kimi-coding-plan':
-    case 'claude-subscription':
-      names.push('ANTHROPIC_API_KEY');
-      break;
-    case 'MiniMax':
-    case 'MiniMax-cn':
-      names.push('MINIMAX_API_KEY');
-      break;
-    default:
-      names.push('OPENAI_API_KEY');
-      break;
-  }
-  return resolveApiKey(env, names, connectionSlug);
+  return resolveApiKey(env, providerCredentialEnv(provider)?.apiKeys ?? [], connectionSlug);
 }
 
 // Resolve an API key from either the raw env var or its `<NAME>_FILE` companion.

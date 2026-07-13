@@ -33,6 +33,8 @@ export interface AgentRunHeader {
   regeneratedFromTurnId?: string;
   branchOfTurnId?: string;
   parentSessionId?: string;
+  /** Non-user trigger for this run (e.g. a scheduled automation fire). */
+  automationId?: string;
   failureClass?: string;
   failureMessage?: string;
   abortSource?: string;
@@ -77,6 +79,7 @@ export type AgentRunEventType =
   | 'sandbox_escalation_failed'
   | 'sandbox_denial_detected'
   | 'usage_recorded'
+  | 'history_compact_checkpoint_recorded'
   | 'active_full_compact_block_recorded'
   | 'semantic_compact_block_recorded'
   | 'abort_requested'
@@ -115,4 +118,16 @@ export interface AgentRunStore {
   listSessionRuns(sessionId: string): Promise<AgentRunHeader[]>;
   appendEvent(sessionId: string, runId: string, event: AgentRunEvent): Promise<void>;
   readEvents(sessionId: string, runId: string): Promise<AgentRunEvent[]>;
+  /** `undefined` means uninitialized; `null` is an initialized empty projection. */
+  readEventProjection?(
+    sessionId: string,
+    type: AgentRunEventType,
+  ): Promise<AgentRunEvent | null | undefined>;
+  /** Rewrites derived state after the canonical event ledger repairs an absent or damaged projection. */
+  repairEventProjection?(
+    sessionId: string,
+    type: AgentRunEventType,
+    event: AgentRunEvent | null,
+    options?: { replaceEventId?: string },
+  ): Promise<void>;
 }

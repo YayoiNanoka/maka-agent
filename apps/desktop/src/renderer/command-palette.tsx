@@ -8,6 +8,7 @@
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Blocks,
   CalendarDays,
   ChevronRight,
   Clock,
@@ -41,7 +42,6 @@ import {
   EmptyMedia,
   EmptyTitle,
   InputGroup,
-  InputGroupAddon,
   InputGroupInput,
   Kbd,
   KbdGroup,
@@ -293,7 +293,7 @@ export function buildCommandList(args: {
       kind: 'action',
       label: '打开 · 技能',
       group: '导航',
-      Icon: Sparkles,
+      Icon: Blocks,
       keywords: ['skills', '技能'],
       run: () => select({ section: 'skills' }),
     });
@@ -582,6 +582,9 @@ export function CommandPalette(props: {
    * when the backend supplied one, scroll to the matched turn.
    */
   onSelectSession?: (sessionId: string, turnId?: string) => void;
+  /** Funnel bridge: hands the current query to the search modal (the
+   *  browse surface over the same thread-search backend). */
+  onOpenSearchModal?: (query: string) => void;
   threadSearchDeps?: UseThreadSearchDeps;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -624,8 +627,8 @@ export function CommandPalette(props: {
   // sessions first, then matched content. Single empty / blocked /
   // error tile per state.
   const contentCommands = useMemo(() => {
-    return buildContentSearchCommands(threadSearch.state, props.onSelectSession);
-  }, [threadSearch.state, props.onSelectSession]);
+    return buildContentSearchCommands(threadSearch.state, props.onSelectSession, props.onOpenSearchModal);
+  }, [threadSearch.state, props.onSelectSession, props.onOpenSearchModal]);
 
   // Combine. Filtered commands keep their existing order; content
   // commands always sit at the end so they don't disrupt muscle
@@ -713,14 +716,6 @@ export function CommandPalette(props: {
                 />
               }
             />
-            <InputGroupAddon align="inline-end" className="maka-palette-input-hint-addon">
-              <span className="maka-palette-input-hint" aria-hidden="true">
-                <Kbd className="maka-shortcut-kbd">↵</Kbd>
-                <span>执行</span>
-                <Kbd className="maka-shortcut-kbd">Esc</Kbd>
-                <span>关闭</span>
-              </span>
-            </InputGroupAddon>
           </InputGroup>
           <Autocomplete.List className="maka-palette-list" id="maka-palette-list" aria-label="命令面板结果">
             {grouped.length === 0 ? (
@@ -755,18 +750,18 @@ export function CommandPalette(props: {
                         className="maka-palette-item"
                       >
                         <span className="maka-palette-icon" aria-hidden="true">
-                          <cmd.Icon size={15} strokeWidth={1.5} />
+                          <cmd.Icon size={15} />
                         </span>
                         <span className="maka-palette-label">{cmd.label}</span>
                         {cmd.hint && (
                           <span className="maka-palette-hint">
                             {cmd.hint}
-                            <ChevronRight size={12} strokeWidth={1.75} aria-hidden="true" />
+                            <ChevronRight size={12} aria-hidden="true" />
                           </span>
                         )}
                         {!cmd.hint && (
                           <span className="maka-palette-hint maka-palette-cursor" aria-hidden="true">
-                            <CornerDownLeft size={12} strokeWidth={1.75} />
+                            <CornerDownLeft size={12} />
                           </span>
                         )}
                       </Autocomplete.Item>

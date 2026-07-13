@@ -44,11 +44,13 @@ export function SettingsSurface(props: {
   onThemePaletteChange(palette: ThemePalette): void;
   onUserLabelChange?(label: string): void;
   requestedSection?: SettingsSection;
+  openProviderCatalog?: boolean;
   initialFocusRef: RefObject<HTMLButtonElement | null>;
   onOpenDailyReview?(): void;
   onOpenSession?(sessionId: string): void;
 }) {
   const [section, setSection] = useState<SettingsSection>(() => props.requestedSection ?? readLastSettingsSection());
+  const [providerCatalogRequested, setProviderCatalogRequested] = useState(props.openProviderCatalog === true);
 
   // When the parent updates requestedSection (e.g. the palette opens
   // Settings with a different section while it's already mounted), reflect
@@ -107,6 +109,12 @@ export function SettingsSurface(props: {
   const settingsUpdateTicketRef = useRef(0);
   const usageReloadTicketRef = useRef(0);
   const toast = useToast();
+
+  useEffect(() => {
+    if (!loading && section === 'models' && providerCatalogRequested) {
+      setProviderCatalogRequested(false);
+    }
+  }, [loading, providerCatalogRequested, section]);
 
   useEffect(() => {
     settingsModalMountedRef.current = true;
@@ -188,7 +196,7 @@ export function SettingsSurface(props: {
             aria-label="返回应用"
             onClick={props.onClose}
           >
-            <ArrowLeft size={16} strokeWidth={1.85} aria-hidden="true" />
+            <ArrowLeft size={16} aria-hidden="true" />
             <span>返回应用</span>
           </Button>
           <nav aria-label="设置分组">
@@ -207,7 +215,7 @@ export function SettingsSurface(props: {
                     onClick={() => setSection(item.id)}
                   >
                     <span className="settingsNavGlyph" aria-hidden="true">
-                      <item.Icon size={16} strokeWidth={1.5} />
+                      <item.Icon size={16} />
                     </span>
                     <strong>{item.label}</strong>
                     {item.badge && (
@@ -257,6 +265,7 @@ export function SettingsSurface(props: {
               onThemePaletteChange={props.onThemePaletteChange}
               onOpenDailyReview={props.onOpenDailyReview}
               onOpenSession={props.onOpenSession}
+              openProviderCatalog={providerCatalogRequested}
             />
           )}
         </OverlayScrollArea>
@@ -281,6 +290,7 @@ function SettingsPage(props: {
   onThemePaletteChange(palette: ThemePalette): void;
   onOpenDailyReview?(): void;
   onOpenSession?(sessionId: string): void;
+  openProviderCatalog?: boolean;
 }) {
   // PR-FE-BUG-HUNT-0 (kenji bug-hunt 2026-06-24): the inline `void
   // props.onUpdateSettings(...)` at the privacy toggle below
@@ -292,7 +302,10 @@ function SettingsPage(props: {
     case 'models':
       return (
         <div className="settingsStructuredPage settingsModelsPage">
-          <ProvidersPanel bridge={window.maka.connections} />
+          <ProvidersPanel
+            bridge={window.maka.connections}
+            initialPage={props.openProviderCatalog ? 'catalog' : 'connections'}
+          />
         </div>
       );
     case 'usage':

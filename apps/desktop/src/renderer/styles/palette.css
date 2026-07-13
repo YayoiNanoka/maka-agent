@@ -34,13 +34,13 @@
   width: auto;
   min-height: var(--h-control-lg);
   margin: var(--space-2) var(--space-2-5);
-  /* P-RADIUS concentric formula (roadmap §1.3): inner radius = outer
+  /* Concentric radius formula: inner radius = outer
      radius − inset. Modal shell is 12px with an 8px inset, so the
      input's 6px control radius read "too round" against the shell
      corners. 12 − 8 = 4px. */
   border-radius: calc(var(--radius-modal)-8px);
   border-color: var(--border);
-  /* P-INSET (roadmap §1.1): the input sits ON the elevated palette
+  /* The input sits on the elevated palette
      surface, so it steps DOWN one level (slightly darker = "type into
      here"), not up. foreground-derived so dark mode adapts. */
   background: oklch(from var(--foreground) l c h / 0.03);
@@ -84,21 +84,6 @@
   color: var(--muted-foreground);
 }
 
-.maka-palette-input-hint {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  min-height: 24px;
-  color: var(--muted-foreground);
-  font-size: var(--font-size-caption);
-  white-space: nowrap;
-}
-
-.maka-palette-input-hint-addon {
-  flex-shrink: 0;
-  padding-inline-end: var(--space-1-5);
-}
-
 .maka-shortcut-group {
   display: inline-flex;
   align-items: center;
@@ -118,17 +103,6 @@
   font-size: var(--font-size-caption);
   font-weight: var(--font-weight-semibold);
   line-height: var(--leading-none);
-}
-
-.maka-palette-input-hint .maka-shortcut-kbd {
-  background: var(--foreground-5);
-  box-shadow: none;
-}
-
-@media (max-width: 720px) {
-  .maka-palette-input-hint-addon {
-    display: none;
-  }
 }
 
 .maka-palette-list {

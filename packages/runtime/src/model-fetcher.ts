@@ -11,6 +11,13 @@ import { claudeSubscriptionHeaders } from './subscription-auth.js';
 
 const MODEL_FETCH_TIMEOUT_MS = 10_000;
 
+type RawProviderModel = {
+  id?: string;
+  supports_image_in?: boolean;
+  supports_reasoning?: boolean;
+  context_length?: number;
+};
+
 export async function fetchProviderModels(
   connection: LlmConnection,
   apiKey: string,
@@ -27,38 +34,40 @@ async function fetchProviderModelsStrict(
   apiKey: string,
 ): Promise<ModelInfo[]> {
   const baseUrl = effectiveBaseUrl(connection);
-  const auth = PROVIDER_DEFAULTS[connection.providerType].authKind;
-  if (connection.providerType === 'codex-subscription') {
-    return PROVIDER_DEFAULTS['codex-subscription'].fallbackModels.map((id) => ({ id }));
+  const definition = PROVIDER_DEFAULTS[connection.providerType];
+  const discovery = definition.modelDiscovery;
+
+  if (discovery.kind === 'fallback') {
+    return definition.fallbackModels.map((id) => ({ id }));
   }
-  if (connection.providerType === 'ollama') {
+  if (discovery.kind === 'ollama') {
     const r = await proxiedFetch(`${ollamaRoot(baseUrl)}/api/tags`, { timeoutMs: MODEL_FETCH_TIMEOUT_MS });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json() as { models?: Array<{ name?: string }> };
     return (data.models ?? []).flatMap((model) => model.name ? [{ id: model.name }] : []);
   }
 
-  switch (PROVIDER_DEFAULTS[connection.providerType].protocol) {
+  switch (definition.protocol) {
     case 'anthropic': {
       const r = await proxiedFetch(anthropicV1Url(baseUrl, '/models'), {
-        headers: anthropicModelHeaders(connection, apiKey),
+        headers: anthropicModelHeaders(discovery.auth, apiKey),
         timeoutMs: MODEL_FETCH_TIMEOUT_MS,
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json() as { data?: Array<{ id?: string }> };
-      return (data.data ?? []).flatMap((model) => model.id ? [{ id: model.id }] : []);
+      const data = await r.json() as { data?: RawProviderModel[] };
+      return (data.data ?? []).map(toModelInfo).filter((model): model is ModelInfo => model !== null);
     }
     case 'openai': {
-      const r = await proxiedFetch(`${stripTrailing(baseUrl)}/models`, {
+      const r = await proxiedFetch(modelListUrl(baseUrl, discovery.query), {
         headers: {
           'content-type': 'application/json',
-          ...(auth === 'none' ? {} : { authorization: `Bearer ${apiKey}` }),
+          ...(definition.authKind === 'none' ? {} : { authorization: `Bearer ${apiKey}` }),
         },
         timeoutMs: MODEL_FETCH_TIMEOUT_MS,
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json() as { data?: Array<{ id?: string }> };
-      return (data.data ?? []).flatMap((model) => model.id ? [{ id: model.id }] : []);
+      const data = await r.json() as { data?: RawProviderModel[] };
+      return (data.data ?? []).map(toModelInfo).filter((model): model is ModelInfo => model !== null);
     }
     case 'google': {
       const r = await proxiedFetch(
@@ -75,8 +84,26 @@ async function fetchProviderModelsStrict(
   }
 }
 
-function anthropicModelHeaders(connection: LlmConnection, apiKey: string): Record<string, string> {
-  if (connection.providerType === 'claude-subscription') {
+function modelListUrl(baseUrl: string, query: Readonly<Record<string, string>> | undefined): string {
+  const url = `${stripTrailing(baseUrl)}/models`;
+  const search = query ? new URLSearchParams(query).toString() : '';
+  return search ? `${url}?${search}` : url;
+}
+
+function toModelInfo(model: RawProviderModel): ModelInfo | null {
+  if (!model.id) return null;
+  const capabilities: NonNullable<ModelInfo['capabilities']> = {};
+  if (typeof model.supports_image_in === 'boolean') capabilities.vision = model.supports_image_in;
+  if (typeof model.supports_reasoning === 'boolean') capabilities.reasoning = model.supports_reasoning;
+  return {
+    id: model.id,
+    ...(typeof model.context_length === 'number' ? { contextWindow: model.context_length } : {}),
+    ...(Object.keys(capabilities).length ? { capabilities } : {}),
+  };
+}
+
+function anthropicModelHeaders(auth: 'claude-subscription' | undefined, apiKey: string): Record<string, string> {
+  if (auth === 'claude-subscription') {
     return {
       ...claudeSubscriptionHeaders(),
       Authorization: `Bearer ${apiKey}`,

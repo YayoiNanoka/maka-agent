@@ -1,8 +1,7 @@
 /**
  * AiSdkFlow — the default long-term AgentFlow implementation.
  *
- * Source: docs/runtime-v2-architecture-evolution.md §Target Architecture
- * and §Migration Plan › Phase 4 (AiSdkFlow Formalization).
+ * Architecture: docs/architecture/runtime-core-architecture-draft.md
  *
  * Design intent (preserved by this node):
  *   - The AI SDK remains Maka's first-class long-term flow engine. This
@@ -31,11 +30,15 @@
  *   - own model-history projection (Phase 7) or tool-event actions (Phase 5).
  */
 
-import type { CompleteEvent, SessionEvent } from '@maka/core/events';
+import {
+  failureClassFromCompleteStopReason,
+  type CompleteEvent,
+  type SessionEvent,
+} from '@maka/core/events';
 import type { PermissionDecision } from '@maka/core/backend-types';
 import { isTerminalRuntimeEvent, type RuntimeEvent, type RuntimeEventStatus } from '@maka/core/runtime-event';
 
-import type { AgentBackend } from './ai-sdk-backend.js';
+import type { AgentBackend } from '@maka/core/backend-types';
 import {
   type AgentFlow,
   type AgentFlowControl,
@@ -56,22 +59,12 @@ export type CompleteStopReason = CompleteEvent['stopReason'];
  * `end_turn` / `max_tokens` / `*_handoff` all represent the streaming phase
  * ending normally (control may be handed off, but the run is not a failure),
  * so they map to `completed`. `user_stop` maps to `aborted`; `error` to
- * `failed`. Phase 5+ may introduce a richer `waiting`/`handoff` status.
+ * `failed`. An explicit `step_limit` is also failed because the requested work
+ * may be incomplete. Phase 5+ may introduce a richer `waiting`/`handoff` status.
  */
 export function mapCompleteStopReason(reason: CompleteStopReason): RuntimeEventStatus {
-  switch (reason) {
-    case 'user_stop':
-      return 'aborted';
-    case 'error':
-      return 'failed';
-    case 'end_turn':
-    case 'max_tokens':
-    case 'plan_handoff':
-    case 'permission_handoff':
-      return 'completed';
-    default:
-      return 'completed';
-  }
+  if (reason === 'user_stop') return 'aborted';
+  return failureClassFromCompleteStopReason(reason) ? 'failed' : 'completed';
 }
 
 /**
@@ -195,10 +188,14 @@ export function mapSessionEventToRuntimeEvent(
           name: event.toolName,
           args: event.args,
         },
-        refs: { toolCallId: event.toolUseId },
+        refs: {
+          toolCallId: event.toolUseId,
+          ...(event.stepId !== undefined ? { stepId: event.stepId } : {}),
+        },
       };
-      if (event.displayName !== undefined || event.intent !== undefined) {
+      if (event.activityKind !== undefined || event.displayName !== undefined || event.intent !== undefined) {
         const stateDelta: Record<string, unknown> = {};
+        if (event.activityKind !== undefined) stateDelta.activityKind = event.activityKind;
         if (event.displayName !== undefined) stateDelta.displayName = event.displayName;
         if (event.intent !== undefined) stateDelta.intent = event.intent;
         ev.actions = { stateDelta };
@@ -433,7 +430,11 @@ function completeRuntimeEvent(
     ? 'failed'
     : mapCompleteStopReason(stopReason);
   const stateDelta: Record<string, unknown> = { stopReason };
-  if (status === 'failed') stateDelta.failureClass = memory.failureClass ?? 'runtime_error';
+  if (status === 'failed') {
+    stateDelta.failureClass = memory.failureClass
+      ?? failureClassFromCompleteStopReason(stopReason)
+      ?? 'runtime_error';
+  }
   if (status === 'aborted') stateDelta.abortSource = stopReason;
   return {
     ...base,

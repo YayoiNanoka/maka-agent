@@ -55,7 +55,9 @@ describe('sandbox escalation planning and one-shot grants', () => {
     if (plan.kind !== 'request') return;
     const verdict = engine.evaluate({
       sessionId: 'session-1', turnId: 'turn-1', toolUseId: 'tool-1', toolName: 'Bash',
-      args, mode: 'execute', cwd, sandboxEscalationProposal: plan.proposal,
+      args, mode: 'execute', cwd,
+      sandbox: { requirement: 'command', status: 'available' },
+      sandboxEscalationProposal: plan.proposal,
     });
     assert.equal(verdict.kind, 'prompt');
     if (verdict.kind !== 'prompt') return;

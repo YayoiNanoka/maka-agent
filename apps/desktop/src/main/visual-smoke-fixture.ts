@@ -21,6 +21,10 @@ const VISUAL_SMOKE_SCENARIOS = new Set<VisualSmokeScenario>([
   'fallback-source',
   'fetched-empty',
   'connection-error',
+  // OAuth re-login affordance: a codex-subscription connection with a stored
+  // but expired OAuth token (hasSecret===true), focused so its detail sheet's
+  // 重新登录 button is visible.
+  'oauth-relogin',
   'turn-narrative',
   'artifact-pane',
   'artifact-errors',
@@ -29,6 +33,9 @@ const VISUAL_SMOKE_SCENARIOS = new Set<VisualSmokeScenario>([
   // the main panel (below a committed turn) so the screenshot locks
   // streaming-vs-committed horizontal alignment.
   'streaming-answer',
+  // #646: a running session with an armed turn but nothing streaming yet —
+  // captures the "正在处理…" model-wait indicator + composer Stop.
+  'model-processing',
   'permission-destructive',
   'stale-sessions',
   // PR108j: per-Settings-section fixtures so the screenshot pipeline
@@ -47,6 +54,12 @@ const VISUAL_SMOKE_SCENARIOS = new Set<VisualSmokeScenario>([
   'settings-general',
   'settings-memory',
   'settings-daily-review',
+  'settings-permissions',
+  'settings-voice',
+  'settings-gateway',
+  'settings-search',
+  'settings-usage',
+  'settings-health',
   'module-skills',
   'module-daily-review',
   // PR109b: workstation-statuses — seed one session per SessionStatus
@@ -62,7 +75,7 @@ const VISUAL_SMOKE_SCENARIOS = new Set<VisualSmokeScenario>([
   // PR109f (g): turn-control-history — seeds a primary session whose
   // turn list covers the four TurnStatus values plus retry + regenerate
   // lineage, alongside two branch sessions (visible-parent vs missing-
-  // parent) so smoke Path 15 can verify the banner contract end-to-end.
+  // parent) so deterministic screenshots cover the banner contract end-to-end.
   // Three variants share the same on-disk seed and only differ in
   // active session selection, so auto-capture produces three
   // deterministic screenshots:
@@ -100,10 +113,20 @@ const VISUAL_SMOKE_SCENARIOS = new Set<VisualSmokeScenario>([
   // kenji `b3d156e9`): same 60-session seed; differs in
   // `focusActiveRow: true`, which programmatically focuses the
   // active row's button after mount so `:focus-within` triggers
-  // and the `.maka-list-row-actions` overlay becomes visible.
-  // Captures the actions-revealed state so reviewers can verify
+  // and the `.maka-list-row-menu-trigger` becomes visible.
+  // Captures the overflow-trigger state so reviewers can verify
   // the time meta + unread dot are hidden underneath (no overlap).
   'sidebar-row-actions-visible',
+  // Scroll-geometry contract seed: 24 tall turns opened as the active
+  // session on boot, so off-screen turns mount as content-visibility
+  // placeholders (see e2e/scroll-geometry.spec.ts).
+  'long-transcript',
+  // #819: BrowserPanel renderer-chrome fixture. Seeds `liveBrowserSessionIds`
+  // with the active turn session so `BrowserPanel` mounts; with no native
+  // `WebContentsView` in visual-smoke mode, `browser.getState` resolves null
+  // → `EMPTY_STATE` → the empty-state chrome (toolbar all-nav-disabled +
+  // `<Empty>` strip) the #818 narrow-layout defect regressed against.
+  'browser-empty',
 ]);
 
 // Fixed clock for screenshot fixtures. All seeded timestamps and
@@ -292,6 +315,7 @@ export function getVisualSmokeState(fixture: VisualSmokeFixture | null): VisualS
       return { ...state, activeSessionId: TURN_SESSION_ID, openSettingsSection: 'models' };
     case 'fallback-source':
     case 'fetched-empty':
+    case 'oauth-relogin':
       return { ...state, activeSessionId: TURN_SESSION_ID, openSettingsSection: 'models' };
     case 'connection-error':
       return { ...state, activeSessionId: ERROR_SESSION_ID, openSettingsSection: 'account' };
@@ -307,12 +331,21 @@ export function getVisualSmokeState(fixture: VisualSmokeFixture | null): VisualS
       return { ...state, activeSessionId: ARTIFACT_SESSION_ID };
     case 'turn-narrative':
       return { ...state, activeSessionId: TURN_SESSION_ID };
+    case 'browser-empty':
+      // #819: the active turn session is also seeded as a live browser
+      // session so BrowserPanel mounts over the chat. No native
+      // WebContentsView exists in visual-smoke mode, so browser.getState
+      // resolves null → BrowserPanel renders EMPTY_STATE → the empty-state
+      // chrome is what screenshots capture (the #818 defect surface).
+      // Loaded / loading / nav chrome states are locked by the
+      // `browser-panel-chrome` source contract; their screenshots add no
+      // layout value over this empty-state baseline.
+      return { ...state, activeSessionId: TURN_SESSION_ID, liveBrowserSessionIds: [TURN_SESSION_ID] };
     case 'streaming-sidebar':
       return {
         ...state,
         activeSessionId: TURN_SESSION_ID,
-        streamingBySession: streamingState(),
-        liveToolsBySession: streamingTools(),
+        liveTurnBySession: streamingLiveTurns(),
       };
     case 'streaming-answer':
       // Active session = the committed turn-narrative session, PLUS a live
@@ -322,14 +355,25 @@ export function getVisualSmokeState(fixture: VisualSmokeFixture | null): VisualS
       return {
         ...state,
         activeSessionId: TURN_SESSION_ID,
-        streamingBySession: { [TURN_SESSION_ID]: STREAMING_ANSWER_MARKDOWN },
+        liveTurnBySession: streamingAnswerLiveTurns(),
+      };
+    case 'model-processing':
+      // #646: a running session whose live projection is armed with
+      // NO streaming / thinking / tool seeded, so the derivation fires and the
+      // "正在处理…" indicator rides the tail user turn while the composer shows
+      // Stop. The session's on-disk status is `running` so the status gate self-
+      // heals like the real backgrounded-session path.
+      return {
+        ...state,
+        activeSessionId: PROCESSING_SESSION_ID,
+        liveTurnBySession: processingLiveTurns(),
       };
     case 'permission-destructive':
       return {
         ...state,
         activeSessionId: PERMISSION_SESSION_ID,
         permissionBySession: permissionState(),
-        liveToolsBySession: permissionTools(),
+        liveTurnBySession: permissionLiveTurns(),
       };
     case 'stale-sessions':
       // Active session intentionally a stale one — verifies the @kenji
@@ -357,6 +401,18 @@ export function getVisualSmokeState(fixture: VisualSmokeFixture | null): VisualS
       return { ...state, activeSessionId: TURN_SESSION_ID, openSettingsSection: 'memory' };
     case 'settings-daily-review':
       return { ...state, activeSessionId: TURN_SESSION_ID, openSettingsSection: 'daily-review' };
+    case 'settings-permissions':
+      return { ...state, activeSessionId: TURN_SESSION_ID, openSettingsSection: 'permissions' };
+    case 'settings-voice':
+      return { ...state, activeSessionId: TURN_SESSION_ID, openSettingsSection: 'voice' };
+    case 'settings-gateway':
+      return { ...state, activeSessionId: TURN_SESSION_ID, openSettingsSection: 'open-gateway' };
+    case 'settings-search':
+      return { ...state, activeSessionId: TURN_SESSION_ID, openSettingsSection: 'search' };
+    case 'settings-usage':
+      return { ...state, activeSessionId: TURN_SESSION_ID, openSettingsSection: 'usage' };
+    case 'settings-health':
+      return { ...state, activeSessionId: TURN_SESSION_ID, openSettingsSection: 'health' };
     case 'module-skills':
       return { ...state, activeSessionId: TURN_SESSION_ID, sidebarSection: 'skills', sidebarCollapsed: false };
     case 'module-daily-review':
@@ -390,8 +446,7 @@ export function getVisualSmokeState(fixture: VisualSmokeFixture | null): VisualS
     case 'turn-control-branch-orphan':
       // Active = orphan branch session (parentSessionId points to a
       // session that is intentionally NOT seeded on disk). Chat header
-      // must render NO branch banner and NO dead-link button. Path 15
-      // asserts the absence of `.maka-session-branch-banner` here.
+      // must render NO branch banner and NO dead-link button.
       return { ...state, activeSessionId: TURN_CONTROL_BRANCH_ORPHAN_SESSION_ID };
     case 'sidebar-long-sessions':
       // PR-SIDEBAR-IA-0 Phase 1: active = the FIRST session in the seed
@@ -430,26 +485,33 @@ export function getVisualSmokeState(fixture: VisualSmokeFixture | null): VisualS
       // PR-SIDEBAR-IA-0 Phase 3 P0 fixup v4 (WAWQAQ msg `5dd1c348`):
       // same 60-session seed; `focusActiveRow: true` makes the
       // renderer focus the active row's button after mount so
-      // `:focus-within` triggers and the action overlay shows.
-      // Captures the actions-revealed state for the overlap gate.
+      // `:focus-within` triggers and the overflow action appears.
+      // Captures the overflow-trigger state for the overlap gate.
       return {
         ...state,
         activeSessionId: LONG_SIDEBAR_SESSION_PREFIX + '00',
         sidebarCollapsed: false,
         focusActiveRow: true,
       };
+    case 'long-transcript':
+      // Scroll-geometry contract: boot straight into the 24-turn session so
+      // above-viewport turns mount render-skipped (never rendered), the
+      // exact state the warm-up + pinned-bottom invariants protect.
+      return { ...state, activeSessionId: LONG_TRANSCRIPT_SESSION_ID };
     case 'all':
       return {
         ...state,
         activeSessionId: TURN_SESSION_ID,
-        streamingBySession: streamingState(),
         permissionBySession: permissionState(),
-        liveToolsBySession: {
-          ...streamingTools(),
-          ...permissionTools(),
+        liveTurnBySession: {
+          ...streamingLiveTurns(),
+          ...permissionLiveTurns(),
         },
       };
   }
+  // Fallback so the function is total over the scenario union (TS2366); the
+  // base state is the safe default for any scenario without a bespoke mapping.
+  return state;
 }
 
 export async function seedVisualSmokeFixture(input: {
@@ -468,6 +530,7 @@ export async function seedVisualSmokeFixture(input: {
     await input.credentialStore.setSecret(slug, 'api_key', `fixture-key-${slug}`);
   }
   await writeSession(input.workspaceRoot, turnSession(now), turnMessages(now));
+  await writeSession(input.workspaceRoot, processingSession(now), processingMessages(now));
   await writeSession(input.workspaceRoot, streamingSession(now), streamingMessages(now));
   await writeSession(input.workspaceRoot, permissionSession(now), permissionMessages(now));
   await writeSession(input.workspaceRoot, errorSession(now), errorMessages(now));
@@ -490,6 +553,12 @@ export async function seedVisualSmokeFixture(input: {
     for (const seed of workstationStatusSessions(now)) {
       await writeSession(input.workspaceRoot, seed.header, seed.messages);
     }
+  }
+  // Scroll-geometry contract (e2e/scroll-geometry.spec.ts): a session tall
+  // enough that most turns mount as render-skipped content-visibility
+  // placeholders — the state the warm-up and pinned-bottom invariants cover.
+  if (input.fixture.scenario === 'long-transcript') {
+    await writeSession(input.workspaceRoot, longTranscriptSession(now), longTranscriptMessages(now));
   }
   // PR109f (g): all three turn-control-* scenarios share the same
   // on-disk seed; only the active session selection differs. Seeding
@@ -525,6 +594,78 @@ export async function seedVisualSmokeFixture(input: {
   if (input.fixture.scenario === 'module-daily-review' || input.fixture.scenario === 'settings-daily-review') {
     await writeDailyReviewArchives(input.workspaceRoot, now);
   }
+  if (input.fixture.scenario === 'module-skills') {
+    await seedSkillsMarketFixture(input.workspaceRoot);
+  }
+}
+
+/**
+ * Marketplace fixture: seeds a managed-source catalog (≥6 entries across
+ * categories with varied recency) plus a couple of workspace skills so the
+ * 市场 grid, category filter, sort, and the 内置/已安装 rows all render
+ * meaningfully in the CDP capture. Managed sources normally live in
+ * ~/.maka/skill-sources; the dev-gated MAKA_SKILL_SOURCES_ROOT override
+ * (resolveManagedSkillSourcesRoot) points both the seeder and the runtime
+ * IPC at a fixture-local dir so nothing touches the real home catalog.
+ */
+async function seedSkillsMarketFixture(workspaceRoot: string): Promise<void> {
+  const sourcesRoot = join(workspaceRoot, '.maka', 'skill-sources');
+  process.env.MAKA_SKILL_SOURCES_ROOT = sourcesRoot;
+  await mkdir(sourcesRoot, { recursive: true });
+
+  const sources: ReadonlyArray<{ id: string; name: string; description: string; category: string }> = [
+    { id: 'research-brief', name: '研究简报', category: '研究与分析', description: '把网页资料、引用和结论整理成结构化 brief，适合快速进入陌生领域。' },
+    { id: 'doc-review', name: '文档审阅', category: '文档与写作', description: '检查 DOCX / Markdown 的结构、语气和遗漏项，并输出可执行修改建议。' },
+    { id: 'meeting-followup', name: '会议跟进', category: '效率工具', description: '从会议记录里抽取决定、风险和 owner，生成下一步任务清单。' },
+    { id: 'release-checklist', name: '发布检查', category: 'DevOps与部署', description: '按发布前 checklist 扫描 diff、测试和文档，减少临门一脚的遗漏。' },
+    { id: 'data-analyst', name: '数据分析助手', category: '数据与AI', description: '读取 CSV / 表格，做透视、异常检测和趋势总结，产出可复述的结论。' },
+    { id: 'ui-audit', name: 'UI 走查', category: '设计与UI', description: '对照设计规范逐项走查间距、层级和状态色，列出需要修的细节。' },
+    { id: 'blog-outline', name: '博客提纲', category: '内容创作', description: '把零散想法整理成有节奏的文章提纲，附上每段的论据方向。' },
+  ];
+
+  // Stagger mtimes so 排序：最近 has a meaningful order (the last-written
+  // source is the most recent). Written newest-last on purpose.
+  for (const source of sources) {
+    const dir = join(sourcesRoot, source.id);
+    await mkdir(dir, { recursive: true });
+    const content = [
+      '---',
+      `name: ${source.name}`,
+      `description: ${source.description}`,
+      `category: ${source.category}`,
+      '---',
+      '',
+      `# ${source.name}`,
+      '',
+      source.description,
+      '',
+    ].join('\n');
+    await writeFile(join(dir, 'SKILL.md'), content, { encoding: 'utf8', mode: 0o600 });
+  }
+
+  // A couple of workspace skills so 已安装 is not empty and one managed
+  // source shows as installed in the grid. The bundled OfficeCLI skills
+  // (seeded separately after the fixture) populate the 内置 tab.
+  const workspaceSkills: ReadonlyArray<{ id: string; name: string; description: string }> = [
+    { id: 'meeting-followup', name: '会议跟进', description: '从会议记录里抽取决定、风险和 owner，生成下一步任务清单。' },
+    { id: 'daily-standup', name: '每日站会', description: '汇总昨日进展、今日计划和阻塞，生成简短的站会同步。' },
+  ];
+  for (const skill of workspaceSkills) {
+    const dir = join(workspaceRoot, 'skills', skill.id);
+    await mkdir(dir, { recursive: true });
+    const content = [
+      '---',
+      `name: ${skill.name}`,
+      `description: ${skill.description}`,
+      '---',
+      '',
+      `# ${skill.name}`,
+      '',
+      skill.description,
+      '',
+    ].join('\n');
+    await writeFile(join(dir, 'SKILL.md'), content, { encoding: 'utf8', mode: 0o600 });
+  }
 }
 
 /**
@@ -555,6 +696,8 @@ const TURN_CONTROL_SCENARIOS = new Set<VisualSmokeScenario>([
 ]);
 
 const TURN_SESSION_ID = 'visual-smoke-turn';
+const LONG_TRANSCRIPT_SESSION_ID = 'visual-smoke-long-transcript';
+const PROCESSING_SESSION_ID = 'visual-smoke-processing';
 const STREAMING_SESSION_ID = 'visual-smoke-streaming';
 // PR-STREAM-TURN-CENTER: realistic multi-block markdown (heading + paragraph +
 // list) for the `streaming-answer` scenario, so the captured streaming bubble
@@ -592,7 +735,7 @@ const HEALTHY_SESSION_ID = 'visual-smoke-healthy';
 // `BRANCH_ORPHAN` session's `parentSessionId` intentionally references
 // a session id that is NEVER written to disk so the renderer's
 // `deriveBranchBanner()` resolves the parent as missing and renders no
-// banner (Path 15 negative case).
+// banner in the negative screenshot case.
 const TURN_CONTROL_PRIMARY_SESSION_ID = 'visual-smoke-turn-control-primary';
 const TURN_CONTROL_BRANCH_VISIBLE_SESSION_ID = 'visual-smoke-turn-control-branch-visible';
 const TURN_CONTROL_BRANCH_ORPHAN_SESSION_ID = 'visual-smoke-turn-control-branch-orphan';
@@ -839,6 +982,29 @@ async function writeConnections(workspaceRoot: string, now: number, scenario: Vi
       updatedAt: now - 8 * 60_000,
     },
   ];
+  if (scenario === 'oauth-relogin') {
+    // A codex-subscription (OAuth) connection whose last test came back
+    // needs_reauth. Its detail sheet must offer an inline 登录 / 重新登录
+    // button (driven by the shared OAuth login flow) instead of the old dead
+    // prose. Credential presence for OAuth connections is resolved through the
+    // subscription token store (empty here), so the button reads 登录; the
+    // hasSecret===true → 重新登录 label is pinned by the detail-sheet contract.
+    connections.push({
+      slug: 'codex-oauth',
+      name: 'OpenAI Codex Fixture',
+      providerType: 'codex-subscription',
+      defaultModel: 'gpt-5.5',
+      enabled: true,
+      models: [model('gpt-5.5', { reasoning: true, functionCalling: true }, 200_000)],
+      modelSource: 'fetched',
+      modelsFetchedAt: now - 6 * 60_000,
+      lastTestStatus: 'needs_reauth',
+      lastTestAt: new Date(now - 6 * 60_000).toISOString(),
+      lastTestMessage: '需要重新登录',
+      createdAt: now - 3_100_000,
+      updatedAt: now - 6 * 60_000,
+    });
+  }
   const focusSlug = connectionFocusSlug(scenario);
   const ordered = focusSlug
     ? [
@@ -858,6 +1024,8 @@ function connectionFocusSlug(scenario: VisualSmokeScenario): string | null {
       return 'relay-fallback';
     case 'fetched-empty':
       return 'empty-fetched';
+    case 'oauth-relogin':
+      return 'codex-oauth';
     case 'connection-error':
       return 'broken-provider';
     default:
@@ -882,6 +1050,51 @@ function turnSession(now: number): SessionHeader {
     now,
     lastMessageAt: now - 9 * 60_000,
   });
+}
+
+function longTranscriptSession(now: number): SessionHeader {
+  return header({
+    id: LONG_TRANSCRIPT_SESSION_ID,
+    name: '超长会话滚动几何',
+    connection: 'zai-live',
+    model: 'glm-5.1',
+    now,
+    lastMessageAt: now - 5 * 60_000,
+  });
+}
+
+/**
+ * 24 turns, each ~1300px tall once rendered, so the transcript is ~25x the
+ * 250px contain-intrinsic-size placeholder per turn and dozens of viewports
+ * tall overall. Plain text on purpose: the contract under test is scroll
+ * geometry, not markdown rendering.
+ */
+function longTranscriptMessages(now: number): StoredMessage[] {
+  const filler = Array.from(
+    { length: 60 },
+    (_, line) => `第 ${line + 1} 行 — 用于撑高单个 turn 的占位正文内容。`,
+  ).join('  \n');
+  const messages: StoredMessage[] = [];
+  const base = now - 60 * 60_000;
+  for (let turn = 0; turn < 24; turn++) {
+    const turnId = `long-transcript-turn-${turn}`;
+    messages.push({
+      type: 'user',
+      id: `long-transcript-user-${turn}`,
+      turnId,
+      ts: base + turn * 60_000,
+      text: `长会话问题 ${turn + 1}`,
+    });
+    messages.push({
+      type: 'assistant',
+      id: `long-transcript-assistant-${turn}`,
+      turnId,
+      ts: base + turn * 60_000 + 30_000,
+      text: `长会话回答 ${turn + 1}\n\n${filler}`,
+      modelId: 'glm-5.1',
+    });
+  }
+  return messages;
 }
 
 function turnMessages(now: number): StoredMessage[] {
@@ -912,10 +1125,14 @@ function turnMessages(now: number): StoredMessage[] {
         cmd: 'npm test --workspaces --if-present',
         status: 'completed',
         exitCode: 0,
-        stdout: 'core 41 passing\nstorage 17 passing\nruntime 70 passing\ndesktop 74 passing\n',
-        stderr: '',
-        stdoutTruncated: false,
-        stderrTruncated: false,
+        output: {
+          mode: 'pipes',
+          stdout: 'core 41 passing\nstorage 17 passing\nruntime 70 passing\ndesktop 74 passing\n',
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          redacted: false,
+        },
       },
     },
     {
@@ -968,6 +1185,119 @@ function turnMessages(now: number): StoredMessage[] {
       output: 320,
       cacheRead: 180,
       costUsd: 0.0042,
+    },
+    // Streaming UI rework: a second, MULTI-STEP turn. Each step persists its own
+    // assistant row (thinking + text) plus tool_calls tagged with that row's id
+    // as `stepId`, so the turn timeline reconstructs the real per-step order —
+    // 深度思考 → answer text → tool trow — instead of one trailing tool group.
+    // Locks the capture for the new timeline (contrast the legacy stepless turn
+    // above, which renders tools-before-text).
+    ...multiStepTurnMessages(now),
+  ];
+}
+
+// #646: a running session whose latest turn is a lone user prompt with no
+// assistant reply yet — the on-disk shape of "just sent, awaiting first token".
+// Paired with a waiting live projection + status `running`, the renderer derives the
+// "正在处理…" model-wait indicator on the tail turn and the composer shows Stop.
+function processingSession(now: number): SessionHeader {
+  return header({
+    id: PROCESSING_SESSION_ID,
+    name: '正在处理请求',
+    connection: 'zai-live',
+    model: 'glm-5.1',
+    now,
+    lastMessageAt: now - 2_000,
+    status: 'running',
+  });
+}
+
+function processingMessages(now: number): StoredMessage[] {
+  const turnId = 'turn-processing-1';
+  return [
+    { type: 'user', id: 'msg-processing-user', turnId, ts: now - 2_000, text: '把刚才那批改动整理成一份可交接的变更说明，并指出还需我确认的点。' },
+  ];
+}
+
+function multiStepTurnMessages(now: number): StoredMessage[] {
+  const turnId = 'turn-fixture-2';
+  const step1 = 'msg-assistant-2a';
+  const step2 = 'msg-assistant-2b';
+  return [
+    { type: 'user', id: 'msg-user-2', turnId, ts: now - 6 * 60_000, text: '确认 stream-fade 的环逻辑没有边界问题，然后跑一下单测。', origin: { kind: 'automation', automationId: 'auto-fixture-demo' } },
+    {
+      type: 'tool_call',
+      id: 'tool-read-fade',
+      turnId,
+      ts: now - 6 * 60_000 + 4_000,
+      toolName: 'Read',
+      displayName: '读取 stream-fade.ts',
+      intent: '读取淡入环实现，确认窗口滑动与上限',
+      stepId: step1,
+      args: { file_path: 'packages/ui/src/stream-fade.ts' },
+    },
+    {
+      type: 'tool_result',
+      id: 'tool-read-fade-result',
+      turnId,
+      ts: now - 6 * 60_000 + 4_600,
+      toolUseId: 'tool-read-fade',
+      isError: false,
+      durationMs: 560,
+      content: { kind: 'text', text: 'export function updateFadeRing(...) { /* prune + cap */ }' },
+    },
+    {
+      type: 'assistant',
+      id: step1,
+      turnId,
+      ts: now - 5 * 60_000,
+      text: '环逻辑没问题：增长记录批次、超窗剪枝、按上限截断，收缩时整体重置。接下来跑单测确认。',
+      thinking: { text: 'boundary 取最老存活批次的 start，age 用 now 减去覆盖该 offset 的批次时间，窗口滑动和上限都覆盖了，值得跑一遍测试坐实。' },
+      modelId: 'glm-5.1',
+    },
+    {
+      type: 'tool_call',
+      id: 'tool-run-fade-tests',
+      turnId,
+      ts: now - 5 * 60_000 + 3_000,
+      toolName: 'Bash',
+      displayName: '运行 stream-fade 单测',
+      intent: '执行 node --test 跑淡入环与 tokenizer 单测',
+      stepId: step2,
+      args: { cmd: 'node --test dist/main/__tests__/stream-fade.test.js', cwd: '/workspace/maka' },
+    },
+    {
+      type: 'tool_result',
+      id: 'tool-run-fade-tests-result',
+      turnId,
+      ts: now - 5 * 60_000 + 5_200,
+      toolUseId: 'tool-run-fade-tests',
+      isError: false,
+      durationMs: 1_930,
+      content: {
+        kind: 'terminal',
+        cwd: '/workspace/maka',
+        cmd: 'node --test dist/main/__tests__/stream-fade.test.js',
+        status: 'completed',
+        exitCode: 0,
+        output: {
+          mode: 'pipes',
+          stdout: 'tests 13\npass 13\nfail 0\n',
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          redacted: false,
+        },
+      },
+    },
+    {
+      type: 'assistant',
+      id: step2,
+      turnId,
+      ts: now - 4 * 60_000,
+      text: '13 个单测全绿，窗口滑动、乱序快照取龄和上限都被覆盖。边界没有问题。',
+      thinking: { text: '测试覆盖窗口滑动、乱序 age 查询与上限三类，全过说明剪枝和 cap 的顺序对，可以收尾。' },
+      modelId: 'glm-5.1',
     },
   ];
 }
@@ -1212,7 +1542,7 @@ function workstationStatusSessions(now: number): Array<{ header: SessionHeader; 
  *    active.
  *  - `branch-orphan` — parentSessionId points to a session id that is
  *    NOT seeded; renderer's `deriveBranchBanner()` returns undefined
- *    and no banner is rendered (Path 15 negative case).
+ *    and no banner is rendered (negative screenshot case).
  *
  * The three are interchangeable for screenshot purposes — only the
  * active session selection in `applyScenarioOverrides` decides which
@@ -1251,7 +1581,7 @@ function turnControlSessions(now: number): Array<{ header: SessionHeader; messag
     status: 'active',
   });
   // Intentionally references a session id never written to disk so the
-  // renderer must render no banner (negative case for Path 15).
+  // renderer must render no banner (negative screenshot case).
   branchOrphanHeader.parentSessionId = TURN_CONTROL_ORPHAN_PARENT_ID;
   branchOrphanHeader.branchOfTurnId = 'turn-deleted-origin';
 
@@ -1998,24 +2328,53 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, JSON.stringify(value, null, 2) + '\n', 'utf8');
 }
 
-function streamingState(): NonNullable<VisualSmokeState['streamingBySession']> {
+function streamingLiveTurns(): NonNullable<VisualSmokeState['liveTurnBySession']> {
   return {
-    [STREAMING_SESSION_ID]: '正在检查日志、模型配置和最近的工具输出…',
+    [STREAMING_SESSION_ID]: {
+      turnId: 'turn-streaming',
+      phase: 'streamed',
+      steps: [{
+        stepId: 'stream-live-step',
+        text: {
+          text: '正在检查日志、模型配置和最近的工具输出…',
+          truncated: false,
+          complete: false,
+        },
+        tools: [{
+          toolUseId: 'stream-live-tool',
+          toolName: 'Bash',
+          stepId: 'stream-live-step',
+          displayName: '运行中的诊断',
+          intent: '模拟后台 stream 中的 tool activity',
+          status: 'running',
+          args: { cmd: 'npm run visual-smoke:fixture' },
+        }],
+      }],
+    },
   };
 }
 
-function streamingTools(): NonNullable<VisualSmokeState['liveToolsBySession']> {
+function streamingAnswerLiveTurns(): NonNullable<VisualSmokeState['liveTurnBySession']> {
   return {
-    [STREAMING_SESSION_ID]: [
-      {
-        toolUseId: 'stream-live-tool',
-        toolName: 'Bash',
-        displayName: '运行中的诊断',
-        intent: '模拟后台 stream 中的 tool activity',
-        status: 'running',
-        args: { cmd: 'npm run visual-smoke:fixture' },
-      },
-    ],
+    [TURN_SESSION_ID]: {
+      turnId: 'turn-fixture-2',
+      phase: 'streamed',
+      steps: [{
+        stepId: 'msg-assistant-2c',
+        text: { text: STREAMING_ANSWER_MARKDOWN, truncated: false, complete: false },
+        tools: [],
+      }],
+    },
+  };
+}
+
+function processingLiveTurns(): NonNullable<VisualSmokeState['liveTurnBySession']> {
+  return {
+    [PROCESSING_SESSION_ID]: {
+      turnId: 'turn-processing-1',
+      phase: 'waiting',
+      steps: [],
+    },
   };
 }
 
@@ -2025,19 +2384,24 @@ function permissionState(): NonNullable<VisualSmokeState['permissionBySession']>
   };
 }
 
-function permissionTools(): NonNullable<VisualSmokeState['liveToolsBySession']> {
+function permissionLiveTurns(): NonNullable<VisualSmokeState['liveTurnBySession']> {
   const request = permissionRequest(VISUAL_SMOKE_NOW);
   return {
-    [PERMISSION_SESSION_ID]: [
-      {
-        toolUseId: request.toolUseId,
-        toolName: request.toolName,
-        displayName: '模拟删除命令',
-        intent: request.hint,
-        status: 'waiting_permission',
-        args: request.args,
-      },
-    ],
+    [PERMISSION_SESSION_ID]: {
+      turnId: 'turn-permission',
+      phase: 'streamed',
+      steps: [{
+        stepId: 'tool:permission-tool',
+        tools: [{
+          toolUseId: request.toolUseId,
+          toolName: request.toolName,
+          displayName: '模拟删除命令',
+          intent: request.hint,
+          status: 'waiting_permission',
+          args: request.args,
+        }],
+      }],
+    },
   };
 }
 

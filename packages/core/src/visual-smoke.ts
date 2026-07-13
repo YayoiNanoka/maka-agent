@@ -8,6 +8,11 @@ export type VisualSmokeScenario =
   | 'fallback-source'
   | 'fetched-empty'
   | 'connection-error'
+  // OAuth re-login: seeds a codex-subscription (OAuth) connection that last
+  // tested needs_reauth and focuses its detail sheet, so the inline 登录 /
+  // 重新登录 affordance the detail sheet gained is visible where an expired
+  // OAuth login must be re-run — the surface that used to be dead prose.
+  | 'oauth-relogin'
   | 'turn-narrative'
   | 'artifact-pane'
   | 'artifact-errors'
@@ -18,6 +23,10 @@ export type VisualSmokeScenario =
   // screenshot locks streaming-vs-committed horizontal alignment — the gap
   // that let the "streaming markdown sits ~110px too far left" bug ship.
   | 'streaming-answer'
+  // #646 real-time status language: a running session whose turn is armed with
+  // nothing streaming yet — the "正在处理…" model-wait indicator rides the tail
+  // turn and the composer shows Stop. Locks the connect-to-first-token state.
+  | 'model-processing'
   | 'permission-destructive'
   | 'stale-sessions'
   | 'settings-data'
@@ -32,6 +41,12 @@ export type VisualSmokeScenario =
   | 'settings-general'
   | 'settings-memory'
   | 'settings-daily-review'
+  | 'settings-permissions'
+  | 'settings-voice'
+  | 'settings-gateway'
+  | 'settings-search'
+  | 'settings-usage'
+  | 'settings-health'
   | 'module-skills'
   | 'module-daily-review'
   | 'workstation-statuses'
@@ -43,8 +58,7 @@ export type VisualSmokeScenario =
   // scenarios below share the same on-disk seed; they only differ in
   // which session is the active one so auto-capture produces three
   // deterministic screenshots covering both positive and negative
-  // banner cases without requiring manual clicks. Smoke Path 15 reads
-  // these fixtures.
+  // banner cases without requiring manual clicks.
   | 'turn-control-history'
   | 'turn-control-branch-visible'
   | 'turn-control-branch-orphan'
@@ -98,17 +112,49 @@ export type VisualSmokeScenario =
   // becomes visible (via `:focus-within`). Verifies that the
   // time meta + unread dot do NOT leak through the action icons
   // — the bug WAWQAQ flagged.
-  | 'sidebar-row-actions-visible';
+  | 'sidebar-row-actions-visible'
+  // Scroll-geometry contract: a 24-turn session whose turns are each ~1300px
+  // tall, opened as the active session on boot. Off-screen turns mount as
+  // 250px content-visibility placeholders, so this seed exercises the
+  // warm-up + pinned-bottom geometry invariants (E2E scroll-geometry spec)
+  // and gives screenshots a long-transcript surface.
+  | 'long-transcript'
+  // #819: BrowserPanel renderer-chrome fixture. Seeds `liveBrowserSessionIds`
+  // with the active turn session so `BrowserPanel` mounts (app-shell gates
+  // on `activeId && liveBrowserSessionIds.includes(activeId)`). In
+  // visual-smoke mode there is no native `WebContentsView`, so
+  // `browser.getState` resolves null and `BrowserPanel` renders `EMPTY_STATE`
+  // — the empty-state chrome (toolbar with all nav buttons disabled + the
+  // `<Empty>` strip) that the #818 narrow-layout defect regressed against.
+  // Loaded / loading / nav chrome states are locked by the
+  // `browser-panel-chrome` source contract (their wiring IS the behavior);
+  // their screenshots add no layout value over this empty-state baseline.
+  | 'browser-empty';
 
 export interface VisualSmokeLiveTool {
   toolUseId: string;
   toolName: string;
+  stepId?: string;
   displayName?: string;
   intent?: string;
   status: 'pending' | 'waiting_permission' | 'running' | 'completed' | 'errored' | 'interrupted';
   args: unknown;
   result?: ToolResultContent;
   durationMs?: number;
+}
+
+export interface VisualSmokeLiveTurnStep {
+  stepId: string;
+  thinking?: { text: string; truncated: boolean; complete: boolean };
+  text?: { text: string; truncated: boolean; complete: boolean };
+  tools: VisualSmokeLiveTool[];
+}
+
+export interface VisualSmokeLiveTurnProjection {
+  turnId: string;
+  phase: 'waiting' | 'streamed';
+  terminal?: true;
+  steps: VisualSmokeLiveTurnStep[];
 }
 
 export interface VisualSmokeState {
@@ -122,18 +168,18 @@ export interface VisualSmokeState {
    */
   now?: number;
   activeSessionId?: string;
-  openSettingsSection?: SettingsSection;
-  streamingBySession?: Record<string, string>;
   /**
-   * PR-UI-LAYOUT-42: per-session thinking buffer for fixtures that
-   * want to seed the ReasoningPanel mid-stream. Mirrors
-   * `streamingBySession` shape. Empty string = no live thinking
-   * (panel hidden). Set this in a fixture to capture the panel's
-   * live-streaming visual state in a screenshot.
+   * #819: session ids with a live embedded-browser view, mirrorring the
+   * renderer's `liveBrowserSessionIds` state (app-shell gates `BrowserPanel`
+   * mounting on `activeId && liveBrowserSessionIds.includes(activeId)`).
+   * Seeded only by the `browser-empty` scenario so the renderer chrome can
+   * be screenshot-captured. Real users never receive a visual smoke state, so
+   * this never drives production `browser:live` wiring.
    */
-  thinkingBySession?: Record<string, string>;
+  liveBrowserSessionIds?: string[];
+  openSettingsSection?: SettingsSection;
+  liveTurnBySession?: Record<string, VisualSmokeLiveTurnProjection>;
   permissionBySession?: Record<string, PermissionRequestEvent>;
-  liveToolsBySession?: Record<string, VisualSmokeLiveTool[]>;
   /**
    * PR-IR-04: force `prefers-reduced-motion: reduce` behavior regardless
    * of the host OS setting. Triggered by `MAKA_VISUAL_SMOKE_REDUCED_MOTION=1`

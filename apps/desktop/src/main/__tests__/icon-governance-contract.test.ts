@@ -1,0 +1,169 @@
+/**
+ * Icon + typography governance contract.
+ *
+ * The sidebar's competitor comparison surfaced three fault lines:
+ *   1. Icon semantics were wrong (Sparkles for 技能 means nothing).
+ *   2. Icons read as different families — call sites had accumulated a
+ *      dozen different `strokeWidth` values, so the glyphs fragmented.
+ *   3. The lucide funnel could drift if a call site imported lucide-react
+ *      directly instead of through the @maka/ui/icons seam.
+ *
+ * This contract pins the outcome of the governance round:
+ *   a) No `strokeWidth={...}` prop survives on lucide icon call sites under
+ *      apps/desktop/src/renderer or packages/ui/src (brand-asset files
+ *      excepted) — icons ride the single governed stroke instead.
+ *   b) session-sidebar-nav.tsx imports exactly the decided semantic set
+ *      (SquarePen / CalendarCheck / Blocks / Timer / Settings) from ./icons.js.
+ *   c) icons.tsx stays the ONLY packages/ui/src file importing lucide-react
+ *      (funnel integrity).
+ */
+
+import { strict as assert } from 'node:assert';
+import { createHash } from 'node:crypto';
+import { readdir, readFile } from 'node:fs/promises';
+import { relative, resolve, sep } from 'node:path';
+import { describe, it } from 'node:test';
+
+const REPO_ROOT = resolve(import.meta.dirname, '../../../../..');
+const ICONS_FILE = resolve(REPO_ROOT, 'packages/ui/src/icons.tsx');
+const SIDEBAR_NAV_FILE = resolve(REPO_ROOT, 'packages/ui/src/session-sidebar-nav.tsx');
+const PROVIDER_BRAND_MARKS_FILE = resolve(REPO_ROOT, 'apps/desktop/src/renderer/settings/provider-brand-marks.tsx');
+const MINIMAX_BRAND_ASSET_FILE = resolve(
+  REPO_ROOT,
+  'apps/desktop/src/renderer/assets/provider-brands/minimax-logo-only-vertical-color-bg-white-text.svg',
+);
+
+// Fixed brand assets, not generic UI icons — their vendored SVGs keep
+// their own stroke weight and are exempt from the call-site stroke sweep.
+const STROKE_EXCEPTION_FILES = new Set([
+  resolve(REPO_ROOT, 'packages/ui/src/bot-brand-logo.tsx'),
+  resolve(REPO_ROOT, 'apps/desktop/src/renderer/settings/provider-brand-marks.tsx'),
+]);
+
+async function walkTsx(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === '__tests__') continue;
+    const full = resolve(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...(await walkTsx(full)));
+    } else if (entry.isFile() && /\.tsx?$/.test(entry.name)) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+const rel = (file: string): string => relative(REPO_ROOT, file).split(sep).join('/');
+
+describe('icon + typography governance contract', () => {
+  it('rides lucide\'s single governed stroke — no per-call-site strokeWidth props', async () => {
+    const dirs = [
+      resolve(REPO_ROOT, 'apps/desktop/src/renderer'),
+      resolve(REPO_ROOT, 'packages/ui/src'),
+    ];
+    const offenders: string[] = [];
+    for (const dir of dirs) {
+      for (const file of await walkTsx(dir)) {
+        if (STROKE_EXCEPTION_FILES.has(file)) continue;
+        const src = await readFile(file, 'utf8');
+        // The brace form is what lucide icon call sites use. Raw inline
+        // <svg> primitives use the string form (strokeWidth="2") and are
+        // not lucide glyphs, so they are outside this rule.
+        if (/strokeWidth=\{/.test(src)) offenders.push(rel(file));
+      }
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      'icons ride lucide\'s default stroke — per-callsite strokeWidth fragments the family. '
+        + `Delete the strokeWidth={...} props in:\n  ${offenders.join('\n  ')}`,
+    );
+  });
+
+  it('session-sidebar-nav imports exactly the decided semantic icon set from ./icons.js', async () => {
+    const src = await readFile(SIDEBAR_NAV_FILE, 'utf8');
+    const importMatch = src.match(/import\s*\{([^}]*)\}\s*from\s*'\.\/icons\.js'/);
+    assert.ok(importMatch, 'session-sidebar-nav.tsx must import its icons from ./icons.js');
+    const imported = importMatch![1]
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean)
+      .sort();
+    // Decided semantic mapping (maintainer 2026-07-10: 新任务 matches the
+    // collapsed-topbar compose icon): 新任务 → SquarePen, 每日回顾 → CalendarCheck,
+    // 技能 → Blocks, 定时任务 → Timer, 设置 → Settings.
+    const expected = ['Blocks', 'CalendarCheck', 'Settings', 'SquarePen', 'Timer'];
+    assert.deepEqual(
+      imported,
+      expected,
+      `session-sidebar-nav.tsx must import exactly ${expected.join('/')} from ./icons.js (the semantic mapping)`,
+    );
+  });
+
+  it('routes every packages/ui/src lucide import through the icons.tsx funnel', async () => {
+    const files = await walkTsx(resolve(REPO_ROOT, 'packages/ui/src'));
+    const offenders: string[] = [];
+    for (const file of files) {
+      if (file === ICONS_FILE) continue;
+      const stripped = (await readFile(file, 'utf8'))
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/[^\n]*/g, '');
+      if (/['"]lucide-react['"]/.test(stripped)) offenders.push(rel(file));
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      'icons.tsx is the only lucide-react seam in packages/ui/src (funnel integrity). '
+        + `Route these through @maka/ui/icons named exports:\n  ${offenders.join('\n  ')}`,
+    );
+  });
+
+  it('uses the vendored SiliconCloud brand mark for SiliconFlow', async () => {
+    const src = await readFile(PROVIDER_BRAND_MARKS_FILE, 'utf8');
+
+    assert.match(
+      src,
+      /function SiliconCloud\(\)[\s\S]*d="M22\.956 6\.521H12\.522c-\.577 0-1\.044\.468-1\.044 1\.044v3\.13/,
+      'SiliconFlow must use the upstream @lobehub/icons-static-svg SiliconCloud path, not a hand-drawn placeholder',
+    );
+    assert.match(
+      src,
+      /case 'siliconflow':\s*return <SiliconCloud \/>/,
+      'the SiliconFlow provider must resolve to its real brand mark',
+    );
+  });
+
+  it('routes the MiniMax Coding Plan alias to the MiniMax brand mark', async () => {
+    const src = await readFile(PROVIDER_BRAND_MARKS_FILE, 'utf8');
+
+    assert.match(
+      src,
+      /case 'minimax-coding-plan':\s*case 'MiniMax':\s*case 'MiniMax-cn':\s*return <MiniMaxMark \/>/,
+      'MiniMax Coding Plan must reuse the MiniMax brand mark instead of the generic placeholder',
+    );
+  });
+
+  it('vendors the byte-exact official MiniMax brand-package SVG', async () => {
+    const componentSrc = await readFile(PROVIDER_BRAND_MARKS_FILE, 'utf8');
+    const asset = await readFile(MINIMAX_BRAND_ASSET_FILE);
+
+    assert.equal(
+      createHash('sha256').update(asset).digest('hex'),
+      '386033f6d1cfc5359877b402221a819f272cf6333eae12a95858fdcc226811a5',
+      'MiniMax mark must remain byte-identical to the official brand-package member',
+    );
+    assert.match(componentSrc, /https:\/\/platform\.minimax\.io\/docs\/faq\/contact-us#brand-resources/);
+    assert.match(componentSrc, /https:\/\/file\.cdn\.minimax\.io\/public\/MiniMax_Logo\.zip/);
+    assert.match(
+      componentSrc,
+      /MiniMax_Logo\/svg\/logo-only\/vertical\/minimax_logo-only_vertical_color-bg_white-text\.svg/,
+    );
+    assert.match(
+      componentSrc,
+      /function MiniMaxMark\(\): ReactElement \{\s*return <img src=\{minimaxBrandMark\} alt="" \/>;\s*\}/,
+      'MiniMax providers must render the vendored official file, never an inline hand-drawn path',
+    );
+  });
+});

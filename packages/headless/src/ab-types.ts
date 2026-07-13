@@ -1,7 +1,7 @@
 import type { FixedPromptTask, FixedPromptTaskWalEvent } from './fixed-prompt-controller.js';
 import type { HarborCellContextBudgetPolicySnapshot } from './cell-output.js';
 
-export type AbExperimentKind = 'prompt' | 'tools' | 'provider' | 'runtime';
+export type AbExperimentKind = 'prompt' | 'tools' | 'provider' | 'runtime' | 'harness';
 
 export interface AbArmSpec {
   id: string;
@@ -28,6 +28,9 @@ export interface RunAbComparisonInput {
   evaluationTasks: readonly FixedPromptTask[];
   reps?: number;
   maxConcurrency?: number;
+  armExecution?: 'parallel' | 'sequential';
+  observedCostStopUsd?: number;
+  roundIdPrefix?: string;
   budgetMs?: number;
   nonInferiorityMargin?: number;
   runArm: AbArmRunner;
@@ -46,7 +49,9 @@ export type AbArmRunner = (input: AbArmRunInput) => Promise<FixedPromptTaskWalEv
 export type AbDecision =
   | 'non_inferior'
   | 'inferior'
-  | 'inconclusive';
+  | 'not_cleared'
+  | 'diagnostic'
+  | 'invalid';
 
 export interface AbArmSummary {
   attempts: number;
@@ -58,6 +63,7 @@ export interface AbArmSummary {
   budgetExhausted: number;
   infraFailed: number;
   plumbingFailed: number;
+  attestationWarnings: number;
   missing: number;
   coverageRate: number;
   totalCostUsd: number;
@@ -81,6 +87,7 @@ export interface AbActivePruneSubsetSummary {
   budgetExhausted: number;
   infraFailed: number;
   plumbingFailed: number;
+  attestationWarnings: number;
   missing: number;
   coverageRate: number;
   totalCostUsd: number;
@@ -158,6 +165,7 @@ export interface AbTaskArmSummary {
   budgetExhausted: number;
   infraFailed: number;
   plumbingFailed: number;
+  attestationWarnings: number;
   missing: number;
 }
 
@@ -166,7 +174,7 @@ export interface AbTaskComparison {
   baseline: AbTaskArmSummary;
   candidate: AbTaskArmSummary;
   passRateDelta: number | null;
-  outcome: 'candidate_win' | 'baseline_win' | 'tie' | 'missing';
+  outcome: 'candidate_win' | 'baseline_win' | 'tie' | 'missing' | 'excluded';
 }
 
 export interface AbTaskLevelSummary {
@@ -177,6 +185,7 @@ export interface AbTaskLevelSummary {
   signTestNonTieTasks: number;
   signTestPValue: number | null;
   missingTaskIds: string[];
+  excludedTaskIds: string[];
   meanPassRateDelta: number | null;
   medianPassRateDelta: number | null;
   tasks: AbTaskComparison[];
@@ -185,10 +194,16 @@ export interface AbTaskLevelSummary {
 export interface AbAttemptPairSummary {
   pairs: number;
   observedPairs: number;
+  evaluatedPairs: number;
+  baselinePassed: number;
+  candidatePassed: number;
+  baselineTokenCostSummary: AbTokenCostSummary;
+  candidateTokenCostSummary: AbTokenCostSummary;
   wins: number;
   losses: number;
   ties: number;
   missingPairIds: string[];
+  excludedPairIds: string[];
   budgetDiscordantPairIds: string[];
   infraOrPlumbingDiscordantPairIds: string[];
 }
@@ -220,7 +235,7 @@ export interface AbInvestigationRefs {
 }
 
 export interface AbNonInferioritySummary {
-  method: 'newcombe_wilson' | 'unavailable';
+  method: 'paired_bonferroni_wilson' | 'unavailable';
   confidenceLevel: number;
   lowerBound: number | null;
 }
@@ -243,13 +258,15 @@ export interface AbComparisonSummary {
   taskLevel: AbTaskLevelSummary;
   pairedAttempts: AbAttemptPairSummary;
   investigationRefs: AbInvestigationRefs;
+  stopReason?: 'observed_cost_stop_reached' | 'systemic_provider_failure';
 }
 
 export interface AbRunManifestInput {
   experimentKind: AbExperimentKind;
   arms: readonly [AbArmSpec, AbArmSpec];
-  taskBudgetSec: number;
-  harborTimeoutMs: number;
+  metadata?: Record<string, unknown>;
+  taskBudgetSec: number | null;
+  harborTimeoutMs: number | null;
   subjectFingerprint: string;
   taskSourceFingerprint: string;
   toolchainFingerprint: string;
@@ -257,8 +274,11 @@ export interface AbRunManifestInput {
   reps: number;
   candidateLimit: number | null;
   maxConcurrency: number;
+  maxConcurrentAttempts?: number;
+  observedCostStopUsd?: number;
   selectionMode?: 'explicit' | 'metadata';
   candidateTaskIds?: readonly string[];
+  pilotTaskIds?: readonly string[];
   maxExpertTimeEstimateMin?: number | null;
   targetEvaluationTaskCount?: number | null;
   nonInferiorityMargin?: number;
@@ -270,4 +290,5 @@ export type AbRunManifest = AbRunManifestInput & {
   arms: [AbArmSpec, AbArmSpec];
   evaluationTaskIds: string[];
   candidateTaskIds?: string[];
+  pilotTaskIds?: string[];
 };

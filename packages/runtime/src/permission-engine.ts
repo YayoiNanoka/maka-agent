@@ -8,8 +8,6 @@
  *   keyed by requestId)
  * - response routing back to the awaiting adapter
  *
- * Source: V0.1_TECH_SPEC.md §6.1, §6.2
- *
  * Adapter contract (see AiSdkBackend tool execute wrapper):
  *
  *   const decision = await engine.evaluate({ sessionId, turnId, toolUseId, toolName, args, mode });
@@ -22,7 +20,10 @@
  *   }
  */
 
+import { projectToolActivityArgs } from '@maka/core';
 import {
+  classifyToolUse,
+  matchToolPermissionRules,
   preToolUse,
   type PermissionMode,
   type PermissionRequest,
@@ -31,8 +32,9 @@ import {
   type PreToolUseResult,
   type ToolCategory,
   type ToolExecutionFacts,
+  type ToolPermissionRule,
 } from '@maka/core/permission';
-import type { PermissionRequestEvent } from '@maka/core/events';
+import type { PermissionDecisionAckEvent, PermissionRequestEvent } from '@maka/core/events';
 import {
   DEFAULT_ADDITIONAL_PERMISSION_GRANT_TTL_MS,
   AdditionalPermissionError,
@@ -97,7 +99,13 @@ interface PendingEscalationGrant {
 
 export type EvaluateResult =
   | { kind: 'allow'; category: ToolCategory }
-  | { kind: 'block'; category: ToolCategory; reason: string }
+  | {
+      kind: 'block';
+      category: ToolCategory;
+      reason: string;
+      /** Present for an invocation-local explicit deny so observers record a failed invocation. */
+      decisionEvent?: PermissionDecisionAckEvent;
+    }
   | {
       kind: 'prompt';
       category: ToolCategory;
@@ -130,6 +138,10 @@ export interface EvaluateInput {
   sandboxEscalationProposal?: SandboxEscalationProposal;
   /** Canonical cwd shown in an additional permission request. */
   cwd?: string;
+  /** Whether the tool participates in the base mode policy when no explicit rule matches. */
+  permissionRequired?: boolean;
+  /** Invocation-local rules. Explicit deny wins over allow, then base mode applies. */
+  permissionRules?: readonly ToolPermissionRule[];
 }
 
 // ============================================================================
@@ -193,6 +205,43 @@ export class PermissionEngine {
    */
   evaluate(input: EvaluateInput): EvaluateResult {
     const state = this.requireTurn(input.turnId);
+
+    const category = classifyToolUse({
+      toolName: input.toolName,
+      args: input.args,
+      ...(input.categoryHint !== undefined ? { categoryHint: input.categoryHint } : {}),
+    });
+    const ruleDecision = matchToolPermissionRules({
+      toolName: input.toolName,
+      args: input.args,
+      category,
+      rules: input.permissionRules ?? [],
+    });
+    if (ruleDecision === 'allow') return { kind: 'allow', category };
+    if (ruleDecision === 'deny') {
+      const requestId = this.deps.newId();
+      return {
+        kind: 'block',
+        category,
+        reason: `Tool ${input.toolName} was denied by an invocation permission rule`,
+        decisionEvent: {
+          type: 'permission_decision_ack',
+          id: this.deps.newId(),
+          turnId: input.turnId,
+          ts: this.deps.now(),
+          requestId,
+          toolUseId: input.toolUseId,
+          decision: 'deny',
+        },
+      };
+    }
+    if (
+      ruleDecision === undefined
+      && input.permissionRequired === false
+      && (!input.sandbox || input.sandbox.requirement === 'none')
+    ) {
+      return { kind: 'allow', category };
+    }
 
     const pre: PreToolUseResult = preToolUse({
       toolName: input.toolName,
@@ -337,7 +386,7 @@ export class PermissionEngine {
           toolName: pre.partialRequest!.toolName,
           category: pre.partialRequest!.category,
           reason: pre.partialRequest!.reason,
-          args: pre.partialRequest!.args,
+          args: projectToolActivityArgs(pre.partialRequest!.toolName, pre.partialRequest!.args),
           ...(input.hint !== undefined ? { hint: input.hint } : {}),
         };
 

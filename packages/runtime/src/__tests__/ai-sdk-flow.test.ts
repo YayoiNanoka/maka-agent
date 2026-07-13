@@ -19,7 +19,7 @@ import {
 import {
   flowSupportsControl,
 } from '../agent-flow.js';
-import type { AgentBackend } from '../ai-sdk-backend.js';
+import type { AgentBackend } from '@maka/core/backend-types';
 import { RuntimeRunner } from '../runtime-runner.js';
 import type { InvocationContext } from '../invocation-context.js';
 
@@ -217,7 +217,10 @@ describe('AiSdkFlow seam', () => {
       },
     ];
     const backend = new ScriptedBackend({
-      events: [ev({ type: 'complete', stopReason: 'end_turn' })],
+      events: [
+        ev({ type: 'text_complete', messageId: 'm1', text: 'ok' }),
+        ev({ type: 'complete', stopReason: 'end_turn' }),
+      ],
     });
     const flow = new AiSdkFlow({ backend });
     let idSeq = 0;
@@ -240,6 +243,7 @@ describe('AiSdkFlow seam', () => {
     });
 
     assert.equal(result.status, 'completed');
+    assert.equal(result.finalOutput, 'ok');
     assert.equal(backend.sendInputs.length, 1);
     assert.deepEqual(backend.sendInputs[0], {
       runId: 'rt-2',
@@ -601,6 +605,20 @@ describe('mapSessionEventToRuntimeEvent (pure)', () => {
     assert.equal(mapCompleteStopReason('permission_handoff'), 'completed');
     assert.equal(mapCompleteStopReason('user_stop'), 'aborted');
     assert.equal(mapCompleteStopReason('error'), 'failed');
+    assert.equal(mapCompleteStopReason('step_limit'), 'failed');
+  });
+
+  test('step_limit uses the established tool-step-cap failure class', () => {
+    const mapped = mapSessionEventToRuntimeEvent(
+      ev({ type: 'complete', stopReason: 'step_limit' }),
+      ctx,
+      createSessionEventMapMemory(),
+    );
+
+    assert.deepEqual(mapped.actions?.stateDelta, {
+      stopReason: 'step_limit',
+      failureClass: 'tool_step_cap_reached',
+    });
   });
 
   test('tool_output_delta and tool_progress map to partial tool-role heartbeats', () => {
@@ -666,6 +684,22 @@ describe('mapSessionEventToRuntimeEvent (pure)', () => {
     assert.equal(JSON.stringify(mapped).includes('/outside/private.txt'), false);
     assert.equal(JSON.stringify(mapped).includes('/workspace'), false);
     assert.equal(JSON.stringify(mapped).includes('Write the requested output.'), false);
+  });
+
+  test('tool_start maps its semantic activity kind into runtime state', () => {
+    const event = mapSessionEventToRuntimeEvent(
+      ev({
+        type: 'tool_start',
+        toolUseId: 'tu-kind',
+        toolName: 'CustomCommand',
+        activityKind: 'command',
+        args: {},
+      }),
+      ctx,
+      createSessionEventMapMemory(),
+    );
+
+    assert.equal(event.actions?.stateDelta?.activityKind, 'command');
   });
 
   test('plan_submitted maps to an agent-authored state delta', () => {

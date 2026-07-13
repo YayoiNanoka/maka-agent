@@ -14,7 +14,6 @@ export type FileSystemAccessMode = typeof FILE_SYSTEM_ACCESS_MODES[number];
 
 export const FILE_SYSTEM_PATH_MATCHES = ['exact', 'subtree'] as const;
 export type FileSystemPathMatch = typeof FILE_SYSTEM_PATH_MATCHES[number];
-
 export const FILE_SYSTEM_SPECIAL_PATHS = [
   ':root',
   ':workspace_roots',
@@ -245,7 +244,6 @@ function hasExplicitPathWrite(
     && entryMatchesPath(entry, path, context)
   ));
 }
-
 function entryRoots(entry: FileSystemSandboxEntry, context: PermissionProfileMatchContext): readonly string[] {
   if (entry.kind === 'path') return [entry.path];
   switch (entry.special) {
@@ -293,7 +291,6 @@ function pathWithinRoot(path: string, root: string): boolean {
 function samePath(path: string, expected: string): boolean {
   return trimTrailingSlashes(path) === trimTrailingSlashes(expected);
 }
-
 function trimTrailingSlashes(value: string): string {
   if (!value) return '';
   const trimmed = value.replace(/\/+$/, '');

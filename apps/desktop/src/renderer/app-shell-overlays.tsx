@@ -49,17 +49,20 @@ export function AppShellOverlays(props: {
   setThemePalette(themePalette: ThemePalette): void;
   setUserLabel(userLabel: string): void;
   settingsRequestedSection: SettingsSection | undefined;
+  settingsProviderCatalogOpen: boolean;
   onOpenDailyReview(): void;
   onOpenSettingsSession(sessionId: string): void;
   helpOpen: boolean;
   closeHelp(): void;
   searchModalOpen: boolean;
+  searchModalInitialQuery: string;
   closeSearchModal: SearchModalProps['onClose'];
   searchModalDeps: SearchModalProps['deps'];
   searchModalOnNavigate: NonNullable<SearchModalProps['onNavigateToSession']>;
   paletteOpen: boolean;
   closePalette(): void;
   paletteOnSelectSession(sessionId: string, turnId?: string): void;
+  paletteOnOpenSearchModal(query: string): void;
   commandOptions: AppShellCommandListOptions;
 }) {
   const {
@@ -72,15 +75,18 @@ export function AppShellOverlays(props: {
     connections,
     defaultConnection,
     helpOpen,
+    paletteOnOpenSearchModal,
     paletteOnSelectSession,
     paletteOpen,
     refreshConnections,
     respondToPermission,
     searchModalDeps,
+    searchModalInitialQuery,
     searchModalOnNavigate,
     searchModalOpen,
     settingsOpen,
     settingsRequestedSection,
+    settingsProviderCatalogOpen,
     setThemePalette,
     setThemePref,
     setUserLabel,
@@ -109,6 +115,7 @@ export function AppShellOverlays(props: {
             onThemePaletteChange={setThemePalette}
             onUserLabelChange={setUserLabel}
             requestedSection={settingsRequestedSection}
+            openProviderCatalog={settingsProviderCatalogOpen}
             onOpenDailyReview={props.onOpenDailyReview}
             onOpenSession={props.onOpenSettingsSession}
           />
@@ -119,6 +126,7 @@ export function AppShellOverlays(props: {
         <SearchModal
           onClose={closeSearchModal}
           deps={searchModalDeps}
+          initialQuery={searchModalInitialQuery}
           onNavigateToSession={searchModalOnNavigate}
         />
       )}
@@ -126,6 +134,10 @@ export function AppShellOverlays(props: {
         <CommandPalette
           onClose={closePalette}
           onSelectSession={paletteOnSelectSession}
+          onOpenSearchModal={(query) => {
+            closePalette();
+            paletteOnOpenSearchModal(query);
+          }}
           commands={buildAppShellCommandList(commandOptions)}
         />
       )}

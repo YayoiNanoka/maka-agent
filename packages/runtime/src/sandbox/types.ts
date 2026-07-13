@@ -1,5 +1,6 @@
 import type { PermissionProfile } from '@maka/core/permission-profile';
 import type { AdditionalPermissionProfile } from '@maka/core/additional-permissions';
+import type { ChildFdInput } from '../child-fd-input.js';
 
 export type SandboxType = 'none' | 'macos-seatbelt' | 'linux';
 
@@ -36,6 +37,7 @@ export interface SandboxCommand {
 
 export interface SandboxExecRequest {
   argv: readonly string[];
+  fdInputs?: readonly ChildFdInput[];
   cwd: string;
   env?: Readonly<Record<string, string | undefined>>;
   sandboxType: SandboxType;
@@ -92,7 +94,17 @@ export type SandboxTransformResult =
       message?: string;
     };
 
+export interface SandboxTransformManager {
+  transform(request: SandboxTransformRequest): SandboxTransformResult;
+}
+
+export interface SandboxEnforcementManager extends SandboxTransformManager {
+  canEnforce(input: SandboxSelectionInput): boolean;
+}
+
 export interface SandboxBackend {
   readonly type: Exclude<SandboxType, 'none'>;
+  isAvailable?(platform?: SandboxPlatform): boolean;
+  canEnforceProfile?(profile: PermissionProfile): boolean;
   transform(request: SandboxTransformRequest): SandboxTransformResult;
 }

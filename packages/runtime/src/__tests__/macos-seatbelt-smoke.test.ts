@@ -96,6 +96,20 @@ describe('macOS Seatbelt smoke', { skip: !canRunSeatbelt }, () => {
     assert.equal(await readFile(join(workspaceRoot, 'allowed.txt'), 'utf8'), 'ok');
   });
 
+  it('launches the active Node runtime with its package-manager dependencies', async () => {
+    const workspaceRoot = await makeWorkspace();
+    cleanup.push(workspaceRoot);
+
+    const script = "process.stdout.write('node-ok')";
+    const child = runSeatbeltCommand(
+      workspaceRoot,
+      `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
+    );
+
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.stdout, 'node-ok');
+  });
+
   it('allows slash tmp through its canonical macOS path', async () => {
     const workspaceRoot = await makeWorkspace();
     const slashTmpRoot = await mkdtemp('/tmp/maka-seatbelt-slash-');
@@ -116,7 +130,6 @@ describe('macOS Seatbelt smoke', { skip: !canRunSeatbelt }, () => {
     assert.equal(child.status, 0, child.stderr);
     assert.equal(await readFile(target, 'utf8'), 'tmp-ok');
   });
-
   it('denies writes outside the workspace root', async () => {
     const workspaceRoot = await makeWorkspace();
     const outsideRoot = await realpath(await mkdtemp(join(tmpdir(), 'maka-seatbelt-outside-')));
@@ -161,7 +174,6 @@ describe('macOS Seatbelt smoke', { skip: !canRunSeatbelt }, () => {
 
     assert.notEqual(child.status, 0);
   });
-
   it('allows one exact outside file without allowing its sibling', async () => {
     const workspaceRoot = await makeWorkspace();
     const outsideRoot = await realpath(await mkdtemp(join(tmpdir(), 'maka-seatbelt-outside-')));

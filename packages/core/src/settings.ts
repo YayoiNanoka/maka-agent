@@ -36,24 +36,27 @@ import { PERMISSION_MODES } from './permission.js';
  *   - `daily-review` is its own section again
  *   - `memory` is its own section again
  *
- * 14 visible sections. See notes/reference-settings.md §7.
+ * See docs/archive/reference-settings.md §7 for historical provenance.
  */
-export type SettingsSection =
-  | 'general'
-  | 'appearance'
-  | 'memory'
-  | 'daily-review'
-  | 'models'
-  | 'usage'
-  | 'voice'
-  | 'open-gateway'
-  | 'bot-chat'
-  | 'search'
-  | 'data'
-  | 'account'
-  | 'permissions'
-  | 'health'
-  | 'about';
+export const SETTINGS_SECTIONS = [
+  'general',
+  'appearance',
+  'memory',
+  'daily-review',
+  'models',
+  'usage',
+  'voice',
+  'open-gateway',
+  'bot-chat',
+  'search',
+  'data',
+  'account',
+  'permissions',
+  'health',
+  'about',
+] as const;
+
+export type SettingsSection = typeof SETTINGS_SECTIONS[number];
 
 export type ProxyProtocol = 'http' | 'https' | 'socks5';
 
@@ -288,6 +291,20 @@ export interface ChatDefaultsSettings {
   permissionMode: ChatDefaultPermissionMode;
 }
 
+/**
+ * Desktop OS notifications (Settings → 通用 → 通知). The runtime only
+ * knows a turn ended from the renderer; the main process owns the focus
+ * gate + native `Notification`, so this is a pure product on/off toggle.
+ */
+export interface NotificationSettings {
+  /**
+   * When enabled, the desktop app raises a native notification once an
+   * agent turn finishes (completed or errored) **while its window is not
+   * focused**. Focus + OS-permission gating live in the main process.
+   */
+  runComplete: boolean;
+}
+
 export interface AppSettings {
   schemaVersion: 1;
   network: NetworkSettings;
@@ -302,6 +319,7 @@ export interface AppSettings {
   workspaceInstructions: WorkspaceInstructionsSettings;
   privacy: PrivacySettings;
   chatDefaults: ChatDefaultsSettings;
+  notifications: NotificationSettings;
 }
 
 export interface UsageRequestLog {
@@ -368,6 +386,7 @@ export type UpdateAppSettingsInput = Partial<{
   workspaceInstructions: Partial<WorkspaceInstructionsSettings>;
   privacy: Partial<PrivacySettings>;
   chatDefaults: Partial<ChatDefaultsSettings>;
+  notifications: Partial<NotificationSettings>;
   webSearch: Partial<{
     enabled: boolean;
     defaultProvider: WebSearchProvider;
@@ -489,6 +508,9 @@ export function createDefaultSettings(): AppSettings {
     },
     privacy: defaultPrivacySettings(),
     chatDefaults: defaultChatDefaultsSettings(),
+    notifications: {
+      runComplete: true,
+    },
   };
 }
 
@@ -562,6 +584,10 @@ export function mergeSettings(current: AppSettings, patch: UpdateAppSettingsInpu
     chatDefaults: patch.chatDefaults
       ? normalizeChatDefaultsSettings({ ...current.chatDefaults, ...patch.chatDefaults })
       : current.chatDefaults,
+    notifications: {
+      ...current.notifications,
+      ...(patch.notifications ?? {}),
+    },
     webSearch: mergeWebSearchSettings(current.webSearch, patch.webSearch),
   };
 }
@@ -645,6 +671,7 @@ export function normalizeSettings(input: unknown): AppSettings {
     workspaceInstructions: value.workspaceInstructions,
     privacy: value.privacy,
     chatDefaults: value.chatDefaults,
+    notifications: value.notifications,
   });
   // PR110b: milestones bypass the generic patch surface so we can
   // sanitize them with the closed-enum + at-most-one validator on
@@ -713,6 +740,15 @@ export function normalizeSettings(input: unknown): AppSettings {
     workspaceInstructions: normalizeWorkspaceInstructionsSettings(base.workspaceInstructions),
     privacy: normalizePrivacySettings(base.privacy),
     chatDefaults: normalizeChatDefaultsSettings(base.chatDefaults),
+    // Fail-closed boolean coercion: mergeSettings spreads the raw user
+    // value, so a non-boolean `runComplete` (from a hand-edited or
+    // legacy settings.json) would otherwise reach the main-process gate
+    // as a truthy/falsy non-boolean. Default a missing/garbage value to
+    // the enabled default rather than silently disabling notifications.
+    notifications: {
+      runComplete:
+        typeof base.notifications.runComplete === 'boolean' ? base.notifications.runComplete : true,
+    },
   };
 }
 

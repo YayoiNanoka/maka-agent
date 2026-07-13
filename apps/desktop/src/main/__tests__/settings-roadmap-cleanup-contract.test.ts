@@ -40,8 +40,8 @@ describe('Settings coming-soon cleanup contract', () => {
     assert.doesNotMatch(providers, /即将支持的 OAuth 订阅登录/, 'Providers header must not advertise future OAuth login as a model-provider affordance');
     assert.doesNotMatch(providers, /即将推出|尚未实现|路线图/, 'ProvidersPanel must not show unavailable providers as visible roadmap copy');
     assert.doesNotMatch(providers, /providerComingSoon|未开放配置|聊天发送未开放|未进入配置入口/, 'ProvidersPanel must use product-state account copy instead of coming-soon configuration copy');
-    assert.match(providers, /等待添加供应商/, 'ProvidersPanel empty state should frame setup as an add-provider action');
-    assert.doesNotMatch(providers, /onClick=\{\(\) => startAdd\('zai-coding-plan'\)\}[\s\S]*等待添加供应商/, 'ProvidersPanel empty state must stay passive instead of opening Z.AI by default');
+    assert.match(providers, /等待添加服务商/, 'ProvidersPanel empty state should frame setup as an add-provider action');
+    assert.doesNotMatch(providers, /onClick=\{\(\) => navigate\(\{ kind: 'add', providerType: 'zai-coding-plan' \}\)\}[\s\S]*等待添加服务商/, 'ProvidersPanel empty state must stay passive instead of opening Z.AI by default');
     assert.doesNotMatch(providers, /还没有供应商/, 'ProvidersPanel empty state should not read like unfinished product setup');
     assert.doesNotMatch(providerCatalog, /catalogBadge:\s*'Soon'|future phase/, 'provider catalog metadata must not keep soon/future-phase copy');
     assert.doesNotMatch(styles, /ComingSoonPage|roadmap banner|providerComingSoon|providerCatalogSoon/, 'Settings CSS must not keep stale coming-soon/provider-roadmap naming');
@@ -113,11 +113,18 @@ describe('Settings coming-soon cleanup contract', () => {
     assert.ok(voicePage, 'Voice settings page block must exist');
     assert.match(voicePage![0], /语音转写和语音朗读模型必须遵守这个边界/, 'Voice settings should frame speech features as a current policy boundary');
     assert.match(voicePage![0], /转写文本只进入消息输入框草稿；用户发送前必须能编辑。/, 'Voice transcript handling should be stated as current policy');
-    assert.match(voicePage![0], /采集链路自检/, 'Voice visible copy should use product language instead of test jargon');
+    assert.match(voicePage![0], /录音样本只在本机内存里/, 'Voice privacy boundary must be stated in the 当前边界 copy');
     assert.doesNotMatch(
       voicePage![0],
       /未来|后续|接入会叠在|之后会加|采集链路 smoke|capture smoke|STT \/ TTS/,
       'Voice settings visible copy must not read like future roadmap copy',
+    );
+    // Round 11: shipped-feature announcements (已上线 banners) are release
+    // notes, not settings chrome — the always-on banner is gone for good.
+    assert.doesNotMatch(
+      voicePage![0],
+      /已上线/,
+      'Voice settings must not carry release-note banners',
     );
   });
 
@@ -243,7 +250,7 @@ describe('Settings coming-soon cleanup contract', () => {
     assert.match(permissionPage, /const pendingPermActionRef = useRef<string \| null>\(null\)/);
     assert.match(
       permissionPage,
-      /return \(\) => \{[\s\S]*mountedRef\.current = false;[\s\S]*pendingPermActionRef\.current = null;/,
+      /return \(\) => \{[\s\S]*pendingPermActionRef\.current = null;/,
       'Permission Center must release the pending action owner when Settings closes',
     );
     assert.match(
@@ -300,7 +307,9 @@ describe('Settings coming-soon cleanup contract', () => {
     // `<div role="listitem">`. ARIA list semantics still hold
     // — the elements carry them implicitly.
     assert.match(healthPage![0], /<ul aria-label="健康摘要" className="settingsHealthSummary">/, 'Health Center summary metrics must expose list semantics');
-    assert.match(settings, /<li className="settingsHealthSummaryTile" data-tone=\{props\.tone\} data-empty=\{props\.count === 0\}>/, 'Health Center summary metric tiles must expose listitem semantics');
+    // Convergence R4: the tile is the shared StatTile rendered as="li" —
+    // listitem semantics preserved through the primitive's `as` prop.
+    assert.match(settings, /<StatTile\s+as="li"\s+className="settingsHealthSummaryTile"/, 'Health Center summary metric tiles must expose listitem semantics via StatTile as="li"');
     assert.match(healthPage![0], /aria-label=\{`\$\{copy\.label\}健康信号`\}/, 'Health Center section aria labels should not mix English "signals" into Chinese UI');
     assert.match(healthPage![0], /<ul className="settingsHealthSignalList" aria-label=\{`\$\{copy\.label\}健康信号列表`\}>/, 'Health Center signal lists must expose product-scoped accessible names');
     assert.match(healthSignalRow![0], /来源：\{HEALTH_SOURCE_LABEL\[signal\.source\]\}/, 'Health Center row should present localized source labels');
