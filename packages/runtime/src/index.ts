@@ -217,20 +217,28 @@ export {
   createPermissionAwareSandboxContext,
   createSessionSandboxContextProvider,
   deriveFilesystemWorkerProfile,
+  buildSandboxDiagnosticsSnapshot,
   probeActiveSandboxCapabilities,
   sandboxContextForTool,
   createSeatbeltExecArgs,
   escapeSeatbeltRegex,
   sandboxErrorMetadata,
   serializeSandboxError,
+  toSandboxRunTraceProjection,
 } from './sandbox/index.js';
 export type {
   ActiveSandboxCapabilities,
   ActiveSandboxCapability,
+  BuildSandboxDiagnosticsSnapshotInput,
   BuildSeatbeltPolicyInput,
   BuildSeatbeltPolicyResult,
   CreateSeatbeltExecArgsInput,
   ProbeActiveSandboxCapabilitiesInput,
+  SandboxDiagnosticCapability,
+  SandboxDiagnosticFileSystemMode,
+  SandboxDiagnosticNetworkMode,
+  SandboxDiagnosticsSnapshot,
+  SandboxRunTraceProjection,
   SandboxCapabilityUnavailableReason,
 } from './sandbox/index.js';
 export type {
@@ -737,3 +745,8 @@ export {
 export type { ProjectGitInfo } from './system-prompt/project-context.js';
 export { buildSessionEnvironmentPromptFragment } from './system-prompt/session-environment-prompt.js';
 export type { SessionEnvironmentPromptInput } from './system-prompt/session-environment-prompt.js';
+export {
+  SANDBOX_AUTHORITY_PROMPT_FRAGMENT,
+  buildSandboxAuthorityPromptFragment,
+  renderSandboxTurnTailPrompt,
+} from './system-prompt/sandbox-authority-prompt.js';

@@ -14,6 +14,10 @@ export {
   sandboxErrorMetadata,
   serializeSandboxError,
 } from './errors.js';
+export {
+  buildSandboxDiagnosticsSnapshot,
+  toSandboxRunTraceProjection,
+} from './diagnostics.js';
 export type {
   CreatePermissionAwareSandboxContextInput,
   FilesystemWorkerProfileOperation,
@@ -36,6 +40,14 @@ export type {
   SandboxErrorStage,
   SandboxErrorWithMetadata,
 } from './errors.js';
+export type {
+  BuildSandboxDiagnosticsSnapshotInput,
+  SandboxDiagnosticCapability,
+  SandboxDiagnosticFileSystemMode,
+  SandboxDiagnosticNetworkMode,
+  SandboxDiagnosticsSnapshot,
+  SandboxRunTraceProjection,
+} from './diagnostics.js';
 export {
   MACOS_SEATBELT_BASE_POLICY,
   MACOS_SEATBELT_EXECUTABLE,
