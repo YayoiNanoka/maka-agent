@@ -146,11 +146,14 @@ export {
   buildStopBackgroundTaskTool,
   buildWriteStdinTool,
   shapeTerminalResult,
+  bashSandboxPermissionsSchema,
 } from './shell-tools.js';
 export type {
+  BashSandboxPermissionsDeclaration,
   BuildForegroundBashToolOptions,
   ForegroundBashExecuteInput,
   ForegroundBashResult,
+  ManagedBashPermissionArgs,
   ShellRunLauncher,
 } from './shell-tools.js';
 export {

@@ -325,6 +325,7 @@ describe('runtime additional permission planning', () => {
         cwd: fixture.workspace,
         mode: 'execute',
         command: `printf blocked > ${join(fixture.outside, 'file.txt')}`,
+        args: { command: `printf blocked > ${join(fixture.outside, 'file.txt')}` },
         context,
       }), { kind: 'not_required' });
 
@@ -342,6 +343,10 @@ describe('runtime additional permission planning', () => {
         cwd: fixture.workspace,
         mode: 'execute',
         command: `printf ok > ${join(fixture.outside, 'file.txt')}`,
+        args: {
+          command: `printf ok > ${join(fixture.outside, 'file.txt')}`,
+          sandbox_permissions: declaration,
+        },
         context,
       });
       assert.equal(plan.kind, 'request');

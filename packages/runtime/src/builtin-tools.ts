@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { tmpdir } from 'node:os';
 import { isAbsolute } from 'node:path';
 import {
+  applyAdditionalPermissionProfile,
   compilePermissionProfile,
   type PermissionProfile,
 } from '@maka/core';
@@ -17,10 +18,11 @@ import {
   buildManagedBashTool,
   buildStopBackgroundTaskTool,
   buildWriteStdinTool,
+  bashSandboxPermissionsSchema,
   shapeTerminalResult,
   withShellGuidance,
 } from './shell-tools.js';
-import type { ShellRunLauncher } from './shell-tools.js';
+import type { ManagedBashPermissionArgs, ShellRunLauncher } from './shell-tools.js';
 import { defaultShellPlan, type ShellPlan } from './shell-detect.js';
 import type {
   BackgroundTaskStopper,
@@ -43,6 +45,11 @@ import type { SandboxManager } from './sandbox/sandbox-manager.js';
 import { linuxExecutableRoots } from './sandbox/linux-sandbox.js';
 import type { SandboxPlatform } from './sandbox/types.js';
 import type { ChildFdInput } from './child-fd-input.js';
+import {
+  planDeclaredBashAdditionalPermission,
+  type AdditionalPermissionPlannerContext,
+  type AdditionalPermissionPlanResult,
+} from './additional-permissions.js';
 
 // Generous wall-clock cap for the ripgrep-backed Grep tool. A search should be
 // near-instant; this only bounds a pathological hang now that the stream
@@ -59,11 +66,16 @@ export interface BuildBuiltinToolsOptions {
   shell?: ShellPlan;
   permissionProfile?: PermissionProfile;
   sandboxManager?: SandboxManager;
+  /** Enable only when the host consumes additional-permission approval events. */
+  enableBashAdditionalPermissions?: boolean;
   /** Test/embedding override. Production callers use the current process platform. */
   sandboxPlatform?: SandboxPlatform;
 }
 
 export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaTool[] {
+  if (options.enableBashAdditionalPermissions && !options.sandboxManager) {
+    throw new Error('Bash additional permissions require a sandbox manager.');
+  }
   const executor = options.executor ?? createLocalWorkspaceExecutor();
   const executionFacts = executor.facts;
   const readDescription = options.runtimeResources
@@ -87,6 +99,17 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
     : fileReadParameters;
   const shell = options.shell ?? defaultShellPlan();
   const sandboxPlatform = options.sandboxPlatform ?? process.platform;
+  if (options.enableBashAdditionalPermissions && sandboxPlatform !== 'darwin') {
+    throw new Error('Bash additional permissions are currently supported only on macOS.');
+  }
+  const bashAdditionalPermissionPlanner = options.sandboxManager
+    && options.enableBashAdditionalPermissions
+    ? createBashAdditionalPermissionPlanner(
+        options.sandboxManager,
+        options.permissionProfile,
+        sandboxPlatform,
+      )
+    : undefined;
   const bashTools = options.shellRuns
     ? [buildManagedBashTool(options.shellRuns, {
         executionFacts,
@@ -106,10 +129,16 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
             ctx,
           ),
         } : {}),
+        ...(bashAdditionalPermissionPlanner
+          ? { planAdditionalPermissions: bashAdditionalPermissionPlanner }
+          : {}),
       })]
     : [buildExecutorBashTool(executor, shell, {
         ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
         ...(options.sandboxManager ? { sandboxManager: options.sandboxManager } : {}),
+        ...(bashAdditionalPermissionPlanner
+          ? { planAdditionalPermissions: bashAdditionalPermissionPlanner }
+          : {}),
         sandboxPlatform,
       })];
   const backgroundTools = [
@@ -313,7 +342,13 @@ interface ExecutorBashSandboxOptions {
   permissionProfile?: PermissionProfile;
   sandboxManager?: SandboxManager;
   sandboxPlatform: SandboxPlatform;
+  planAdditionalPermissions?: BashAdditionalPermissionPlanner;
 }
+
+type BashAdditionalPermissionPlanner = (
+  args: ManagedBashPermissionArgs,
+  context: AdditionalPermissionPlannerContext,
+) => Promise<AdditionalPermissionPlanResult> | AdditionalPermissionPlanResult;
 
 function buildExecutorBashTool(
   executor: WorkspaceExecutor,
@@ -324,13 +359,24 @@ function buildExecutorBashTool(
     name: 'Bash',
     activityKind: 'command',
     description: withShellGuidance('Run a shell command in the session cwd.', shell)
-      + ' Subject to permission policy.',
+      + ' Subject to permission policy.'
+      + (sandboxOptions.planAdditionalPermissions
+        ? ' One-call filesystem or network access can be requested with sandbox_permissions.'
+        : ''),
     parameters: z.object({
       command: z.string().describe('The shell command to execute'),
       timeout_ms: z.number().int().positive().max(600_000).optional(),
-    }),
+      ...(sandboxOptions.planAdditionalPermissions ? {
+        sandbox_permissions: bashSandboxPermissionsSchema
+          .describe('Optional one-call filesystem or network permission request.')
+          .optional(),
+      } : {}),
+    }).strict(),
     permissionRequired: true,
     executionFacts: executor.facts,
+    ...(sandboxOptions.planAdditionalPermissions
+      ? { planAdditionalPermissions: sandboxOptions.planAdditionalPermissions }
+      : {}),
     ...(sandboxOptions.sandboxManager ? {
       sandbox: sandboxAvailabilityResolver(
         sandboxOptions.sandboxManager,
@@ -411,11 +457,12 @@ function sandboxCommand(
   if (!manager.canEnforce({ profile: effective.profile, platform })) return undefined;
 
   const env = { ...process.env };
+  const additionalPermissions = ctx.permissionContext?.additionalGrant?.profile;
   const result = manager.transform({
     platform,
     command: {
       program: '/bin/sh',
-      args: ['-lc', command],
+      args: ['-c', command],
       cwd: ctx.cwd,
       env,
       profile: effective.profile,
@@ -431,6 +478,7 @@ function sandboxCommand(
         } : {}),
       },
     },
+    ...(additionalPermissions ? { additionalPermissions } : {}),
   });
   if (!result.ok) {
     throw new Error(result.message ?? `Sandbox transform failed: ${result.reason}`);
@@ -451,6 +499,52 @@ function effectivePermissionProfile(
   if (explicitProfile) return { profile: explicitProfile, workspaceRoots: [cwd] };
   const compiled = compilePermissionProfile({ mode: permissionMode, cwd });
   return { profile: compiled.profile, workspaceRoots: compiled.workspaceRoots };
+}
+
+function createBashAdditionalPermissionPlanner(
+  manager: SandboxManager,
+  explicitProfile: PermissionProfile | undefined,
+  platform: SandboxPlatform,
+): BashAdditionalPermissionPlanner {
+  return async (args, context) => {
+    const effective = effectivePermissionProfile(explicitProfile, context.mode, context.cwd);
+    const plan = await planDeclaredBashAdditionalPermission({
+      declaration: args.sandbox_permissions,
+      cwd: context.cwd,
+      mode: context.mode,
+      command: args.command,
+      args: context.args,
+      context: {
+        profile: effective.profile,
+        workspaceRoots: effective.workspaceRoots,
+        pathContext: {
+          tmpdir: tmpdir(),
+          slashTmp: '/tmp',
+        },
+      },
+    });
+    if (plan.kind !== 'request') return plan;
+    if (args.pty === true) {
+      return {
+        kind: 'block',
+        reason: 'invalid_additional_permissions',
+        message: 'Additional Bash permissions cannot be applied to PTY execution.',
+      };
+    }
+
+    const effectiveWithAdditional = applyAdditionalPermissionProfile(
+      effective.profile,
+      plan.proposal.profile,
+    );
+    if (!manager.canEnforce({ profile: effectiveWithAdditional, platform })) {
+      return {
+        kind: 'block',
+        reason: 'invalid_additional_permissions',
+        message: `Additional Bash permissions cannot be enforced on platform ${platform}.`,
+      };
+    }
+    return plan;
+  };
 }
 
 function isPtyBashArgs(args: unknown): boolean {

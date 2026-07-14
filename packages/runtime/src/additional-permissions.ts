@@ -367,6 +367,7 @@ export async function planDeclaredBashAdditionalPermission(input: {
   cwd: string;
   mode: PermissionMode;
   command: string;
+  args: unknown;
   context: AdditionalPermissionPlanningContext;
 }): Promise<AdditionalPermissionPlanResult> {
   if (input.declaration === undefined) return { kind: 'not_required' };
@@ -459,7 +460,7 @@ export async function planDeclaredBashAdditionalPermission(input: {
       normalizedPaths: requiredPaths,
       justification,
       toolName: 'Bash',
-      args: { command: input.command, sandbox_permissions: input.declaration },
+      args: input.args,
       workspaceRoots: input.context.workspaceRoots,
     }),
   };

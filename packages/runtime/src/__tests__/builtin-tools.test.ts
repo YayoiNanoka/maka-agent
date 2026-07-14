@@ -1,16 +1,21 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { zodSchema } from 'ai';
 import { z } from 'zod';
 import { SHELL_RUN_ID_MAX_CHARS } from '@maka/core';
-import { createWorkspaceWritePermissionProfile } from '@maka/core/permission-profile';
+import {
+  createWorkspaceWritePermissionProfile,
+  type PermissionProfile,
+} from '@maka/core/permission-profile';
 import { expect } from '../test-helpers.js';
 import { buildBuiltinTools } from '../builtin-tools.js';
+import { assertAdditionalPermissionProposal } from '../additional-permissions.js';
 import { SandboxManager } from '../sandbox/sandbox-manager.js';
 import { LinuxBubblewrapBackend } from '../sandbox/linux-sandbox.js';
+import { MacosSeatbeltBackend } from '../sandbox/macos-seatbelt.js';
 import type { ShellRunLauncher } from '../shell-tools.js';
 import {
   MAX_SHELL_RUN_RESOURCE_REF_CHARS,
@@ -115,6 +120,21 @@ describe('builtin Bash description declares the executing shell', () => {
 });
 
 describe('builtin Bash streaming output', () => {
+  test('requires a sandbox manager before enabling Bash additional permissions', () => {
+    assert.throws(
+      () => buildBuiltinTools({ enableBashAdditionalPermissions: true }),
+      /require a sandbox manager/,
+    );
+    assert.throws(
+      () => buildBuiltinTools({
+        sandboxManager: availableLinuxManager(),
+        sandboxPlatform: 'linux',
+        enableBashAdditionalPermissions: true,
+      }),
+      /supported only on macOS/,
+    );
+  });
+
   test('Bash schema exposes only explicit background execution', () => {
     const bash = buildBuiltinTools({ shellRuns: {
       runForegroundBash: () => Promise.reject(new Error('not used')),
@@ -129,6 +149,10 @@ describe('builtin Bash streaming output', () => {
     expect(parameters.safeParse({ command: 'sleep 60', yield_time_ms: 250 }).success).toBe(false);
     expect(parameters.safeParse({ command: 'sleep 60', timeout_ms: 600_001 }).success).toBe(false);
     expect(parameters.safeParse({ command: 'sleep 60', timeout_ms: 600_001, run_in_background: true }).success).toBe(true);
+    expect(parameters.safeParse({
+      command: 'sleep 60',
+      sandbox_permissions: { mode: 'use_default' },
+    }).success).toBe(false);
   });
 
   test('background-capable Bash stays foreground unless explicitly requested', async () => {
@@ -247,7 +271,7 @@ describe('builtin Bash streaming output', () => {
     });
 
     expect(calls[0]?.argv?.[0]).toBe('/usr/bin/bwrap');
-    expect(calls[0]?.argv?.slice(-3)).toEqual(['/bin/sh', '-lc', 'node --version']);
+    expect(calls[0]?.argv?.slice(-3)).toEqual(['/bin/sh', '-c', 'node --version']);
     expect(calls[0]?.fdInputs?.[0]?.fd).toBe(3);
     expect(typeof bash.sandbox).toBe('function');
     if (typeof bash.sandbox !== 'function') throw new Error('dynamic sandbox metadata missing');
@@ -333,6 +357,135 @@ describe('builtin Bash streaming output', () => {
       cwd: '/workspace',
       args: { command: 'echo host' },
     })).toEqual({ platformSandboxAvailable: false });
+  });
+
+  test('plans and applies one-call Bash permissions to the macOS sandbox argv', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-bash-additional-'));
+    try {
+      const workspace = join(root, 'workspace');
+      const outside = join(root, 'outside');
+      await Promise.all([mkdir(workspace), mkdir(outside)]);
+      const canonicalWorkspace = await realpath(workspace);
+      const target = join(await realpath(outside), 'allowed.txt');
+      const profile: PermissionProfile = {
+        type: 'managed',
+        name: 'custom',
+        fileSystem: {
+          kind: 'restricted',
+          entries: [{ kind: 'path', access: 'write', path: canonicalWorkspace }],
+        },
+        network: { kind: 'restricted' },
+      };
+      let execInput: WorkspaceExecInput | undefined;
+      const executor = fakeExecutor({
+        exec: async (input) => {
+          execInput = input;
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false, aborted: false };
+        },
+      });
+      const sandboxManager = new SandboxManager([new MacosSeatbeltBackend()]);
+      const disabledBash = buildBuiltinTools({
+        executor,
+        permissionProfile: profile,
+        sandboxManager,
+        sandboxPlatform: 'darwin',
+      }).find((candidate) => candidate.name === 'Bash');
+      assert.equal(disabledBash?.planAdditionalPermissions, undefined);
+      assert.equal((disabledBash?.parameters as z.ZodTypeAny).safeParse({
+        command: 'echo unchanged',
+        sandbox_permissions: { mode: 'use_default' },
+      }).success, false);
+
+      const bash = buildBuiltinTools({
+        executor,
+        permissionProfile: profile,
+        sandboxManager,
+        enableBashAdditionalPermissions: true,
+        sandboxPlatform: 'darwin',
+      }).find((candidate) => candidate.name === 'Bash');
+      if (!bash?.planAdditionalPermissions) throw new Error('Bash additional permission planner missing');
+
+      const args = {
+        command: `printf ok > ${JSON.stringify(target)}`,
+        sandbox_permissions: {
+          mode: 'with_additional_permissions' as const,
+          file_system: {
+            entries: [{ path: target, access: 'write' as const, scope: 'exact' as const }],
+          },
+          network: true as const,
+          justification: 'Write the selected output and notify a service.',
+        },
+      };
+      const parameters = bash.parameters as z.ZodTypeAny;
+      expect(parameters.safeParse(args).success).toBe(true);
+      expect(parameters.safeParse({
+        command: 'echo unsafe',
+        sandbox_permissions: { mode: 'require_escalated', justification: 'Not in this slice.' },
+      }).success).toBe(false);
+
+      const plannerContext = {
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        toolUseId: 'tool-1',
+        toolName: 'Bash',
+        category: 'shell_unsafe' as const,
+        cwd: canonicalWorkspace,
+        mode: 'execute' as const,
+        args,
+      };
+      const plan = await bash.planAdditionalPermissions(args, plannerContext);
+      assert.equal(plan.kind, 'request');
+      if (plan.kind !== 'request') throw new Error('Additional permission request missing');
+      assert.doesNotThrow(() => assertAdditionalPermissionProposal({
+        proposal: plan.proposal,
+        toolName: 'Bash',
+        args,
+      }));
+
+      await bash.impl(args, {
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        toolCallId: 'tool-1',
+        cwd: canonicalWorkspace,
+        permissionMode: 'execute',
+        abortSignal: new AbortController().signal,
+        emitOutput: () => {},
+        permissionContext: {
+          additionalGrant: {
+            grantId: 'grant-1',
+            sessionId: 'session-1',
+            turnId: 'turn-1',
+            toolUseId: 'tool-1',
+            toolName: 'Bash',
+            intentHash: plan.proposal.intentHash,
+            permissionsHash: plan.proposal.permissionsHash,
+            profile: plan.proposal.profile,
+            normalizedPaths: plan.proposal.normalizedPaths,
+            risk: plan.proposal.risk,
+            issuedAt: 1,
+            expiresAt: 2,
+          },
+        },
+      });
+
+      const argv = execInput?.argv;
+      assert.ok(argv);
+      assert.equal(argv[0], '/usr/bin/sandbox-exec');
+      assert.deepEqual(argv.slice(-3), ['/bin/sh', '-c', args.command]);
+      const policy = argv.find((value) => value.includes('(version 1)')) ?? '';
+      assert.match(policy, /\(literal \(param "WRITABLE_ROOT_1"\)\)/);
+      assert.match(policy, /\(allow network\*\)/);
+      assert.equal(profile.network.kind, 'restricted');
+
+      const ptyPlan = await bash.planAdditionalPermissions(
+        { ...args, run_in_background: true, pty: true },
+        { ...plannerContext, args: { ...args, run_in_background: true, pty: true } },
+      );
+      assert.equal(ptyPlan.kind, 'block');
+      if (ptyPlan.kind === 'block') assert.match(ptyPlan.message, /PTY/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test('Read treats runtime background task refs as whole resources', async () => {

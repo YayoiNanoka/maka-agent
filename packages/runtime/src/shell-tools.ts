@@ -2,7 +2,13 @@ import { z } from 'zod';
 import { redactSecrets } from '@maka/core/redaction';
 import type { ToolResultContent } from '@maka/core/events';
 import type { ToolExecutionFacts } from '@maka/core/permission';
+import { MAX_ADDITIONAL_FILESYSTEM_ENTRIES } from '@maka/core/additional-permissions';
 import type { MakaTool, MakaToolContext } from './tool-runtime.js';
+import {
+  MAX_ADDITIONAL_PERMISSION_JUSTIFICATION_CHARS,
+  type AdditionalPermissionPlannerContext,
+  type AdditionalPermissionPlanResult,
+} from './additional-permissions.js';
 import { runShellWithBoundedTail, type BoundedShellResult } from './shell-exec.js';
 import { bashToolShellGuidance, defaultShellPlan, type ShellPlan } from './shell-detect.js';
 import { truncateToolOutput } from './tool-output.js';
@@ -61,6 +67,34 @@ type ShellRunToolResult = Extract<ToolResultContent, { kind: 'shell_run' }>;
 export interface ShellRunLauncher {
   runForegroundBash(input: ShellRunBashInput): Promise<TerminalToolResult>;
   runBackgroundBash(input: ShellRunBashInput): Promise<ShellRunToolResult>;
+}
+
+const additionalFilesystemEntrySchema = z.object({
+  path: z.string(),
+  access: z.enum(['read', 'write']),
+  scope: z.enum(['exact', 'subtree']),
+}).strict();
+
+export const bashSandboxPermissionsSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('use_default') }).strict(),
+  z.object({
+    mode: z.literal('with_additional_permissions'),
+    file_system: z.object({
+      entries: z.array(additionalFilesystemEntrySchema).max(MAX_ADDITIONAL_FILESYSTEM_ENTRIES),
+    }).strict().optional(),
+    network: z.literal(true).optional(),
+    justification: z.string().min(1).max(MAX_ADDITIONAL_PERMISSION_JUSTIFICATION_CHARS),
+  }).strict(),
+]);
+
+export type BashSandboxPermissionsDeclaration = z.infer<typeof bashSandboxPermissionsSchema>;
+
+export interface ManagedBashPermissionArgs {
+  command: string;
+  timeout_ms?: number;
+  run_in_background?: boolean;
+  pty?: boolean;
+  sandbox_permissions?: BashSandboxPermissionsDeclaration;
 }
 
 export function buildForegroundBashTool(options: BuildForegroundBashToolOptions): MakaTool {
@@ -127,9 +161,16 @@ export function buildManagedBashTool(
       env?: NodeJS.ProcessEnv;
       fdInputs?: readonly ChildFdInput[];
     } | undefined;
+    planAdditionalPermissions?: (
+      args: ManagedBashPermissionArgs,
+      context: AdditionalPermissionPlannerContext,
+    ) => Promise<AdditionalPermissionPlanResult> | AdditionalPermissionPlanResult;
   } = {},
 ): MakaTool {
   const shell = options.shell ?? defaultShellPlan();
+  const additionalPermissionDescription = options.planAdditionalPermissions
+    ? ' One-call filesystem or network access can be requested with sandbox_permissions.'
+    : '';
   return {
     name: 'Bash',
     activityKind: 'command',
@@ -137,12 +178,18 @@ export function buildManagedBashTool(
       withShellGuidance('Run a shell command in the session cwd.', shell)
       + ` Foreground is the default (timeout ${DEFAULT_BASH_TIMEOUT_MS}ms, maximum ${MAX_FOREGROUND_BASH_TIMEOUT_MS}ms).`
       + ` Set run_in_background=true only when the command should continue as a tracked runtime background task; background commands have no default timeout (maximum explicit timeout ${MAX_SHELL_RUN_TIMEOUT_MS}ms).`
-      + ' Set pty=true together with run_in_background=true only for terminal semantics or later input; use the returned ref with Read or WriteStdin. Subject to permission policy.',
+      + ' Set pty=true together with run_in_background=true only for terminal semantics or later input; use the returned ref with Read or WriteStdin. Subject to permission policy.'
+      + additionalPermissionDescription,
     parameters: z.object({
       command: z.string().describe('The shell command to execute'),
       timeout_ms: z.number().int().positive().max(MAX_SHELL_RUN_TIMEOUT_MS).optional(),
       run_in_background: z.boolean().optional(),
       pty: z.boolean().optional(),
+      ...(options.planAdditionalPermissions ? {
+        sandbox_permissions: bashSandboxPermissionsSchema
+          .describe('Optional one-call filesystem or network permission request.')
+          .optional(),
+      } : {}),
     }).strict().superRefine(({ timeout_ms, run_in_background, pty }, ctx) => {
       if (!run_in_background && timeout_ms !== undefined && timeout_ms > MAX_FOREGROUND_BASH_TIMEOUT_MS) {
         ctx.addIssue({
@@ -165,6 +212,9 @@ export function buildManagedBashTool(
     permissionRequired: true,
     ...(options.executionFacts ? { executionFacts: options.executionFacts } : {}),
     ...(options.sandbox ? { sandbox: options.sandbox } : {}),
+    ...(options.planAdditionalPermissions
+      ? { planAdditionalPermissions: options.planAdditionalPermissions }
+      : {}),
     impl: async ({ command, timeout_ms, run_in_background, pty }, ctx) => {
       const transformed = options.transformCommand?.({ command, pty: pty === true, ctx });
       return shellRuns[run_in_background ? 'runBackgroundBash' : 'runForegroundBash']({
