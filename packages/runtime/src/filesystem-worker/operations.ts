@@ -110,6 +110,39 @@ export async function executeFilesystemOperation(
         endLine: edited.endLine,
       };
     }
+    case 'format_json': {
+      const path = await resolveExistingAllowed(operation.cwd, operation.path, 'FormatJson', 'write', operationPermission);
+      const original = await fs.readFile(path, 'utf8');
+      const bytesBefore = Buffer.byteLength(original, 'utf8');
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(original);
+      } catch (error) {
+        return {
+          kind: 'format_json',
+          ok: false,
+          valid: false,
+          path,
+          error: `FormatJson: invalid JSON: ${error instanceof Error ? error.message : 'parse failed'}`,
+          bytesBefore,
+          byteDelta: 0,
+          changed: false,
+        };
+      }
+      const formatted = JSON.stringify(operation.sortKeys ? sortKeysDeep(parsed) : parsed, null, 2);
+      await fs.writeFile(path, formatted, 'utf8');
+      const bytesAfter = Buffer.byteLength(formatted, 'utf8');
+      return {
+        kind: 'format_json',
+        ok: true,
+        valid: true,
+        path,
+        bytesBefore,
+        bytesAfter,
+        byteDelta: bytesAfter - bytesBefore,
+        changed: formatted !== original,
+      };
+    }
     case 'glob': {
       assertContainedGlobPattern(operation.pattern);
       const path = await resolveExistingAllowed(operation.cwd, operation.path, 'Glob cwd', 'read', operationPermission);
@@ -149,6 +182,18 @@ class FilesystemOperationError extends Error {
 
 function operationError(code: FilesystemWorkerErrorCode, message: string): FilesystemOperationError {
   return new FilesystemOperationError(code, message);
+}
+
+function sortKeysDeep(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeysDeep);
+  if (value !== null && typeof value === 'object' && !(value instanceof Date)) {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, sortKeysDeep((value as Record<string, unknown>)[key])]),
+    );
+  }
+  return value;
 }
 
 function normalizeOperationError(error: unknown): FilesystemOperationError {

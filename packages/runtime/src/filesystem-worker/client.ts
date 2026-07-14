@@ -252,7 +252,9 @@ function deriveWorkerProfile(
   operation: FilesystemWorkerOperation['kind'],
 ): PermissionProfile {
   if (profile.type !== 'managed' || profile.fileSystem.kind !== 'restricted') return profile;
-  if (operation === 'write' || operation === 'edit') return { ...profile, network: { kind: 'restricted' } };
+  if (operation === 'write' || operation === 'edit' || operation === 'format_json') {
+    return { ...profile, network: { kind: 'restricted' } };
+  }
   return {
     ...profile,
     name: 'read-only',
@@ -267,7 +269,7 @@ function deriveWorkerProfile(
 }
 
 function operationAccess(kind: FilesystemWorkerOperation['kind']): 'read' | 'write' {
-  return kind === 'write' || kind === 'edit' ? 'write' : 'read';
+  return kind === 'write' || kind === 'edit' || kind === 'format_json' ? 'write' : 'read';
 }
 
 function operationScope(kind: FilesystemWorkerOperation['kind']): 'exact' | 'subtree' {
