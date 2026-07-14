@@ -54,6 +54,8 @@ export interface FilesystemWorkerExecuteInput {
   operation: FilesystemWorkerClientOperation;
   cwd: string;
   mode: PermissionMode;
+  /** Explicit embedding policy. Mode-based defaults are compiled only when omitted. */
+  permissionProfile?: PermissionProfile;
   abortSignal?: AbortSignal;
   additionalGrant?: AdditionalPermissionGrant;
 }
@@ -132,16 +134,20 @@ export class FilesystemWorkerClient {
     if (!parsedOperation.success) throw clientError('invalid_operation', 'validation', requestId);
 
     const access = operationAccess(parsedOperation.data.kind);
-    const scope = operationScope(parsedOperation.data.kind);
     const target = await normalizeAdditionalPermissionPath({
       path: parsedOperation.data.path,
       access,
-      scope,
+      scope: operationScope(parsedOperation.data.kind),
       cwd: canonicalCwd,
     }).catch(() => {
       throw clientError('invalid_operation', 'validation', requestId);
     });
-    const compiled = compilePermissionProfile({ mode: input.mode, cwd: canonicalCwd });
+    const compiled = input.permissionProfile
+      ? {
+          profile: input.permissionProfile,
+          workspaceRoots: [canonicalCwd],
+        }
+      : compilePermissionProfile({ mode: input.mode, cwd: canonicalCwd });
     const effectiveProfile = input.additionalGrant
       ? applyAdditionalPermissionProfile(compiled.profile, input.additionalGrant.profile)
       : compiled.profile;
@@ -157,7 +163,7 @@ export class FilesystemWorkerClient {
 
     const operationPermission = {
       fileSystem: {
-        entries: [{ path: target.enforcementPath, access, scope }],
+        entries: [{ path: target.enforcementPath, access, scope: target.scope }],
       },
     } as const;
     const operation = FilesystemWorkerOperationSchema.parse({
@@ -173,7 +179,7 @@ export class FilesystemWorkerClient {
       expectedTarget: {
         enforcementPath: target.enforcementPath,
         access,
-        scope,
+        scope: target.scope,
         targetType: target.targetType,
       },
     } as const;
@@ -272,8 +278,9 @@ function operationAccess(kind: FilesystemWorkerOperation['kind']): 'read' | 'wri
   return kind === 'write' || kind === 'edit' || kind === 'format_json' ? 'write' : 'read';
 }
 
-function operationScope(kind: FilesystemWorkerOperation['kind']): 'exact' | 'subtree' {
-  return kind === 'glob' || kind === 'grep' ? 'subtree' : 'exact';
+function operationScope(kind: FilesystemWorkerOperation['kind']): 'exact' | 'subtree' | 'auto' {
+  if (kind === 'glob') return 'subtree';
+  return kind === 'grep' ? 'auto' : 'exact';
 }
 
 async function canonicalPath(path: string): Promise<string> {

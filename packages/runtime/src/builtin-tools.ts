@@ -8,7 +8,7 @@
 import { z } from 'zod';
 import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute } from 'node:path';
 import {
   applyAdditionalPermissionProfile,
   compilePermissionProfile,
@@ -47,6 +47,7 @@ import { linuxExecutableRoots } from './sandbox/linux-sandbox.js';
 import type { SandboxPlatform } from './sandbox/types.js';
 import type { ChildFdInput } from './child-fd-input.js';
 import {
+  normalizeAdditionalPermissionPath,
   planDeclaredBashAdditionalPermission,
   planFileToolAdditionalPermission,
   type AdditionalPermissionPlannerContext,
@@ -196,6 +197,7 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
           throw new Error('Runtime resources must be read with the ref parameter, not path');
         }
         if (options.filesystemWorker) {
+          const canonicalCwd = canonicalExistingPath(cwd);
           const result = await options.filesystemWorker.execute({
             operation: {
               kind: 'read',
@@ -203,8 +205,9 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
               ...(offset !== undefined ? { offset } : {}),
               ...(limit !== undefined ? { limit } : {}),
             },
-            cwd,
+            cwd: canonicalCwd,
             mode: ctx.permissionMode ?? 'ask',
+            ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
             ...(ctx.permissionContext?.additionalGrant
               ? { additionalGrant: ctx.permissionContext.additionalGrant }
               : {}),
@@ -234,15 +237,17 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
       } : {}),
       impl: async ({ path, content }, ctx) => {
         const { cwd } = ctx;
+        const canonicalCwd = options.filesystemWorker ? canonicalExistingPath(cwd) : cwd;
         const key = options.filesystemWorker
-          ? fileToolWriteLockKey(cwd, path, ctx)
+          ? await fileToolWriteLockKey(canonicalCwd, path)
           : (await executor.writeLockKey({ cwd, path })).key;
         return await withFileWriteLock(key, async () => {
           if (options.filesystemWorker) {
             const result = await options.filesystemWorker.execute({
               operation: { kind: 'write', path, content },
-              cwd,
+              cwd: canonicalCwd,
               mode: ctx.permissionMode ?? 'ask',
+              ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
               ...(ctx.permissionContext?.additionalGrant
                 ? { additionalGrant: ctx.permissionContext.additionalGrant }
                 : {}),
@@ -277,8 +282,9 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
       } : {}),
       impl: async ({ path, old_string, new_string }, ctx) => {
         const { cwd } = ctx;
+        const canonicalCwd = options.filesystemWorker ? canonicalExistingPath(cwd) : cwd;
         const key = options.filesystemWorker
-          ? fileToolWriteLockKey(cwd, path, ctx)
+          ? await fileToolWriteLockKey(canonicalCwd, path)
           : (await executor.writeLockKey({ cwd, path })).key;
         return await withFileWriteLock(key, async () => {
           if (options.filesystemWorker) {
@@ -289,8 +295,9 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
                 oldString: old_string,
                 newString: new_string,
               },
-              cwd,
+              cwd: canonicalCwd,
               mode: ctx.permissionMode ?? 'ask',
+              ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
               ...(ctx.permissionContext?.additionalGrant
                 ? { additionalGrant: ctx.permissionContext.additionalGrant }
                 : {}),
@@ -343,15 +350,17 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
       } : {}),
       impl: async ({ path, sort_keys }, ctx) => {
         const { cwd } = ctx;
+        const canonicalCwd = options.filesystemWorker ? canonicalExistingPath(cwd) : cwd;
         const key = options.filesystemWorker
-          ? fileToolWriteLockKey(cwd, path, ctx)
+          ? await fileToolWriteLockKey(canonicalCwd, path)
           : (await executor.writeLockKey({ cwd, path })).key;
         return await withFileWriteLock(key, async () => {
           if (options.filesystemWorker) {
             const result = await options.filesystemWorker.execute({
               operation: { kind: 'format_json', path, sortKeys: sort_keys ?? false },
-              cwd,
+              cwd: canonicalCwd,
               mode: ctx.permissionMode ?? 'ask',
+              ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
               ...(ctx.permissionContext?.additionalGrant
                 ? { additionalGrant: ctx.permissionContext.additionalGrant }
                 : {}),
@@ -412,10 +421,12 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
         const { cwd } = ctx;
         assertRelativeGlobPattern(pattern);
         if (options.filesystemWorker) {
+          const canonicalCwd = canonicalExistingPath(cwd);
           const result = await options.filesystemWorker.execute({
             operation: { kind: 'glob', path: relCwd ?? '.', pattern, limit: 200 },
-            cwd,
+            cwd: canonicalCwd,
             mode: ctx.permissionMode ?? 'ask',
+            ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
             ...(ctx.permissionContext?.additionalGrant
               ? { additionalGrant: ctx.permissionContext.additionalGrant }
               : {}),
@@ -449,6 +460,7 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
       impl: async ({ pattern, path, glob }, ctx) => {
         const { cwd, abortSignal } = ctx;
         if (options.filesystemWorker) {
+          const canonicalCwd = canonicalExistingPath(cwd);
           const result = await options.filesystemWorker.execute({
             operation: {
               kind: 'grep',
@@ -459,8 +471,9 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
               limit: 200,
               timeoutMs: GREP_TIMEOUT_MS,
             },
-            cwd,
+            cwd: canonicalCwd,
             mode: ctx.permissionMode ?? 'ask',
+            ...(options.permissionProfile ? { permissionProfile: options.permissionProfile } : {}),
             ...(ctx.permissionContext?.additionalGrant
               ? { additionalGrant: ctx.permissionContext.additionalGrant }
               : {}),
@@ -671,8 +684,9 @@ function effectivePermissionProfile(
   permissionMode: NonNullable<MakaToolContext['permissionMode']>,
   cwd: string,
 ): { profile: PermissionProfile; workspaceRoots: readonly string[] } {
-  if (explicitProfile) return { profile: explicitProfile, workspaceRoots: [cwd] };
-  const compiled = compilePermissionProfile({ mode: permissionMode, cwd });
+  const canonicalCwd = canonicalExistingPath(cwd);
+  if (explicitProfile) return { profile: explicitProfile, workspaceRoots: [canonicalCwd] };
+  const compiled = compilePermissionProfile({ mode: permissionMode, cwd: canonicalCwd });
   return { profile: compiled.profile, workspaceRoots: compiled.workspaceRoots };
 }
 
@@ -693,8 +707,8 @@ function createBashAdditionalPermissionPlanner(
         profile: effective.profile,
         workspaceRoots: effective.workspaceRoots,
         pathContext: {
-          tmpdir: tmpdir(),
-          slashTmp: '/tmp',
+          tmpdir: canonicalExistingPath(tmpdir()),
+          slashTmp: canonicalExistingPath('/tmp'),
         },
       },
     });
@@ -745,22 +759,22 @@ function createFileToolAdditionalPermissionPlanner(
         profile: effective.profile,
         workspaceRoots: effective.workspaceRoots,
         pathContext: {
-          tmpdir: tmpdir(),
-          slashTmp: '/tmp',
+          tmpdir: canonicalExistingPath(tmpdir()),
+          slashTmp: canonicalExistingPath('/tmp'),
         },
       },
     });
   };
 }
 
-function fileToolWriteLockKey(cwd: string, path: string, ctx: MakaToolContext): string {
-  const lexicalPath = resolve(cwd, path);
-  for (const approved of ctx.permissionContext?.additionalGrant?.normalizedPaths ?? []) {
-    if (approved.scope === 'exact' && approved.displayPath === lexicalPath) {
-      return approved.enforcementPath;
-    }
-  }
-  return lexicalPath;
+async function fileToolWriteLockKey(cwd: string, path: string): Promise<string> {
+  const target = await normalizeAdditionalPermissionPath({
+    path,
+    access: 'write',
+    scope: 'exact',
+    cwd,
+  });
+  return target.enforcementPath;
 }
 
 function isPtyBashArgs(args: unknown): boolean {
