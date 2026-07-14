@@ -17,6 +17,39 @@ import {
 } from '../additional-permissions.js';
 import { PermissionEngine } from '../permission-engine.js';
 
+async function createPlanningFixture(prefix: string): Promise<{
+  root: string;
+  workspace: string;
+  allowedTmp: string;
+  outside: string;
+}> {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  const workspace = join(root, 'workspace');
+  const allowedTmp = join(root, 'allowed-tmp');
+  const outside = join(root, 'outside');
+  await Promise.all([mkdir(workspace), mkdir(allowedTmp), mkdir(outside)]);
+  return {
+    root,
+    workspace: await realpath(workspace),
+    allowedTmp: await realpath(allowedTmp),
+    outside: await realpath(outside),
+  };
+}
+
+function workspaceWritePlanningContext(fixture: {
+  workspace: string;
+  allowedTmp: string;
+}) {
+  return {
+    profile: createWorkspaceWritePermissionProfile(),
+    workspaceRoots: [fixture.workspace],
+    pathContext: {
+      tmpdir: fixture.allowedTmp,
+      slashTmp: fixture.allowedTmp,
+    },
+  };
+}
+
 describe('runtime additional permission path normalization', () => {
   test('freezes the proposal and all authorization-bearing nested values', () => {
     const proposal = buildAdditionalPermissionProposal({
@@ -149,20 +182,19 @@ describe('runtime additional permission path normalization', () => {
   });
 
   test('plans only permissions missing from the base profile', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'maka-additional-plan-'));
-    const outside = await mkdtemp(join(tmpdir(), 'maka-additional-outside-'));
+    const fixture = await createPlanningFixture('maka-additional-plan-');
     try {
-      const canonicalRoot = await realpath(root);
-      const canonicalOutside = await realpath(outside);
-      const context = {
-        profile: createWorkspaceWritePermissionProfile(),
-        workspaceRoots: [canonicalRoot],
-      };
+      const context = workspaceWritePlanningContext(fixture);
       assert.deepEqual(await planFileToolAdditionalPermission({
-        toolName: 'Write', path: 'inside.txt', cwd: canonicalRoot, mode: 'execute', args: {}, context,
+        toolName: 'Write', path: 'inside.txt', cwd: fixture.workspace, mode: 'execute', args: {}, context,
+      }), { kind: 'not_required' });
+      assert.deepEqual(await planFileToolAdditionalPermission({
+        toolName: 'Write', path: join(fixture.allowedTmp, 'temp.txt'), cwd: fixture.workspace,
+        mode: 'execute', args: {}, context,
       }), { kind: 'not_required' });
       const outsidePlan = await planFileToolAdditionalPermission({
-        toolName: 'Write', path: join(canonicalOutside, 'outside.txt'), cwd: canonicalRoot, mode: 'execute', args: {}, context,
+        toolName: 'Write', path: join(fixture.outside, 'outside.txt'), cwd: fixture.workspace,
+        mode: 'execute', args: {}, context,
       });
       assert.equal(outsidePlan.kind, 'request');
       if (outsidePlan.kind === 'request') {
@@ -170,37 +202,30 @@ describe('runtime additional permission path normalization', () => {
         assert.equal(outsidePlan.proposal.profile.fileSystem?.entries[0]?.scope, 'exact');
       }
       const explorePlan = await planFileToolAdditionalPermission({
-        toolName: 'Read', path: canonicalOutside, cwd: canonicalRoot, mode: 'explore', args: {}, context,
+        toolName: 'Read', path: fixture.outside, cwd: fixture.workspace, mode: 'explore', args: {}, context,
       });
       assert.equal(explorePlan.kind, 'block');
     } finally {
-      await rm(root, { recursive: true, force: true });
-      await rm(outside, { recursive: true, force: true });
+      await rm(fixture.root, { recursive: true, force: true });
     }
   });
 
   test('maps every file tool to its minimal access and scope', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'maka-additional-tools-'));
-    const outside = await mkdtemp(join(tmpdir(), 'maka-additional-tool-targets-'));
+    const fixture = await createPlanningFixture('maka-additional-tools-');
     try {
-      const canonicalRoot = await realpath(root);
-      const canonicalOutside = await realpath(outside);
-      const file = join(canonicalOutside, 'file.txt');
+      const file = join(fixture.outside, 'file.txt');
       await writeFile(file, 'content');
-      const context = {
-        profile: createWorkspaceWritePermissionProfile(),
-        workspaceRoots: [canonicalRoot],
-      };
+      const context = workspaceWritePlanningContext(fixture);
       const cases = [
         ['Read', file, 'read', 'exact'],
-        ['Write', join(canonicalOutside, 'new.txt'), 'write', 'exact'],
+        ['Write', join(fixture.outside, 'new.txt'), 'write', 'exact'],
         ['Edit', file, 'write', 'exact'],
-        ['Glob', canonicalOutside, 'read', 'subtree'],
-        ['Grep', canonicalOutside, 'read', 'subtree'],
+        ['Glob', fixture.outside, 'read', 'subtree'],
+        ['Grep', fixture.outside, 'read', 'subtree'],
       ] as const;
       for (const [toolName, path, access, scope] of cases) {
         const plan = await planFileToolAdditionalPermission({
-          toolName, path, cwd: canonicalRoot, mode: 'execute', args: { path }, context,
+          toolName, path, cwd: fixture.workspace, mode: 'execute', args: { path }, context,
         });
         assert.equal(plan.kind, 'request');
         if (plan.kind === 'request') {
@@ -208,8 +233,7 @@ describe('runtime additional permission path normalization', () => {
         }
       }
     } finally {
-      await rm(root, { recursive: true, force: true });
-      await rm(outside, { recursive: true, force: true });
+      await rm(fixture.root, { recursive: true, force: true });
     }
   });
 
