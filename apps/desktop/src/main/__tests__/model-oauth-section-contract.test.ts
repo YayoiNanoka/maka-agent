@@ -197,13 +197,13 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     );
     assert.match(
       detail,
-      /\{hasApiKeyChange && \([\s\S]*disabled=\{detailActionBusy\} onClick=\{save\}[\s\S]*\{busy \? '保存中…' : '更新密钥'\}/,
-      'ConnectionDetail key save button must appear only when the key draft is dirty',
+      /<Button type="button" disabled=\{detailActionBusy \|\| !hasApiKeyChange\} onClick=\{save\}>[\s\S]*\{busy \? '保存中…' : '更新密钥'\}/,
+      'ConnectionDetail key save button stays present but disabled until the key draft is dirty (constant dialog height)',
     );
     assert.match(
       detail,
-      /\{hasBaseUrlChange && \([\s\S]*className="providerEndpointActions"[\s\S]*disabled=\{detailActionBusy\} onClick=\{save\}[\s\S]*\{busy \? '保存中…' : '保存服务地址'\}/,
-      'ConnectionDetail endpoint save button must remain available to providers without API keys',
+      /className="providerEndpointActions"[\s\S]*<Button type="button" disabled=\{detailActionBusy \|\| !hasBaseUrlChange\} onClick=\{save\}>[\s\S]*\{busy \? '保存中…' : '保存服务地址'\}/,
+      'ConnectionDetail endpoint save button stays present but disabled until the endpoint draft is dirty',
     );
     assert.match(
       detail,
@@ -392,15 +392,23 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     assert.match(src, /自定义 OpenAI 兼容接口/);
     assert.match(src, /添加模型供应商：\$\{display\.name\}/);
     assert.match(src, /智谱 · OpenAI 兼容/);
+    // Provider introduction copy is localized zh / en in the display layer
+    // (PROVIDER_DISPLAY_COPY). The OpenAI OAuth account path must still name the
+    // account login, not a Codex subscription, in its Chinese copy.
     assert.match(
       src,
-      /case 'openai-codex':\s*return \{ name: 'OpenAI OAuth', description: 'ChatGPT \/ Codex 账号登录；登录后自动成为可用模型连接。' \}/,
+      /'openai-codex':\s*\{\s*zh:\s*\{ name: 'OpenAI OAuth', description: 'ChatGPT \/ Codex 账号登录；登录后自动成为可用模型连接。' \}/,
       'OpenAI OAuth account path should not be presented as a Codex subscription in provider settings',
     );
+    // Both locales ship explicit copy for the custom provider, so the Chinese
+    // UI never falls through to the raw English registry fallback
+    // ("Custom OpenAI-compatible endpoint or gateway.").
+    assert.match(src, /zh: \{ name: '自定义 OpenAI 兼容接口'/);
+    assert.match(src, /en: \{ name: 'Custom OpenAI-compatible'/);
     assert.doesNotMatch(
       src,
-      /OpenAI-compatible|endpoint/,
-      'model provider settings visible copy must not mix English technical fallback such as OpenAI-compatible endpoint',
+      /OpenAI-compatible endpoint or gateway/,
+      'localized display copy must not leak the raw English registry fallback into UI',
     );
   });
 
@@ -426,15 +434,18 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     assert.match(detail, /<Label[^>]*>服务地址<\/Label>/);
     assert.match(detail, /props\.fixedOAuth && <FieldDescription>OAuth 固定<\/FieldDescription>/);
     assert.match(detail, /<Label[^>]*>模型密钥<\/Label>/);
-    assert.match(detail, /hasSecret === true && <FieldDescription>已设置，粘贴新值可替换<\/FieldDescription>/);
+    // The credential hint is a single persistent line (constant dialog height);
+    // its text still covers the "已设置，粘贴新值可替换" state.
+    assert.match(detail, /<FieldDescription>\{apiKeyStatusHint\}<\/FieldDescription>/);
+    assert.match(detail, /hasSecret === true\s*\?\s*'已设置，粘贴新值可替换'/);
     assert.match(detail, /placeholder=\{hasSecret === true \? '••••••••' : '粘贴模型密钥'\}/);
     assert.match(detail, /ariaLabel=\{`\$\{display\.name\} 模型密钥`\}/);
     assert.match(detail, /获取模型密钥/);
     assert.match(detail, /模型密钥 \/ 服务地址 \/ 代理设置/);
 
     assert.match(enabledModels, /启用模型/);
-    assert.match(enabledModels, /仅这些模型会出现在模型选择器中/);
-    assert.match(enabledModels, /搜索并添加模型/);
+    assert.match(enabledModels, /勾选的模型会出现在模型选择器中/);
+    assert.match(enabledModels, /搜索模型/);
     assert.match(src, /网络错误，请检查服务地址或代理设置后重试。/);
     // Provider descriptions are version-agnostic (provider + access path,
     // never a model generation that goes stale).
@@ -645,7 +656,7 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     );
   });
 
-  it('does not render Save when an existing connection has no draft changes', async () => {
+  it('keeps each Save action beside its field, disabled until that field is dirty', async () => {
     const src = await readProviderSettingsCombinedSource();
     const detail = src.match(/function ConnectionDetail[\s\S]*?function GitHubCopilotReloginNotice/)?.[0] ?? '';
 
@@ -654,10 +665,20 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
       /const hasApiKeyChange = apiKey\.length > 0;[\s\S]*const hasBaseUrlChange = draftBaseUrl !== savedBaseUrl;/,
       'ConnectionDetail must compute dirty state separately for each field it writes',
     );
+    // The Save buttons stay mounted (disabled while the field is clean) so the
+    // dialog does not add or drop a row — and thus does not jitter in height —
+    // the moment the user starts typing a key or editing the endpoint.
     assert.match(
       detail,
-      /\{hasApiKeyChange && \([\s\S]*<Button type="button" disabled=\{detailActionBusy\} onClick=\{save\}>[\s\S]*\{hasBaseUrlChange && \([\s\S]*<Button type="button" disabled=\{detailActionBusy\} onClick=\{save\}>/,
-      'each Save action must stay beside its field and out of the default visual hierarchy until that field changes',
+      /<Button type="button" disabled=\{detailActionBusy \|\| !hasApiKeyChange\} onClick=\{save\}>[\s\S]*<Button type="button" disabled=\{detailActionBusy \|\| !hasBaseUrlChange\} onClick=\{save\}>/,
+      'each Save action stays beside its field and disabled (not unmounted) until that field changes',
+    );
+    // An OAuth-fixed endpoint is readOnly with no dirty path (no jitter risk),
+    // so it must not render a permanently-disabled 保存服务地址 button.
+    assert.match(
+      detail,
+      /\{!hasFixedOAuthBaseUrl && \(\s*<div className="providerEndpointActions">/,
+      'OAuth-fixed endpoints render no endpoint Save action instead of a forever-disabled one',
     );
   });
 
@@ -677,19 +698,32 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     );
   });
 
-  it('uses native list semantics for enabled and searchable models', async () => {
+  it('renders the full model catalog as one named checkbox list', async () => {
     const src = await readProviderSettingsCombinedSource();
     const enabledModels = src.match(/function EnabledModelManager[\s\S]*?function modelDisplayLabel/)?.[0] ?? '';
 
+    // One persistent list of every candidate model; enabled state is a checkbox
+    // reflecting `enabledModelIds`, not a separate search-only "add" surface.
     assert.match(
       enabledModels,
-      /<ul className="providerModelSearchResults" aria-label="可添加模型">/,
-      'search results must use a named native list',
+      /<ul\s+ref=\{modelListRef\}\s+className="providerModelChoiceList"\s+aria-label="模型列表"\s+onKeyDown=\{onModelListKeyDown\}\s*>/,
+      'the model catalog must use a single named native list with the roving-tabindex keyboard handler',
     );
     assert.match(
       enabledModels,
-      /<ul className="providerEnabledModelList" aria-label="已启用模型">/,
-      'enabled models must use a named native list',
+      /role="checkbox"\s+aria-checked=\{isEnabled\}/,
+      'each model row is a checkbox reflecting its enabled state',
+    );
+    // Roving tabindex: exactly one row is a Tab stop; the rest are -1.
+    assert.match(
+      enabledModels,
+      /tabIndex=\{row\.id === resolvedActiveRowId \? 0 : -1\}/,
+      'model rows must rove a single tabIndex=0 so the list is one Tab stop',
+    );
+    assert.match(
+      enabledModels,
+      /<OverlayScrollArea className="providerModelChoiceScroll">/,
+      'the list scrolls inside a fixed-height region so filtering never resizes the dialog',
     );
     assert.doesNotMatch(
       enabledModels,
@@ -707,7 +741,10 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
       detail,
       /async function updateEnabledModels\(nextIds: string\[\]\)[\s\S]*connectionEnabledModelIds\([\s\S]*props\.bridge\.update\(connection\.slug, \{ enabledModelIds: next \}\)[\s\S]*await props\.onChanged\(\)/,
     );
-    assert.match(enabledModels, /isDefault \? \([\s\S]*providerEnabledModelMeta">默认<[\s\S]*\) : \([\s\S]*aria-label=\{`移除/);
+    // The default model row is checked and locked (disabled), never toggled off,
+    // and there is no second Save action inside the editor.
+    assert.match(enabledModels, /disabled=\{props\.disabled \|\| isDefault\}/);
+    assert.match(enabledModels, /isDefault && \([\s\S]*providerEnabledModelMeta">默认</);
     assert.doesNotMatch(enabledModels, /保存/);
   });
 

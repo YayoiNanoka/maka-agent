@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import {
   PROVIDER_DEFAULTS,
   connectionEnabledModelIds,
@@ -10,7 +10,23 @@ import {
   type ProviderType,
 } from '@maka/core';
 import { providerAuthRequiresSecret, providerAuthSupportsApiKey } from '@maka/core/llm-connections';
-import { Button, FieldDescription, FieldRoot, Input, Label, RelativeTime, useMountedRef, useToast } from '@maka/ui';
+import {
+  Button,
+  FieldDescription,
+  FieldRoot,
+  Input,
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemMedia,
+  ItemTitle,
+  Label,
+  OverlayScrollArea,
+  RelativeTime,
+  useMountedRef,
+  useToast,
+} from '@maka/ui';
+import { Check } from '@maka/ui/icons';
 import { PasswordInput } from './password-input';
 import { buildCatalogModelChoices } from '../model-catalog-choices';
 import { providerDisplay } from './provider-display';
@@ -176,6 +192,17 @@ function ConnectionDetailInner(props: ConnectionDetailProps) {
   const draftBaseUrl = baseUrl;
   const hasApiKeyChange = apiKey.length > 0;
   const hasBaseUrlChange = draftBaseUrl !== savedBaseUrl;
+  // Persistent single-line credential hint. Rendered in every hasSecret state
+  // (including `false`) so the description row never adds or drops a line as the
+  // async secret probe resolves — the dialog height stays constant.
+  const apiKeyStatusHint =
+    hasSecret === true
+      ? '已设置，粘贴新值可替换'
+      : hasSecret === 'loading'
+        ? '正在读取状态'
+        : hasSecret === 'error'
+          ? '凭据状态未知'
+          : '尚未设置密钥';
   const detailActionBusy = busy || testing || fetchingModels || savingEnabledModels || settingDefault || deleting;
   const issue = connectionChipStatus(connection);
   const lastTestMessage = connectionLastTestMessageDisplay(connection.lastTestMessage);
@@ -489,9 +516,7 @@ function ConnectionDetailInner(props: ConnectionDetailProps) {
         <div className="providerCredentialTask">
           <FieldRoot className="grid gap-1.5">
             <Label className="text-xs text-foreground-secondary">模型密钥</Label>
-            {hasSecret === true && <FieldDescription>已设置，粘贴新值可替换</FieldDescription>}
-            {hasSecret === 'loading' && <FieldDescription>正在读取状态</FieldDescription>}
-            {hasSecret === 'error' && <FieldDescription>凭据状态未知</FieldDescription>}
+            <FieldDescription>{apiKeyStatusHint}</FieldDescription>
             <PasswordInput
               value={apiKey}
               onChange={setApiKey}
@@ -506,11 +531,12 @@ function ConnectionDetailInner(props: ConnectionDetailProps) {
                 获取模型密钥
               </a>
             )}
-            {hasApiKeyChange && (
-              <Button type="button" disabled={detailActionBusy} onClick={save}>
-                {busy ? '保存中…' : '更新密钥'}
-              </Button>
-            )}
+            {/* Persistent button (disabled until a new key is typed) so the
+                credential actions row keeps a fixed height — no jitter when the
+                user starts pasting a key. */}
+            <Button type="button" disabled={detailActionBusy || !hasApiKeyChange} onClick={save}>
+              {busy ? '保存中…' : '更新密钥'}
+            </Button>
           </div>
         </div>
       )}
@@ -583,9 +609,13 @@ function ConnectionDetailInner(props: ConnectionDetailProps) {
               disabled={detailActionBusy}
               onChange={setBaseUrl}
             />
-            {hasBaseUrlChange && (
+            {/* Persistent button (disabled until the endpoint is edited) so the
+                advanced settings body height stays constant while typing. An
+                OAuth-fixed endpoint is readOnly with no dirty path — no jitter
+                risk — so it renders no permanently-disabled Save at all. */}
+            {!hasFixedOAuthBaseUrl && (
               <div className="providerEndpointActions">
-                <Button type="button" disabled={detailActionBusy} onClick={save}>
+                <Button type="button" disabled={detailActionBusy || !hasBaseUrlChange} onClick={save}>
                   {busy ? '保存中…' : '保存服务地址'}
                 </Button>
               </div>
@@ -782,8 +812,14 @@ function modelListsEqual(left: ModelInfo[], right: ModelInfo[]): boolean {
 }
 
 /**
- * Compact allowlist editor. The complete provider catalog appears only after
- * the user searches; the persistent rows are the short enabled list.
+ * Enabled-model editor. The full candidate catalog (live-fetched merged with
+ * the static fallback, via buildCatalogModelChoices) is shown persistently
+ * inside a fixed-height scroll region; enabled models read as checked. Clicking
+ * a row toggles it through the shared `enabledModelIds` path, so a newly
+ * enabled model reaches the chat model picker with no side state. The default
+ * model stays checked and locked (`connectionEnabledModelIds` always keeps it
+ * enabled). Search filters the same list in place, so neither the provider's
+ * model count nor an active filter changes the dialog height.
  */
 function EnabledModelManager(props: {
   modelChoices: ModelCatalogEntry[];
@@ -793,83 +829,155 @@ function EnabledModelManager(props: {
   onChange(ids: string[]): void;
 }) {
   const [query, setQuery] = useState('');
+  // Roving tabindex (composite-widget keyboard pattern): the whole list is ONE
+  // Tab stop. Without this every row button is a Tab stop, and a large catalog
+  // (OpenRouter's fallback list is 260+ rows) walls off everything below the
+  // list for keyboard users. Only the active row has tabIndex=0; ArrowUp/Down
+  // + Home/End move activity (focus scrolls the row into view), Space/Enter
+  // toggle via the button's native activation.
+  const [activeRowId, setActiveRowId] = useState<string | null>(null);
+  const modelListRef = useRef<HTMLUListElement>(null);
   const enabled = useMemo(() => new Set(props.enabledModelIds), [props.enabledModelIds]);
-  const matches = useMemo(() => {
+  const rows = useMemo(() => {
+    const byId = new Map(props.modelChoices.map((model) => [model.id, model] as const));
+    const seen = new Set<string>();
+    const list: Array<{ id: string; label: string }> = [];
+    for (const model of props.modelChoices) {
+      if (!model.canUseAsChatDefault) continue;
+      seen.add(model.id);
+      list.push({ id: model.id, label: modelDisplayLabel(model) });
+    }
+    // Always surface an already-enabled model even if it is not a current
+    // chat-default candidate (a stale id, or a model dropped from the latest
+    // catalog), so the user can still toggle it off.
+    for (const id of props.enabledModelIds) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const model = byId.get(id);
+      list.push({ id, label: model ? modelDisplayLabel(model) : id });
+    }
+    return list;
+  }, [props.modelChoices, props.enabledModelIds]);
+
+  const visibleRows = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) return [];
-    return props.modelChoices
-      .filter((model) => {
-        if (enabled.has(model.id) || !model.canUseAsChatDefault) return false;
-        const label = modelDisplayLabel(model).toLowerCase();
-        return model.id.toLowerCase().includes(normalizedQuery) || label.includes(normalizedQuery);
-      })
-      .slice(0, 20);
-  }, [enabled, props.modelChoices, query]);
+    if (!normalizedQuery) return rows;
+    return rows.filter(
+      (row) => row.id.toLowerCase().includes(normalizedQuery) || row.label.toLowerCase().includes(normalizedQuery),
+    );
+  }, [rows, query]);
+
+  function toggle(id: string) {
+    if (props.disabled || id === props.defaultModel) return;
+    const next = enabled.has(id)
+      ? props.enabledModelIds.filter((candidate) => candidate !== id)
+      : [...props.enabledModelIds, id];
+    props.onChange(next);
+  }
+
+  // The default-model row is disabled (natively unfocusable), so arrow-key
+  // traversal skips it — consistent with Tab behavior.
+  const focusableRows = visibleRows.filter((row) => row.id !== props.defaultModel);
+  const resolvedActiveRowId = activeRowId !== null && focusableRows.some((row) => row.id === activeRowId)
+    ? activeRowId
+    : focusableRows[0]?.id ?? null;
+
+  function onModelListKeyDown(event: KeyboardEvent<HTMLUListElement>) {
+    if (focusableRows.length === 0) return;
+    const currentIndex = Math.max(0, focusableRows.findIndex((row) => row.id === resolvedActiveRowId));
+    let nextIndex: number;
+    switch (event.key) {
+      case 'ArrowDown':
+        nextIndex = Math.min(currentIndex + 1, focusableRows.length - 1);
+        break;
+      case 'ArrowUp':
+        nextIndex = Math.max(currentIndex - 1, 0);
+        break;
+      case 'Home':
+        nextIndex = 0;
+        break;
+      case 'End':
+        nextIndex = focusableRows.length - 1;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    const next = focusableRows[nextIndex];
+    setActiveRowId(next.id);
+    // Focus scrolls the row into view inside the fixed-height scroll region.
+    modelListRef.current
+      ?.querySelector<HTMLElement>(`[data-model-id="${CSS.escape(next.id)}"]`)
+      ?.focus();
+  }
 
   return (
     <section className="providerEnabledModels" aria-labelledby="provider-enabled-models-title">
       <div className="providerEnabledModelsHeader">
         <strong id="provider-enabled-models-title">启用模型 {props.enabledModelIds.length}</strong>
-        <span>仅这些模型会出现在模型选择器中。</span>
+        <span>勾选的模型会出现在模型选择器中。</span>
       </div>
       <Input
         type="search"
         value={query}
         onChange={(event) => setQuery(event.currentTarget.value)}
-        placeholder="搜索并添加模型"
+        placeholder="搜索模型"
         autoComplete="off"
         spellCheck={false}
         disabled={props.disabled}
-        aria-label="搜索并添加模型"
+        aria-label="搜索模型"
       />
-      {query.trim() && (
-        <ul className="providerModelSearchResults" aria-label="可添加模型">
-          {matches.length === 0 ? (
-            <li className="providerModelSearchEmpty">没有可添加的匹配模型。</li>
-          ) : matches.map((model) => (
-            <li className="providerModelSearchRow" key={model.id}>
-              <span>{modelDisplayLabel(model)}</span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={props.disabled}
-                onClick={() => {
-                  props.onChange([...props.enabledModelIds, model.id]);
-                  setQuery('');
-                }}
-              >
-                添加
-              </Button>
+      <OverlayScrollArea className="providerModelChoiceScroll">
+        <ul
+          ref={modelListRef}
+          className="providerModelChoiceList"
+          aria-label="模型列表"
+          onKeyDown={onModelListKeyDown}
+        >
+          {visibleRows.length === 0 ? (
+            <li className="providerModelChoiceEmpty">
+              {rows.length === 0 ? '暂无可选模型，请先更新模型目录。' : '没有匹配的模型。'}
             </li>
-          ))}
+          ) : (
+            visibleRows.map((row) => {
+              const isEnabled = enabled.has(row.id);
+              const isDefault = row.id === props.defaultModel;
+              return (
+                <li key={row.id}>
+                  <Item
+                    className="providerModelChoiceRow"
+                    size="sm"
+                    render={
+                      <button
+                        type="button"
+                        role="checkbox"
+                        aria-checked={isEnabled}
+                        data-model-id={row.id}
+                        tabIndex={row.id === resolvedActiveRowId ? 0 : -1}
+                        disabled={props.disabled || isDefault}
+                        onClick={() => toggle(row.id)}
+                        onFocus={() => setActiveRowId(row.id)}
+                      />
+                    }
+                  >
+                    <ItemMedia className="providerModelChoiceCheck" aria-hidden="true">
+                      {isEnabled ? <Check size={14} /> : null}
+                    </ItemMedia>
+                    <ItemContent>
+                      <ItemTitle className="providerModelChoiceLabel">{row.label}</ItemTitle>
+                    </ItemContent>
+                    {isDefault && (
+                      <ItemActions>
+                        <span className="providerEnabledModelMeta">默认</span>
+                      </ItemActions>
+                    )}
+                  </Item>
+                </li>
+              );
+            })
+          )}
         </ul>
-      )}
-      <ul className="providerEnabledModelList" aria-label="已启用模型">
-        {props.enabledModelIds.map((id) => {
-          const model = props.modelChoices.find((candidate) => candidate.id === id);
-          const isDefault = id === props.defaultModel;
-          return (
-            <li key={id}>
-              <span>{model ? modelDisplayLabel(model) : id}</span>
-              {isDefault ? (
-                <span className="providerEnabledModelMeta">默认</span>
-              ) : (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  disabled={props.disabled}
-                  aria-label={`移除 ${model ? modelDisplayLabel(model) : id}`}
-                  onClick={() => props.onChange(props.enabledModelIds.filter((candidate) => candidate !== id))}
-                >
-                  ×
-                </Button>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+      </OverlayScrollArea>
     </section>
   );
 }

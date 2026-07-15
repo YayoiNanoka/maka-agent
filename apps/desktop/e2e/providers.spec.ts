@@ -84,15 +84,105 @@ test('adds a catalog provider through the canonical API-key dialog', async ({ wi
   const detailMark = detailDialog.locator('.providerLogo[data-provider="cerebras"] img');
   await expect(detailMark).toBeVisible();
   expect(await detailMark.evaluate(colorAssetRenderContract)).toEqual(COLOR_ASSET_RENDER_CONTRACT);
+
+  // Dialog height must stay fixed while an API key is typed: the credential
+  // hint is a single persistent line and the 更新密钥 button is always present
+  // (disabled until a new key is entered), so nothing is added or removed.
+  const detailKeyField = detailDialog.getByRole('textbox', { name: /模型密钥/ });
+  await expect(detailKeyField).toHaveAttribute('placeholder', '••••••••');
+  const detailHeightBefore = (await detailDialog.boundingBox())?.height;
+  await detailKeyField.fill('sk-e2e-replacement-key');
+  await expect(detailDialog.getByRole('button', { name: '更新密钥', exact: true })).toBeEnabled();
+  expect((await detailDialog.boundingBox())?.height).toBe(detailHeightBefore);
+  await detailKeyField.fill('');
+
   await expect(detailDialog.getByText('GPT OSS 120B', { exact: true })).toBeHidden();
   await detailDialog.getByText('高级设置', { exact: true }).click();
-  await expect(detailDialog.getByText('GPT OSS 120B', { exact: true }).first()).toBeVisible();
-  const enabledModels = detailDialog.getByRole('list', { name: '已启用模型' });
-  await expect(enabledModels.getByRole('button')).toHaveCount(0);
-  await detailDialog.getByLabel('搜索并添加模型').fill('gemma-4-31b');
-  await detailDialog.getByRole('list', { name: '可添加模型' }).getByRole('button', { name: '添加' }).click();
-  await expect(enabledModels).toContainText('Gemma');
+
+  // The full candidate catalog is shown persistently as one checkbox list; the
+  // default model is checked and locked, and toggling a candidate flows through
+  // the shared enabledModelIds path (no search-only "add" surface).
+  const modelList = detailDialog.getByRole('list', { name: '模型列表' });
+  await expect(modelList).toBeVisible();
+  const defaultRow = modelList.getByRole('checkbox', { name: /GPT OSS 120B/ });
+  await expect(defaultRow).toBeChecked();
+  await expect(defaultRow).toBeDisabled();
+
+  const gemmaRow = modelList.getByRole('checkbox', { name: /Gemma/ }).first();
+  await expect(gemmaRow).not.toBeChecked();
+  // Dialog height stays fixed as the list is filtered to a subset.
+  const advancedHeightBefore = (await detailDialog.boundingBox())?.height;
+  await detailDialog.getByLabel('搜索模型').fill('gemma');
+  expect((await detailDialog.boundingBox())?.height).toBe(advancedHeightBefore);
+  await gemmaRow.click();
+  await expect(gemmaRow).toBeChecked();
+
+  // Roving tabindex: the whole model list is ONE Tab stop. Tab from the search
+  // field lands on the active row, a second Tab leaves the list entirely (no
+  // per-row Tab stops even with hundreds of rows), and ArrowDown + Space move
+  // activity and toggle the focused row.
+  await detailDialog.getByLabel('搜索模型').fill('');
+  await detailDialog.getByLabel('搜索模型').click();
+  await page.keyboard.press('Tab');
+  const firstStop = await page.evaluate(() => ({
+    role: document.activeElement?.getAttribute('role') ?? null,
+    inList: Boolean(document.activeElement?.closest('.providerModelChoiceList')),
+  }));
+  expect(firstStop).toEqual({ role: 'checkbox', inList: true });
+  await page.keyboard.press('Tab');
+  expect(await page.evaluate(() => Boolean(document.activeElement?.closest('.providerModelChoiceList')))).toBe(false);
+  await page.keyboard.press('Shift+Tab');
+  const beforeArrow = await page.evaluate(() => document.activeElement?.getAttribute('data-model-id') ?? null);
+  await page.keyboard.press('ArrowDown');
+  const afterArrow = await page.evaluate(() => ({
+    id: document.activeElement?.getAttribute('data-model-id') ?? null,
+    checked: document.activeElement?.getAttribute('aria-checked') ?? null,
+  }));
+  expect(afterArrow.id).not.toBeNull();
+  expect(afterArrow.id).not.toBe(beforeArrow);
+  await page.keyboard.press('Space');
+  const toggledRow = detailDialog.locator(`[data-model-id="${afterArrow.id}"]`);
+  await expect(toggledRow).toHaveAttribute('aria-checked', afterArrow.checked === 'true' ? 'false' : 'true');
+  // Restore the row's original state (rows freeze while the save is in
+  // flight — the existing busy-freeze contract — so wait until re-enabled).
+  await expect(toggledRow).toBeEnabled();
+  await toggledRow.click();
+  await expect(toggledRow).toHaveAttribute('aria-checked', afterArrow.checked!);
+
   await expect(detailDialog.getByRole('textbox', { name: /模型密钥/ })).toHaveAttribute('placeholder', '••••••••');
+
+  // Short-viewport invariant: when the expanded detail content outgrows the
+  // popup's 85dvh cap, the dialog must stay within the viewport and the BODY
+  // must take over scrolling (grid-template-rows: auto minmax(0, 1fr)),
+  // keeping the bottom actions reachable. Without the row constraint the body
+  // row sizes to content, overflows the popup box under overflow-hidden, and
+  // its own overflow-y:auto never engages — 删除连接 sits unreachable below
+  // the viewport.
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: 1000,
+    height: 500,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  const shortViewportBox = await detailDialog.boundingBox();
+  expect(shortViewportBox!.height).toBeLessThanOrEqual(500 * 0.85);
+  expect(shortViewportBox!.y + shortViewportBox!.height).toBeLessThanOrEqual(500);
+  const dialogBody = detailDialog.locator('.providerConnectionDialogBody');
+  const scrollable = await dialogBody.evaluate((body) => body.scrollHeight > body.clientHeight);
+  expect(scrollable).toBe(true);
+  const deleteButton = detailDialog.getByRole('button', { name: '删除连接', exact: true });
+  // Scrolling the body must bring the bottom action into the viewport, and the
+  // click's actionability check (visible, stable, hit-testable) must pass —
+  // a clipped/unreachable button fails both.
+  await deleteButton.scrollIntoViewIfNeeded();
+  await expect(deleteButton).toBeInViewport();
+  await deleteButton.click();
+  const confirm = page.getByRole('alertdialog');
+  await expect(confirm).toBeVisible();
+  await confirm.getByRole('button', { name: '取消', exact: true }).click();
+  await expect(confirm).toBeHidden();
+  await cdp.send('Emulation.clearDeviceMetricsOverride');
 });
 
 // Distinct form behavior: an account-scoped provider has no fixed base URL —
