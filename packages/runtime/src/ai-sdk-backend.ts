@@ -81,6 +81,11 @@ import type { JSONValue, ModelMessage } from 'ai';
 import { z } from 'zod';
 
 import { PermissionEngine } from './permission-engine.js';
+import {
+  AiSdkAutoApprovalReviewer,
+  ApprovalCoordinator,
+  type AutoApprovalReviewer,
+} from './approval-reviewer.js';
 import { AsyncEventQueue } from './async-queue.js';
 import { StreamWatchdog, formatStreamWatchdogError } from './stream-watchdog.js';
 import {
@@ -567,6 +572,8 @@ export interface AiSdkBackendInput {
 
   // ── Process-singleton deps ─────────────────────────────────────────────
   permissionEngine: PermissionEngine;
+  /** Optional override for execute-mode automatic permission review. */
+  autoApprovalReviewer?: AutoApprovalReviewer;
   modelFactory: ModelFactory;
   /** Canonical-named tools available this session. Backend wraps each with
    *  permission gating before passing to ai-sdk. */
@@ -726,6 +733,7 @@ export class AiSdkBackend implements AgentBackend {
   /** Paused while the backend is waiting on a user permission decision. */
   private currentWatchdog: StreamWatchdog | null = null;
   private currentRunTrace: RunTrace | null = null;
+  private currentUserIntent: string | undefined;
   private priorRequestShape: RequestShapeDiagnostic | undefined;
   private cumulativeUsageCheckpoint: NormalizedAiSdkUsage | undefined;
   /**
@@ -756,6 +764,10 @@ export class AiSdkBackend implements AgentBackend {
       newId: this.newId,
       now: this.now,
     });
+    const autoApprovalReviewer = input.autoApprovalReviewer ?? new AiSdkAutoApprovalReviewer({
+      resolveModel: () => this.modelAdapter.resolveModel(),
+      ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
+    });
     this.toolRuntime = new ToolRuntime({
       sessionId: input.sessionId,
       header: input.header,
@@ -776,6 +788,37 @@ export class AiSdkBackend implements AgentBackend {
       permissionTimeoutMs: input.permissionTimeoutMs,
       recordToolInvocation: input.recordToolInvocation,
       recordToolArtifacts: input.recordToolArtifacts,
+      approvalCoordinator: new ApprovalCoordinator({
+        autoReviewer: autoApprovalReviewer,
+        observer: {
+          onAutoReviewStarted: (request) => this.currentRunTrace?.emit(
+            'permission',
+            'auto_review_started',
+            'Automatic permission review started',
+            { requestId: request.requestId, toolUseId: request.toolUseId, kind: request.kind },
+          ),
+          onAutoReviewDecided: (request, decision) => this.currentRunTrace?.emit(
+            'permission',
+            'auto_review_decided',
+            'Automatic permission review decided',
+            {
+              requestId: request.requestId,
+              toolUseId: request.toolUseId,
+              decision: decision.outcome,
+              riskLevel: decision.riskLevel,
+            },
+          ),
+          onAutoReviewFailed: (request) => this.currentRunTrace?.emit(
+            'permission',
+            'auto_review_failed',
+            'Automatic permission review failed closed',
+            { requestId: request.requestId, toolUseId: request.toolUseId },
+          ),
+        },
+      }),
+      getAutoApprovalReviewContext: () => ({
+        ...(this.currentUserIntent !== undefined ? { userIntent: this.currentUserIntent } : {}),
+      }),
     });
   }
 
@@ -909,6 +952,7 @@ export class AiSdkBackend implements AgentBackend {
     const turnId = input.turnId;
     this.currentTurnId = turnId;
     this.currentRunId = input.runId ?? null;
+    this.currentUserIntent = input.text;
     this.input.permissionEngine.beginTurn(turnId);
     this.toolRuntime.beginTurn(turnId);
     this.abortController = new AbortController();
@@ -3614,6 +3658,7 @@ export class AiSdkBackend implements AgentBackend {
     this.currentTurnId = null;
     this.currentRunId = null;
     this.currentRunTrace = null;
+    this.currentUserIntent = undefined;
     this.currentStepMessageId = null;
     this.toolRuntime.endTurn(turnId, this.aborted ? 'aborted' : 'completed');
     this.aborted = false;
