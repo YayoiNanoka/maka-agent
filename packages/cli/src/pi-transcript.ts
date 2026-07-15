@@ -1097,7 +1097,11 @@ function renderPermissionPrompt(
 ): string[] {
   const lines = [
     fitLine(`${ansi.yellow(
-      request.kind === 'additional_permissions' ? 'Additional permission required' : 'Permission required',
+      request.kind === 'additional_permissions'
+        ? 'Additional permission required'
+        : request.kind === 'sandbox_escalation'
+          ? 'Unsandboxed execution approval required'
+          : 'Permission required',
     )} ${ansi.bold(request.toolName)} ${ansi.dim(request.category)}`, width),
   ];
   const summary = permissionRequestSummary(request);
@@ -1130,6 +1134,14 @@ function permissionRequestSummary(request: AnyPermissionRequestEvent): string {
     if (request.risk.outsideWorkspace) lines.push('risk: outside workspace');
     if (request.risk.protectedMetadata) lines.push('risk: protected metadata');
     return limitText(lines.join('\n'), 1200);
+  }
+  if (request.kind === 'sandbox_escalation') {
+    return limitText([
+      request.justification,
+      `cwd: ${request.cwd}`,
+      `$ ${request.command}`,
+      'risk: unrestricted filesystem, network, and protected metadata access for this call',
+    ].join('\n'), 1200);
   }
   const args = request.args;
   if (request.toolName === 'Bash' && args !== null && typeof args === 'object') {

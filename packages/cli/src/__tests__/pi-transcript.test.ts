@@ -717,6 +717,44 @@ describe('Maka Pi TUI transcript', () => {
     assert.doesNotMatch(visible, /allow for turn/);
   });
 
+  test('renders one-call unsandboxed execution details without turn-wide approval', () => {
+    const state = createMakaPiTranscriptState();
+    applyMakaSessionEventToTranscript(state, event({
+      type: 'permission_request',
+      kind: 'sandbox_escalation',
+      requestId: 'permission-escalation',
+      toolUseId: 'tool-bash',
+      toolName: 'Bash',
+      category: 'shell_unsafe',
+      reason: 'sandbox_escalation',
+      args: undefined,
+      command: 'printf retry-ok > /tmp/retry.txt',
+      cwd: '/workspace',
+      justification: 'The exact command must write outside the workspace.',
+      intentHash: `sha256:${'3'.repeat(64)}`,
+      commandHash: `sha256:${'4'.repeat(64)}`,
+      trigger: 'sandbox_denial',
+      risk: {
+        unsandboxedExecution: true,
+        unrestrictedFileSystem: true,
+        unrestrictedNetwork: true,
+        protectedMetadataExposed: true,
+      },
+      alsoApprovesToolExecution: true,
+      availableDecisions: ['allow_once', 'deny'],
+      rememberForTurnAllowed: false,
+    }));
+
+    const visible = renderMakaPiTranscript(state, {
+      title: 'Maka', cwd: '/workspace', model: 'model', connectionSlug: 'connection', permissionMode: 'ask',
+    }, 120).map(stripAnsi).join('\n');
+    assert.match(visible, /Unsandboxed execution approval required/);
+    assert.match(visible, /cwd: \/workspace/);
+    assert.match(visible, /printf retry-ok > \/tmp\/retry\.txt/);
+    assert.match(visible, /unrestricted filesystem, network, and protected metadata/);
+    assert.doesNotMatch(visible, /allow for turn/);
+  });
+
   test('keeps WriteStdin permission details bounded until explicitly expanded', () => {
     const state = createMakaPiTranscriptState();
     const hiddenSuffix = '\u001b[31mrm -rf /tmp/hidden-suffix\r';
