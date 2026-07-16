@@ -155,6 +155,13 @@ export type MakaPiTranscriptEntry =
       status: 'running' | 'done' | 'error' | 'failed' | 'aborted' | 'detached' | 'unavailable';
       /** Expanded card view; stamped from expandAllTools, retargeted by Ctrl+O. */
       expanded: boolean;
+      /**
+       * Set when a successful shell-run poll is folded into its parent while
+       * off-screen: the entry cannot be spliced (that would shift line numbers
+       * and clear scrollback), but it must not render as an independent card
+       * on a future full redraw. A hidden entry contributes zero lines.
+       */
+      hidden?: boolean;
     }
   | { kind: 'notice'; level: 'info' | 'error'; text: string };
 
@@ -593,7 +600,18 @@ export function applyMakaSessionEventToTranscript(
       if (tool && parent && shellRun && !event.isError) {
         applyLiveShellRunResultToParent(state, parent, shellRun);
         if (tool.toolName === 'Read' || tool.toolName === 'StopBackgroundTask') {
-          state.entries.splice(state.entries.indexOf(tool), 1);
+          // Splicing an off-screen entry shifts subsequent entries' line
+          // numbers, which changes the composed buffer above the viewport and
+          // forces a scrollback-clearing full redraw (#1135). Leave it in
+          // place but mark it hidden so it contributes zero lines: a future
+          // full redraw (width change, session switch) will not render it as
+          // a duplicate card. The stale entry is fully cleaned on the next
+          // session switch / replaceTranscriptWithStoredMessages.
+          if (entryInLiveViewport(state, tool)) {
+            state.entries.splice(state.entries.indexOf(tool), 1);
+          } else {
+            tool.hidden = true;
+          }
         } else {
           applyOwnShellRunResult(tool, shellRun, event.durationMs);
         }
@@ -986,8 +1004,13 @@ export function renderMakaPiTranscript(
   }
 
   const entryFirstLine = new Map<MakaPiTranscriptEntry, number>();
+  const viewportTop = state.renderGeometry.viewportTop;
   for (let i = 0; i < state.entries.length; i += 1) {
     const entry = state.entries[i]!;
+    if (entry.kind === 'tool' && entry.hidden) {
+      entryFirstLine.set(entry, lines.length);
+      continue;
+    }
     const prev = state.entries[i - 1];
     // A blank gap separates human-facing boundaries (user/assistant/thinking/
     // notice) and the edges of a tool stack; only consecutive tool entries (the
@@ -997,7 +1020,19 @@ export function renderMakaPiTranscript(
     const continuesStack = entry.kind === 'tool' && prev?.kind === 'tool';
     if (!continuesStack) lines.push('');
     entryFirstLine.set(entry, lines.length);
-    lines.push(...renderTranscriptEntryMemoized(entry, safeWidth));
+    // An entry that sits entirely above the live viewport is in terminal
+    // scrollback — freeze its rendered lines (#1135). An entry that straddles
+    // the boundary (first line in scrollback, tail still visible) must still
+    // re-render: append-only entries (assistant text, tool deltas) only change
+    // the visible tail, and pi-tui's `firstChanged` will be inside the
+    // viewport, so no full redraw is triggered. An entry with a zero-line
+    // cache (e.g. blank thinking) is still off-screen if its first line is
+    // above the viewport — it must not suddenly produce lines in scrollback.
+    const cachedLines = transcriptEntryRenderCache.get(entry);
+    const entryHeight = cachedLines?.lines.length ?? 0;
+    const fullyOffScreen = lines.length < viewportTop
+      && (entryHeight === 0 || lines.length + entryHeight <= viewportTop);
+    lines.push(...renderTranscriptEntryMemoized(entry, safeWidth, fullyOffScreen));
   }
   state.renderGeometry.entryFirstLine = entryFirstLine;
 
@@ -1089,6 +1124,8 @@ function clearPendingInteractions(state: MakaPiTranscriptState): void {
 interface TranscriptEntryRender {
   signature: string;
   lines: string[];
+  /** Width the cached lines were rendered at, for off-screen freeze matching. */
+  width: number;
 }
 
 const transcriptEntryRenderCache = new WeakMap<MakaPiTranscriptEntry, TranscriptEntryRender>();
@@ -1100,12 +1137,24 @@ const transcriptEntryRenderCache = new WeakMap<MakaPiTranscriptEntry, Transcript
 function renderTranscriptEntryMemoized(
   entry: MakaPiTranscriptEntry,
   width: number,
+  offScreen: boolean,
 ): string[] {
+  // Off-screen entries live in terminal scrollback, which is immutable: any
+  // change to their rendered lines forces pi-tui's differential renderer into a
+  // scrollback-clearing full redraw (#1135). Serving the cached render keeps
+  // the display consistent with what's already in the terminal. The underlying
+  // entry state still updates — only the visual output is frozen. A width
+  // change already triggered a pi-tui full redraw (re-anchoring viewportTop to
+  // the tail), so a stale-width cache won't be served.
+  if (offScreen) {
+    const cached = transcriptEntryRenderCache.get(entry);
+    if (cached && cached.width === width) return cached.lines;
+  }
   const signature = transcriptEntrySignature(entry, width);
   const cached = transcriptEntryRenderCache.get(entry);
   if (cached && cached.signature === signature) return cached.lines;
   const lines = renderTranscriptEntryBlock(entry, width);
-  transcriptEntryRenderCache.set(entry, { signature, lines });
+  transcriptEntryRenderCache.set(entry, { signature, lines, width });
   return lines;
 }
 
