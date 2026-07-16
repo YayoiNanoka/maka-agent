@@ -8,7 +8,7 @@ import {
   type ShellRunOperation,
 } from '@maka/core';
 import { truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
-import { ansi } from './tui-ansi.js';
+import { ansi, disc } from './tui-ansi.js';
 import { colorDiff, diffLineKind } from './tui-diff.js';
 import {
   collapseToSingleLine,
@@ -26,49 +26,90 @@ export function renderToolBlock(entry: MakaPiToolEntry, width: number, expanded:
   return expanded ? renderExpandedToolBlock(entry, width) : renderCompactToolBlock(entry, width);
 }
 
-function toolStatusText(entry: MakaPiToolEntry): string {
-  const status = entry.status === 'running'
-    ? ansi.yellow('running')
-    : entry.status === 'detached'
-      ? ansi.dim('detached')
-      : entry.status === 'unavailable'
-        ? ansi.dim('source unavailable')
-      : entry.status === 'done'
-        ? ansi.green('done')
-        : ansi.red(entry.status);
-  const duration = entry.durationMs === undefined
-    ? ''
-    : ansi.dim(` ${entry.durationMs}ms`);
-  return `${status}${duration}`;
+/** Status disc for a tool row: muted = done, accent = running, danger = error/aborted/failed. */
+function toolDisc(entry: MakaPiToolEntry): string {
+  if (entry.status === 'running') return disc('accent');
+  if (entry.status === 'error' || entry.status === 'aborted' || entry.status === 'failed') return disc('danger');
+  return disc('muted');
+}
+
+/** Duration/status segment in integer seconds (#1053): `5s`, `running 12s`, `detached`. */
+function toolDurationText(entry: MakaPiToolEntry): string {
+  const secs = entry.durationMs === undefined ? undefined : Math.max(0, Math.round(entry.durationMs / 1000));
+  if (entry.status === 'running') {
+    return secs === undefined ? ansi.dim('running') : ansi.dim(`running ${secs}s`);
+  }
+  if (entry.status === 'detached') return ansi.dim('detached');
+  if (entry.status === 'unavailable') return ansi.dim('source unavailable');
+  return secs === undefined ? '' : ansi.dim(`${secs}s`);
 }
 
 /**
- * Compact tool card: at most two lines. Line 1 carries the tool name, an
- * inline dim input summary, and status; line 2 is a one-line result summary
- * with a dim `(Ctrl+O)` hint when expanding would reveal more.
+ * Compact tool card: a single line in the #1053 disc grammar -
+ * `● Name  primary  ·  duration  ·  summary ›`. The disc carries status, the
+ * duration is integer seconds, and a dim trailing `›` marks an expandable
+ * card. Live output and stop hints live only in the expanded card, so collapse
+ * never grows a second line (no height jitter). The disc, name, duration, and
+ * `›` are always preserved; only the input and summary text truncate, so a
+ * long command or result never hides elapsed time or the expand marker.
  */
 function renderCompactToolBlock(entry: MakaPiToolEntry, width: number): string[] {
-  // collapseToSingleLine guards both slots: fitLine truncates width, not \n,
-  // so any multi-line summary text would silently break the two-line card.
   const inputSummary = collapseToSingleLine(toolInputSummary(entry));
-  const header = `${ansi.yellow('Tool')} ${entry.title ?? entry.toolName}`
-    + ` ${toolStatusText(entry)}${inputSummary ? ` ${ansi.dim(inputSummary)}` : ''}`;
-  const lines = [fitLine(header, width)];
+  const duration = toolDurationText(entry);
   const summary = compactToolSummary(entry, width);
-  if (summary) {
-    const hint = summary.expandable ? ansi.dim(' (Ctrl+O)') : '';
-    lines.push(fitLine(`  ${collapseToSingleLine(summary.text)}${hint}`, width));
+  const summaryText = summary && entry.status !== 'running' ? collapseToSingleLine(summary.text) : '';
+  const sep = `  ${ansi.dim('·')}  `;
+  const chevron = summary?.expandable ? ` ${ansi.dim('›')}` : '';
+  const head = `${toolDisc(entry)} ${entry.title ?? entry.toolName}`;
+  return [fitLine(assembleCompactToolRow(head, inputSummary, duration, summaryText, sep, chevron, width), width)];
+}
+
+/**
+ * Lay out `head  input  ·  duration  ·  summary chevron` on one line, keeping
+ * the head, duration segment, and chevron (the status-carrying parts) intact
+ * and truncating only the flexible input/summary text when the row overflows.
+ * Input is truncated before summary so a long command keeps its elapsed time.
+ */
+function assembleCompactToolRow(
+  head: string,
+  input: string,
+  duration: string,
+  summary: string,
+  sep: string,
+  chevron: string,
+  width: number,
+): string {
+  const inputSeg = input ? `  ${input}` : '';
+  const durSeg = duration ? `${sep}${duration}` : '';
+  const sumSeg = summary ? `${sep}${summary}` : '';
+  const full = `${head}${inputSeg}${durSeg}${sumSeg}${chevron}`;
+  if (visibleWidth(full) <= width) return full;
+  // Overflow: reserve head + duration + chevron, then fit input before summary.
+  // Input joins the name with two spaces; duration and summary join with `·`.
+  let budget = Math.max(0, width - visibleWidth(`${head}${durSeg}${chevron}`));
+  let builtInput = '';
+  let builtSummary = '';
+  if (input && budget > 3) {
+    const room = budget - 2;
+    const text = visibleWidth(input) > room ? truncateToWidth(input, room, '…') : input;
+    builtInput = `  ${text}`;
+    budget -= visibleWidth(builtInput);
   }
-  if (entry.toolName === 'Bash' && entry.status === 'running' && entry.result?.kind === 'shell_run') {
-    lines.push(fitLine(ansi.dim('  Ask Maka to stop this task'), width));
+  const sepW = visibleWidth(sep);
+  if (summary && budget > sepW + 1) {
+    const room = budget - sepW;
+    const text = visibleWidth(summary) > room ? truncateToWidth(summary, room, '…') : summary;
+    builtSummary = `${sep}${text}`;
   }
-  return lines;
+  return `${head}${builtInput}${durSeg}${builtSummary}${chevron}`;
 }
 
 function renderExpandedToolBlock(entry: MakaPiToolEntry, width: number): string[] {
-  const lines = [
-    fitLine(`${ansi.yellow('Tool')} ${entry.title ?? entry.toolName} ${toolStatusText(entry)}`, width),
-  ];
+  const duration = toolDurationText(entry);
+  let header = `${toolDisc(entry)} ${entry.title ?? entry.toolName}`;
+  if (duration) header += `  ${ansi.dim('·')}  ${duration}`;
+  const lines = [fitLine(header, width)];
+
   const inputSummary = toolInputSummary(entry);
   if (inputSummary) lines.push(...renderIndented(inputSummary, width, 2).map(ansi.dim));
   if (entry.progress.droppedChars > 0) {
