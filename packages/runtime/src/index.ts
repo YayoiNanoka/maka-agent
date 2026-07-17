@@ -1033,6 +1033,15 @@ export {
   isRecord,
 } from './skills.js';
 export {
+  listInvocableSkills,
+  resolveSkillInvocations,
+  composeSkillInvocationMessage,
+} from './skill-invocation.js';
+export type {
+  InvocableSkillEntry,
+  SkillInvocationResolution,
+} from './skill-invocation.js';
+export {
   isContainedPath,
   isSafeSkillId,
   isInside,
