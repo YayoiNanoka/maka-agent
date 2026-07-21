@@ -192,6 +192,7 @@ async function main() {
     jobsDir,
     model: executionProfile.model,
     provider: executionProfile.provider,
+    llmConnectionSlug: executionProfile.llmConnectionSlug,
     reasoningEffort: executionProfile.reasoningEffort,
     ...credentials,
     ...(executionProfile.provider === 'openai-codex'

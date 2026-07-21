@@ -121,6 +121,8 @@ export interface HarborTaskRunnerOptions {
   model: string;
   /** MAKA_PROVIDER, e.g. "deepseek". */
   provider?: string;
+  /** Runtime connection identity; defaults to the provider id. */
+  llmConnectionSlug?: string;
   reasoningEffort?: 'high' | 'max';
   /** Host path to an API key file. The key stays in the Harbor control process;
    * the task container receives no provider key env, key-file path, or secret mount. */
@@ -891,7 +893,7 @@ export function buildHarborJobConfig(
     MAKA_BACKEND: 'ai-sdk',
     MAKA_MODEL: makaModel,
     MAKA_PROVIDER: provider,
-    MAKA_LLM_CONNECTION_SLUG: provider,
+    MAKA_LLM_CONNECTION_SLUG: options.llmConnectionSlug ?? provider,
     // Verbatim — the controller hashes exactly these bytes and verifies the round-trip.
     MAKA_SYSTEM_PROMPT: input.systemPrompt,
   };

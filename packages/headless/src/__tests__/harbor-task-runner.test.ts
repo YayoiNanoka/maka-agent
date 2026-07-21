@@ -598,6 +598,7 @@ describe('createHarborTaskRunner', () => {
           agentVersion: '0.144.6',
           model: 'openai-codex/gpt-5.6-sol',
           provider: 'openai-codex',
+          llmConnectionSlug: 'codex-subscription',
           reasoningEffort: 'max',
           agentEnv: { MAKA_BASE_URL: `http://127.0.0.1:${address.port}` },
           resolveProviderCredential: async () => ({
@@ -657,6 +658,7 @@ describe('createHarborTaskRunner', () => {
           jobsDir,
           model: 'openai-codex/gpt-5.6-sol',
           provider: 'openai-codex',
+          llmConnectionSlug: 'codex-subscription',
           reasoningEffort: 'max',
           agentEnv: { MAKA_BASE_URL: `http://127.0.0.1:${address.port}` },
           resolveProviderCredential: async () => ({ value: 'current-oauth-token' }),
@@ -678,6 +680,11 @@ describe('createHarborTaskRunner', () => {
 
         assert.equal(upstreamAuthorization, 'Bearer current-oauth-token');
         assert.ok(captured.config);
+        const configAgent = (captured.config.agents as Array<Record<string, unknown>>)[0]!;
+        assert.equal(
+          (configAgent.env as Record<string, string>).MAKA_LLM_CONNECTION_SLUG,
+          'codex-subscription',
+        );
         assert.doesNotMatch(JSON.stringify(captured.config), /current-oauth-token/);
       } finally {
         await new Promise<void>((resolve, reject) =>
