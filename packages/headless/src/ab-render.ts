@@ -1,6 +1,7 @@
 import type {
   AbAttemptRef,
   AbAgentPlanSummary,
+  AbTaskLedgerSummary,
   AbComparisonSummary,
   AbContinuationSummary,
   AbContextBudgetSummary,
@@ -17,6 +18,7 @@ export function renderAbComparisonMarkdown(summary: AbComparisonSummary): string
   const continuationLine = renderContinuationLine(summary);
   const taskToolLine = renderTaskToolLine(summary);
   const agentPlanLine = renderAgentPlanLine(summary);
+  const taskLedgerLine = renderTaskLedgerLine(summary);
   const investigationRefLines = renderInvestigationRefLines(summary);
   const lines = [
     '# A/B Comparison',
@@ -44,6 +46,7 @@ export function renderAbComparisonMarkdown(summary: AbComparisonSummary): string
     ...(continuationLine ? [continuationLine] : []),
     ...(taskToolLine ? [taskToolLine] : []),
     ...(agentPlanLine ? [agentPlanLine] : []),
+    ...(taskLedgerLine ? [taskLedgerLine] : []),
     ...(contextBudgetLine ? [contextBudgetLine] : []),
     ...(activePruneSubsetLine ? [activePruneSubsetLine] : []),
     '',
@@ -216,6 +219,41 @@ function agentPlansOrZero(summary: AbAgentPlanSummary | undefined): AbAgentPlanS
       interruptedExecutions: 0,
       cancelledExecutions: 0,
       activeExecutions: 0,
+    }
+  );
+}
+
+function renderTaskLedgerLine(summary: AbComparisonSummary): string | undefined {
+  if (!summary.baseline.taskLedger && !summary.candidate.taskLedger) return undefined;
+  return `- Task Ledger: A ${renderTaskLedgerMetrics(taskLedgerOrZero(summary.baseline.taskLedger))}, B ${renderTaskLedgerMetrics(taskLedgerOrZero(summary.candidate.taskLedger))}`;
+}
+
+function renderTaskLedgerMetrics(summary: AbTaskLedgerSummary): string {
+  return [
+    `enabled=${summary.enabledAttempts}/${summary.attempts}`,
+    `triggered=${summary.triggeredAttempts}`,
+    `create=${summary.createCalls}`,
+    `update=${summary.updateCalls}`,
+    `list=${summary.listCalls}`,
+    `get=${summary.getCalls}`,
+    `tasks=${summary.taskCount}`,
+    `terminal=${summary.terminalTasks}`,
+  ].join(' ');
+}
+
+function taskLedgerOrZero(summary: AbTaskLedgerSummary | undefined): AbTaskLedgerSummary {
+  return (
+    summary ?? {
+      attempts: 0,
+      enabledAttempts: 0,
+      triggeredAttempts: 0,
+      triggeredAttemptIds: [],
+      createCalls: 0,
+      updateCalls: 0,
+      listCalls: 0,
+      getCalls: 0,
+      taskCount: 0,
+      terminalTasks: 0,
     }
   );
 }

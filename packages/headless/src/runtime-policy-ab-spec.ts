@@ -11,7 +11,8 @@ export interface RuntimePolicyAbSpec {
   arms: readonly [RuntimePolicyAbArmInput, RuntimePolicyAbArmInput];
   sharedAgentEnv: Partial<Record<RuntimePolicySharedAgentEnvKey, string>>;
   pilotTaskIds: readonly string[];
-  evaluationTaskIds: readonly string[];
+  evaluationTaskIds?: readonly string[];
+  evaluationTaskSet?: 'terminal-bench-2.1';
   fullReps: number;
   nonInferiorityMargin: number;
 }
@@ -31,7 +32,18 @@ export function parseRuntimePolicyAbSpec(value: unknown): RuntimePolicyAbSpec {
     'runtime policy A/B spec sharedAgentEnv',
   );
   stringIds(value.pilotTaskIds, 'runtime policy A/B spec pilotTaskIds');
-  stringIds(value.evaluationTaskIds, 'runtime policy A/B spec evaluationTaskIds');
+  const hasTaskIds = value.evaluationTaskIds !== undefined;
+  const hasTaskSet = value.evaluationTaskSet !== undefined;
+  if (hasTaskIds === hasTaskSet) {
+    throw new Error(
+      'runtime policy A/B spec must define exactly one of evaluationTaskIds or evaluationTaskSet',
+    );
+  }
+  if (hasTaskIds) {
+    stringIds(value.evaluationTaskIds, 'runtime policy A/B spec evaluationTaskIds');
+  } else if (value.evaluationTaskSet !== 'terminal-bench-2.1') {
+    throw new Error('runtime policy A/B spec evaluationTaskSet must be terminal-bench-2.1');
+  }
   if (!Number.isSafeInteger(value.fullReps) || Number(value.fullReps) < 2)
     throw new Error('runtime policy A/B spec fullReps must be an integer of at least 2');
   if (

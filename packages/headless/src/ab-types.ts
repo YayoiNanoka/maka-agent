@@ -70,6 +70,7 @@ export interface AbArmSummary {
   continuation?: AbContinuationSummary;
   taskTools?: AbTaskToolSummary;
   agentPlans?: AbAgentPlanSummary;
+  taskLedger?: AbTaskLedgerSummary;
   activePruneSubset?: AbActivePruneSubsetSummary;
 }
 
@@ -164,6 +165,19 @@ export interface AbAgentPlanSummary {
   interruptedExecutions: number;
   cancelledExecutions: number;
   activeExecutions: number;
+}
+
+export interface AbTaskLedgerSummary {
+  attempts: number;
+  enabledAttempts: number;
+  triggeredAttempts: number;
+  triggeredAttemptIds: string[];
+  createCalls: number;
+  updateCalls: number;
+  listCalls: number;
+  getCalls: number;
+  taskCount: number;
+  terminalTasks: number;
 }
 
 export interface AbTaskArmSummary {

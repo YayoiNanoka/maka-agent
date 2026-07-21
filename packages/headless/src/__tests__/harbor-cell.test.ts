@@ -24,8 +24,9 @@ import {
   type ToolResultArchiveReader,
   type ToolResultArchiveRecorder,
 } from '@maka/runtime';
-import { createArtifactStore, createPlanStore } from '@maka/storage';
+import { createArtifactStore, createPlanStore, createTaskLedgerStore } from '@maka/storage';
 import { resolveHeadlessAgentPlanPolicy } from '../agent-plan-policy.js';
+import { resolveHeadlessTaskLedgerPolicy } from '../headless-task-ledger-policy.js';
 import type { Config } from '../contracts.js';
 import type {
   HeadlessBackendContext,
@@ -2449,6 +2450,82 @@ describe('runHarborCell', () => {
       );
       assert.equal(state.executions[0]?.status, 'interrupted');
       assert.equal(state.executions[0]?.interruptionReason, 'turn_completed_with_active_plan');
+    });
+  });
+
+  test('Headless Task Ledger flag adds the real CRUD tools and durable replay', async () => {
+    assert.ok(HARBOR_CELL_CONTEXT_ENV_KEYS.includes('MAKA_CONTEXT_TASK_LEDGER' as never));
+    await withDirs(async ({ workspaceDir }) => {
+      const registry = new BackendRegistry();
+      const toolExecutor = fakeToolExecutor();
+      const taskLedgerStore = createTaskLedgerStore(workspaceDir);
+      const register = buildAiSdkCellBackendRegistration({
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          MAKA_CONTEXT_TASK_LEDGER: 'on',
+          MAKA_CONTEXT_TASK_TOOLS: 'off',
+        },
+        now: () => 123,
+        newId: testIdFactory(),
+      });
+      await register(registry, {
+        config: {
+          id: 'harbor-task-ledger',
+          backend: 'ai-sdk',
+          llmConnectionSlug: 'openai',
+          model: 'gpt-4o-mini',
+          systemPrompt: 'Use durable tasks for independently trackable work.',
+        },
+        task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        storageRoot: workspaceDir,
+        workspaceDir,
+        taskLedgerStore,
+        taskLedgerPolicy: resolveHeadlessTaskLedgerPolicy({
+          MAKA_CONTEXT_TASK_LEDGER: 'on',
+        }),
+        realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
+        toolExecutor,
+      });
+
+      const backend = await registry.build('ai-sdk', backendContext(workspaceDir));
+      const backendInput = (
+        backend as unknown as {
+          input: {
+            tools: Array<{ name: string; impl: Function }>;
+            turnTailPrompt?: (context: { sessionId: string }) => Promise<string | undefined>;
+          };
+        }
+      ).input;
+      const taskToolNames = backendInput.tools
+        .map((tool) => tool.name)
+        .filter((name) => name.startsWith('task_'));
+      assert.deepEqual(taskToolNames.sort(), [
+        'task_create',
+        'task_get',
+        'task_list',
+        'task_update',
+      ]);
+      assert.ok(!backendInput.tools.some((tool) => tool.name === 'todo_write'));
+      assert.ok(!backendInput.tools.some((tool) => tool.name === 'update_plan'));
+
+      const taskCreate = backendInput.tools.find((tool) => tool.name === 'task_create');
+      assert.ok(taskCreate);
+      await taskCreate.impl(
+        { tasks: [{ subject: 'Inspect independently trackable artifacts' }] },
+        {
+          sessionId: 'session-ledger',
+          turnId: 'turn-1',
+          cwd: workspaceDir,
+          toolCallId: 'tool-task-create',
+          abortSignal: new AbortController().signal,
+          emitOutput: () => {},
+        },
+      );
+      const replay = await backendInput.turnTailPrompt?.({ sessionId: 'session-ledger' });
+      assert.match(replay ?? '', /<task_ledger>/);
+      assert.match(replay ?? '', /Inspect independently trackable artifacts/);
     });
   });
 

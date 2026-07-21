@@ -9,6 +9,7 @@ import {
   type HarborCellOutput,
 } from '../cell-output.js';
 import { resolveHeadlessAgentPlanPolicy } from '../agent-plan-policy.js';
+import { resolveHeadlessTaskLedgerPolicy } from '../headless-task-ledger-policy.js';
 
 describe('Harbor cell output contract', () => {
   test('summarizes runtime outcome, prompt hash, token cost, and event path', () => {
@@ -569,6 +570,43 @@ describe('Harbor cell output contract', () => {
         completedSteps: 1,
         skippedSteps: 1,
       },
+    });
+    assert.deepEqual(validateHarborCellOutput(output), output);
+  });
+
+  test('summarizes true Task Ledger tool activation', () => {
+    const invocation = invocationFixture();
+    for (const [id, name] of [
+      ['create', 'task_create'],
+      ['update', 'task_update'],
+      ['list', 'task_list'],
+      ['get', 'task_get'],
+    ]) {
+      invocation.events.push(
+        runtimeEvent({
+          id,
+          content: { kind: 'function_call', id: `tool-${id}`, name, args: {} },
+        }),
+      );
+    }
+    const output = buildHarborCellOutput({
+      invocation,
+      runtimeEventsPath: '/logs/agent/runtime-events.jsonl',
+      taskLedgerPolicy: resolveHeadlessTaskLedgerPolicy({
+        MAKA_CONTEXT_TASK_LEDGER: 'on',
+      }),
+      taskLedgerTasks: [],
+    });
+
+    assert.deepEqual(output.taskLedgerSummary, {
+      enabled: true,
+      policyVersion: 'maka-headless-task-ledger.v1',
+      triggered: true,
+      calls: { create: 1, update: 1, list: 1, get: 1 },
+      taskCount: 0,
+      pendingTasks: 0,
+      inProgressTasks: 0,
+      terminalTasks: 0,
     });
     assert.deepEqual(validateHarborCellOutput(output), output);
   });

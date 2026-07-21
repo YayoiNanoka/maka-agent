@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "task-ledger-full",
+  "arms": [
+    {
+      "id": "task-ledger-off",
+      "contextEnv": {
+        "MAKA_CONTEXT_AGENT_PLAN": "off",
+        "MAKA_CONTEXT_TASK_LEDGER": "off"
+      }
+    },
+    {
+      "id": "task-ledger-on",
+      "contextEnv": {
+        "MAKA_CONTEXT_AGENT_PLAN": "off",
+        "MAKA_CONTEXT_TASK_LEDGER": "on"
+      }
+    }
+  ],
+  "sharedAgentEnv": {},
+  "pilotTaskIds": [
+    "polyglot-rust-c",
+    "sqlite-db-truncate",
+    "reshard-c4-data",
+    "sanitize-git-repo",
+    "build-cython-ext"
+  ],
+  "evaluationTaskSet": "terminal-bench-2.1",
+  "fullReps": 2,
+  "nonInferiorityMargin": 0.1
+}

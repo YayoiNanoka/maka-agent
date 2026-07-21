@@ -26,4 +26,14 @@ test('runtime A/B spec requires a real pilot and repeated full evidence', () => 
     () => parseRuntimePolicyAbSpec({ ...base, pilotTaskIds: [] }),
     /pilotTaskIds must be a non-empty string array/,
   );
+  const full = parseRuntimePolicyAbSpec({
+    ...base,
+    evaluationTaskIds: undefined,
+    evaluationTaskSet: 'terminal-bench-2.1',
+  });
+  assert.equal(full.evaluationTaskSet, 'terminal-bench-2.1');
+  assert.throws(
+    () => parseRuntimePolicyAbSpec({ ...base, evaluationTaskSet: 'terminal-bench-2.1' }),
+    /exactly one of evaluationTaskIds or evaluationTaskSet/,
+  );
 });

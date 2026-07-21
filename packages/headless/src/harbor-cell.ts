@@ -11,6 +11,7 @@ import {
   SessionManager,
   buildChildAgentTools,
   buildProviderOptions,
+  buildTaskLedgerTools,
   buildUpdatePlanTool,
   buildSubscriptionModelFetch,
   createProviderRequestCaptureRecorder,
@@ -28,6 +29,7 @@ import {
   createPlanStore,
   createRuntimeEventStore,
   createSessionStore,
+  createTaskLedgerStore,
   persistProviderRequestCaptureArtifact,
 } from '@maka/storage';
 import { registerFakeBackend } from './backends.js';
@@ -75,6 +77,12 @@ import {
   resolveHeadlessAgentPlanPolicy,
   type HeadlessAgentPlanPolicy,
 } from './agent-plan-policy.js';
+import {
+  appendHeadlessTaskLedgerPolicyToSystemPrompt,
+  renderHeadlessTaskLedgerReplay,
+  resolveHeadlessTaskLedgerPolicy,
+  type HeadlessTaskLedgerPolicy,
+} from './headless-task-ledger-policy.js';
 
 // The Harbor cell orchestration module keeps `#harbor-cell` (and './harbor-cell.js')
 // as the stable public surface. After the sink-file split the moved symbols live in
@@ -124,6 +132,7 @@ export interface RunHarborCellInput {
   continuationPolicy?: HarborCellContinuationPolicy;
   taskToolSummaryEnabled?: boolean;
   agentPlanPolicy?: HeadlessAgentPlanPolicy;
+  taskLedgerPolicy?: HeadlessTaskLedgerPolicy;
   settleAfterMs?: number;
   now?: () => number;
   newId?: () => string;
@@ -269,8 +278,9 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
     economyTaskMode,
   });
   const agentPlanPolicy = input.agentPlanPolicy ?? resolveHeadlessAgentPlanPolicy({});
+  const taskLedgerPolicy = input.taskLedgerPolicy ?? resolveHeadlessTaskLedgerPolicy({});
   const systemPrompt = appendHeadlessAgentPlanPolicyToSystemPrompt(
-    resolvedPrompt.systemPrompt,
+    appendHeadlessTaskLedgerPolicyToSystemPrompt(resolvedPrompt.systemPrompt, taskLedgerPolicy),
     agentPlanPolicy,
   );
   const prompt = {
@@ -282,6 +292,9 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
   const planStore = agentPlanPolicy.enabled
     ? createPlanStore(input.storageRoot, { newId, now })
     : undefined;
+  const taskLedgerStore = taskLedgerPolicy.enabled
+    ? createTaskLedgerStore(input.storageRoot)
+    : undefined;
   const registerBackends =
     input.registerBackends ?? ((registry: BackendRegistry) => registerFakeBackend(registry));
   await registerBackends(backends, {
@@ -290,6 +303,7 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
     storageRoot: input.storageRoot,
     workspaceDir: input.cwd,
     ...(planStore ? { planStore, agentPlanPolicy } : {}),
+    ...(taskLedgerStore ? { taskLedgerStore, taskLedgerPolicy } : {}),
     ...sessionCapabilities.capabilities,
     ...(backendNeedsIsolation(input.config.backend)
       ? {
@@ -436,6 +450,7 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
     await planStore.interruptActiveExecution(session.id, reason);
     agentPlanState = await planStore.readState(session.id);
   }
+  const taskLedgerTasks = taskLedgerStore ? await taskLedgerStore.list(session.id) : undefined;
   const terminalRun = deadlineReached
     ? await agentRunStore.readRun(session.id, combinedInvocation.runId).catch(() => undefined)
     : undefined;
@@ -468,6 +483,7 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
         ? { taskToolSummaryEnabled: input.taskToolSummaryEnabled }
         : {}),
       ...(agentPlanPolicy.enabled ? { agentPlanPolicy, agentPlanState } : {}),
+      ...(taskLedgerPolicy.enabled ? { taskLedgerPolicy, taskLedgerTasks } : {}),
     }),
   );
   await writeHarborCellArtifact(outputPath, `${JSON.stringify(output, null, 2)}\n`);
@@ -500,6 +516,7 @@ export async function runHarborCellFromEnv(
   const economyTaskMode = economyTaskModeFromEnv(resolvedEnv.MAKA_ECONOMY_TASK_MODE);
   const taskLedgerExperimentPolicy = buildHarborCellTaskLedgerExperimentPolicy(resolvedEnv);
   const agentPlanPolicy = resolveHeadlessAgentPlanPolicy(resolvedEnv);
+  const taskLedgerPolicy = resolveHeadlessTaskLedgerPolicy(resolvedEnv);
   const maxSteps = harborCellMaxStepsFromEnv(resolvedEnv);
   const settleAfterMs = harborCellSoftTimeoutMsFromEnv(resolvedEnv);
   const reasoningEffort = reasoningEffortFromEnv(resolvedEnv.MAKA_REASONING_EFFORT);
@@ -591,6 +608,7 @@ export async function runHarborCellFromEnv(
     ...(continuationPolicy ? { continuationPolicy } : {}),
     ...(taskLedgerExperimentPolicy ? { taskToolSummaryEnabled: true } : {}),
     ...(agentPlanPolicy.enabled ? { agentPlanPolicy } : {}),
+    ...(taskLedgerPolicy.enabled ? { taskLedgerPolicy } : {}),
     ...(settleAfterMs !== undefined ? { settleAfterMs } : {}),
     ...(registerBackends ? { registerBackends } : {}),
     ...(backendNeedsIsolation(backend)
@@ -817,26 +835,34 @@ export function buildAiSdkCellBackendRegistration(input: {
         : undefined;
       const tools = [
         ...isolatedTools,
+        ...(context.taskLedgerPolicy?.enabled && context.taskLedgerStore && !ctx.tools
+          ? buildTaskLedgerTools({ store: context.taskLedgerStore })
+          : []),
         ...(context.agentPlanPolicy?.enabled && context.planStore && !ctx.tools
           ? [buildUpdatePlanTool(context.planStore)]
           : []),
       ];
       const turnTailPrompt =
-        taskLedgerExperimentStore || (context.agentPlanPolicy?.enabled && context.planStore)
+        taskLedgerExperimentStore ||
+        (context.taskLedgerPolicy?.enabled && context.taskLedgerStore) ||
+        (context.agentPlanPolicy?.enabled && context.planStore)
           ? async ({ sessionId }: { sessionId: string }) => {
-              const [taskReplay, planReplay] = await Promise.all([
+              const [taskReplay, ledgerReplay, planReplay] = await Promise.all([
                 taskLedgerExperimentStore && taskLedgerExperimentPolicy
                   ? renderTaskLedgerExperimentReplay(
                       await taskLedgerExperimentStore.list(sessionId),
                       { maxChars: taskLedgerExperimentPolicy.replayMaxChars },
                     )
                   : undefined,
+                context.taskLedgerPolicy?.enabled && context.taskLedgerStore
+                  ? renderHeadlessTaskLedgerReplay(context.taskLedgerStore, sessionId)
+                  : undefined,
                 context.agentPlanPolicy?.enabled && context.planStore
                   ? renderHeadlessAgentPlanReplay(context.planStore, sessionId)
                   : undefined,
               ]);
-              const sections = [taskReplay, planReplay].filter((section): section is string =>
-                Boolean(section?.trim()),
+              const sections = [taskReplay, ledgerReplay, planReplay].filter(
+                (section): section is string => Boolean(section?.trim()),
               );
               return sections.length > 0 ? sections.join('\n\n') : undefined;
             }

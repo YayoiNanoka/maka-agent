@@ -1,4 +1,4 @@
-import type { PlanSessionState, RuntimeEvent } from '@maka/core';
+import type { PlanSessionState, RuntimeEvent, Task } from '@maka/core';
 import type { ThinkingLevel } from '@maka/core';
 import type { ContextBudgetPolicy, InvocationResult } from '@maka/runtime';
 import type { HeadlessSystemPromptMode } from './contracts.js';
@@ -6,6 +6,7 @@ import {
   latestHeadlessAgentPlanExecution,
   type HeadlessAgentPlanPolicy,
 } from './agent-plan-policy.js';
+import type { HeadlessTaskLedgerPolicy } from './headless-task-ledger-policy.js';
 
 export const HARBOR_CELL_OUTPUT_SCHEMA_VERSION = 1;
 
@@ -126,6 +127,22 @@ export interface HarborCellAgentPlanSummary {
   };
 }
 
+export interface HarborCellTaskLedgerSummary {
+  enabled: true;
+  policyVersion: string;
+  triggered: boolean;
+  calls: {
+    create: number;
+    update: number;
+    list: number;
+    get: number;
+  };
+  taskCount: number;
+  pendingTasks: number;
+  inProgressTasks: number;
+  terminalTasks: number;
+}
+
 export interface HarborCellOutput {
   schemaVersion: typeof HARBOR_CELL_OUTPUT_SCHEMA_VERSION;
   status: InvocationResult['status'];
@@ -141,6 +158,7 @@ export interface HarborCellOutput {
   toolSummary: HarborCellToolSummary;
   taskToolSummary?: HarborCellTaskToolSummary;
   agentPlanSummary?: HarborCellAgentPlanSummary;
+  taskLedgerSummary?: HarborCellTaskLedgerSummary;
   steps: number;
   durationMs: number;
   startedAt: number;
@@ -158,6 +176,8 @@ export function buildHarborCellOutput(input: {
   taskToolSummaryEnabled?: boolean;
   agentPlanPolicy?: HeadlessAgentPlanPolicy;
   agentPlanState?: PlanSessionState;
+  taskLedgerPolicy?: HeadlessTaskLedgerPolicy;
+  taskLedgerTasks?: readonly Task[];
 }): HarborCellOutput {
   const { invocation } = input;
   const tokenSummary = summarizeCellTokens(invocation.events);
@@ -181,6 +201,15 @@ export function buildHarborCellOutput(input: {
             invocation.events,
             input.agentPlanPolicy,
             input.agentPlanState,
+          ),
+        }
+      : {}),
+    ...(input.taskLedgerPolicy?.enabled
+      ? {
+          taskLedgerSummary: summarizeCellTaskLedger(
+            invocation.events,
+            input.taskLedgerPolicy,
+            input.taskLedgerTasks ?? [],
           ),
         }
       : {}),
@@ -266,6 +295,8 @@ export function validateHarborCellOutput(value: unknown): HarborCellOutput {
     'taskToolSummary' in value ? validateTaskToolSummary(value.taskToolSummary) : undefined;
   const agentPlanSummary =
     'agentPlanSummary' in value ? validateAgentPlanSummary(value.agentPlanSummary) : undefined;
+  const taskLedgerSummary =
+    'taskLedgerSummary' in value ? validateTaskLedgerSummary(value.taskLedgerSummary) : undefined;
   const steps = requireNumber(value.steps, 'steps');
   const durationMs = requireNumber(value.durationMs, 'durationMs');
   const startedAt = requireNumber(value.startedAt, 'startedAt');
@@ -286,6 +317,7 @@ export function validateHarborCellOutput(value: unknown): HarborCellOutput {
     toolSummary,
     ...(taskToolSummary !== undefined ? { taskToolSummary } : {}),
     ...(agentPlanSummary !== undefined ? { agentPlanSummary } : {}),
+    ...(taskLedgerSummary !== undefined ? { taskLedgerSummary } : {}),
     steps,
     durationMs,
     startedAt,
@@ -390,6 +422,33 @@ export function summarizeCellAgentPlan(
           },
         }
       : {}),
+  };
+}
+
+export function summarizeCellTaskLedger(
+  events: readonly RuntimeEvent[],
+  policy: HeadlessTaskLedgerPolicy,
+  tasks: readonly Task[],
+): HarborCellTaskLedgerSummary {
+  const calls = { create: 0, update: 0, list: 0, get: 0 };
+  for (const event of events) {
+    if (event.content?.kind !== 'function_call') continue;
+    if (event.content.name === 'task_create') calls.create += 1;
+    if (event.content.name === 'task_update') calls.update += 1;
+    if (event.content.name === 'task_list') calls.list += 1;
+    if (event.content.name === 'task_get') calls.get += 1;
+  }
+  return {
+    enabled: true,
+    policyVersion: policy.policyVersion,
+    triggered: Object.values(calls).some((count) => count > 0) || tasks.length > 0,
+    calls,
+    taskCount: tasks.length,
+    pendingTasks: tasks.filter((task) => task.status === 'pending').length,
+    inProgressTasks: tasks.filter((task) => task.status === 'in_progress').length,
+    terminalTasks: tasks.filter((task) =>
+      ['completed', 'failed', 'cancelled'].includes(task.status),
+    ).length,
   };
 }
 
@@ -673,6 +732,27 @@ function validateAgentPlanSummary(value: unknown): HarborCellAgentPlanSummary {
     updatePlanCalls: requireNumber(value.updatePlanCalls, 'agentPlanSummary.updatePlanCalls'),
     executionCount: requireNumber(value.executionCount, 'agentPlanSummary.executionCount'),
     ...(latest !== undefined ? { latestExecution: validateAgentPlanExecutionSummary(latest) } : {}),
+  };
+}
+
+function validateTaskLedgerSummary(value: unknown): HarborCellTaskLedgerSummary {
+  if (!isRecord(value)) throw new Error('taskLedgerSummary must be a JSON object');
+  if (value.enabled !== true) throw new Error('taskLedgerSummary.enabled must be true');
+  if (!isRecord(value.calls)) throw new Error('taskLedgerSummary.calls must be a JSON object');
+  return {
+    enabled: true,
+    policyVersion: requireString(value.policyVersion, 'taskLedgerSummary.policyVersion'),
+    triggered: requireBoolean(value.triggered, 'taskLedgerSummary.triggered'),
+    calls: {
+      create: requireNumber(value.calls.create, 'taskLedgerSummary.calls.create'),
+      update: requireNumber(value.calls.update, 'taskLedgerSummary.calls.update'),
+      list: requireNumber(value.calls.list, 'taskLedgerSummary.calls.list'),
+      get: requireNumber(value.calls.get, 'taskLedgerSummary.calls.get'),
+    },
+    taskCount: requireNumber(value.taskCount, 'taskLedgerSummary.taskCount'),
+    pendingTasks: requireNumber(value.pendingTasks, 'taskLedgerSummary.pendingTasks'),
+    inProgressTasks: requireNumber(value.inProgressTasks, 'taskLedgerSummary.inProgressTasks'),
+    terminalTasks: requireNumber(value.terminalTasks, 'taskLedgerSummary.terminalTasks'),
   };
 }
 

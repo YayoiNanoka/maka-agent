@@ -16,6 +16,5 @@
   },
   "taskBudgetSec": 1800,
   "harborTimeoutMs": 2100000,
-  "observedCostStopUsd": 100,
   "maxConcurrentAttempts": 2
 }

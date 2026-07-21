@@ -27,6 +27,10 @@ import {
   resolveHeadlessAgentPlanPolicy,
 } from './agent-plan-policy.js';
 import { hashSystemPrompt } from './fixed-prompt-controller.js';
+import {
+  appendHeadlessTaskLedgerPolicyToSystemPrompt,
+  resolveHeadlessTaskLedgerPolicy,
+} from './headless-task-ledger-policy.js';
 
 export const RUNTIME_POLICY_CONTEXT_ENV_KEYS = HARBOR_CELL_CONTEXT_ENV_KEYS;
 export const RUNTIME_POLICY_SHARED_AGENT_ENV_KEYS = [
@@ -109,7 +113,9 @@ export function buildRuntimePolicyAbRunManifest(
     ...abInput,
     taskBudgetSec: executionProfile.taskBudgetSec,
     harborTimeoutMs: executionProfile.harborTimeoutMs,
-    observedCostStopUsd: executionProfile.observedCostStopUsd,
+    ...(executionProfile.observedCostStopUsd !== undefined
+      ? { observedCostStopUsd: executionProfile.observedCostStopUsd }
+      : {}),
     maxConcurrency,
     maxConcurrentAttempts: executionProfile.maxConcurrentAttempts,
     experimentKind: 'runtime',
@@ -136,7 +142,9 @@ export async function runRuntimePolicyAbComparisonUnlocked(
     evaluationTasks: input.evaluationTasks,
     ...(input.reps !== undefined ? { reps: input.reps } : {}),
     maxConcurrency,
-    observedCostStopUsd: input.executionProfile.observedCostStopUsd,
+    ...(input.executionProfile.observedCostStopUsd !== undefined
+      ? { observedCostStopUsd: input.executionProfile.observedCostStopUsd }
+      : {}),
     ...(input.roundIdPrefix ? { roundIdPrefix: input.roundIdPrefix } : {}),
     ...(input.budgetMs !== undefined ? { budgetMs: input.budgetMs } : {}),
     ...(input.nonInferiorityMargin !== undefined
@@ -147,8 +155,12 @@ export async function runRuntimePolicyAbComparisonUnlocked(
       if (!runtimeArm) throw new Error(`runtime policy A/B arm ${arm.id} is not configured`);
       const contextEnv = sanitizeContextEnv(runtimeArm.contextEnv);
       const agentPlanPolicy = resolveHeadlessAgentPlanPolicy(contextEnv);
+      const taskLedgerPolicy = resolveHeadlessTaskLedgerPolicy(contextEnv);
       const expectedEffectivePromptHash = hashSystemPrompt(
-        appendHeadlessAgentPlanPolicyToSystemPrompt(baseSystemPrompt, agentPlanPolicy),
+        appendHeadlessAgentPlanPolicyToSystemPrompt(
+          appendHeadlessTaskLedgerPolicyToSystemPrompt(baseSystemPrompt, taskLedgerPolicy),
+          agentPlanPolicy,
+        ),
       );
       const resumeFingerprint = runtimePolicyArmResumeFingerprint(input, runtimeArm);
       const agentEnv = { ...sharedAgentEnv, ...contextEnv };
@@ -216,11 +228,12 @@ function runtimeArmSpec(
 ): AbArmSpec {
   const contextEnv = sanitizeContextEnv(arm.contextEnv);
   const agentPlanPolicy = resolveHeadlessAgentPlanPolicy(contextEnv);
+  const taskLedgerPolicy = resolveHeadlessTaskLedgerPolicy(contextEnv);
   return {
     id: arm.id,
     kind: 'runtime' as const,
     fingerprint: contextEnvFingerprint(contextEnv),
-    metadata: { ...sharedMetadata, contextEnv, agentPlanPolicy },
+    metadata: { ...sharedMetadata, contextEnv, agentPlanPolicy, taskLedgerPolicy },
   };
 }
 

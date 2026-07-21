@@ -86,8 +86,11 @@ export async function runRuntimePolicyAbLifecycle(
     }
     const pilotCost =
       (state.pilot?.baseline.totalCostUsd ?? 0) + (state.pilot?.candidate.totalCostUsd ?? 0);
-    const remainingCostUsd = input.executionProfile.observedCostStopUsd - pilotCost;
-    if (remainingCostUsd <= 0) {
+    const remainingCostUsd =
+      input.executionProfile.observedCostStopUsd === undefined
+        ? undefined
+        : input.executionProfile.observedCostStopUsd - pilotCost;
+    if (remainingCostUsd !== undefined && remainingCostUsd <= 0) {
       state = { ...state, status: 'invalid', reason: 'observed_cost_stop_reached_during_pilot' };
       await writeState(statePath, state);
       return state;
@@ -97,7 +100,10 @@ export async function runRuntimePolicyAbLifecycle(
       evaluationTasks: input.evaluationTasks,
       reps: input.fullReps,
       roundIdPrefix: 'full',
-      executionProfile: { ...input.executionProfile, observedCostStopUsd: remainingCostUsd },
+      executionProfile: {
+        ...input.executionProfile,
+        ...(remainingCostUsd !== undefined ? { observedCostStopUsd: remainingCostUsd } : {}),
+      },
     });
     const invalidReason =
       full.stopReason ?? (full.decision === 'invalid' ? full.reason : undefined);
@@ -122,7 +128,8 @@ function pilotClearanceFailure(summary: RuntimePolicyAbComparisonSummary): strin
     return 'pilot_incomplete';
   const candidateActivated =
     (summary.candidate.contextBudget?.activatedAttempts ?? 0) > 0 ||
-    (summary.candidate.agentPlans?.triggeredAttempts ?? 0) > 0;
+    (summary.candidate.agentPlans?.triggeredAttempts ?? 0) > 0 ||
+    (summary.candidate.taskLedger?.triggeredAttempts ?? 0) > 0;
   if (!candidateActivated) return 'pilot_candidate_not_activated';
   return undefined;
 }

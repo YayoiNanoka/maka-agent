@@ -13,7 +13,7 @@ export interface RuntimePolicyAbExecutionProfile {
   pricing: HarborTaskPricing & { source: string };
   taskBudgetSec: number;
   harborTimeoutMs: number;
-  observedCostStopUsd: number;
+  observedCostStopUsd?: number;
   maxConcurrentAttempts: number;
 }
 
@@ -74,9 +74,10 @@ export function parseRuntimePolicyAbExecutionProfile(
       throw new Error(`runtime policy A/B execution profile ${key} must be a positive integer`);
   }
   if (
-    typeof value.observedCostStopUsd !== 'number' ||
-    !Number.isFinite(value.observedCostStopUsd) ||
-    value.observedCostStopUsd <= 0
+    value.observedCostStopUsd !== undefined &&
+    (typeof value.observedCostStopUsd !== 'number' ||
+      !Number.isFinite(value.observedCostStopUsd) ||
+      value.observedCostStopUsd <= 0)
   ) {
     throw new Error(
       'runtime policy A/B execution profile observedCostStopUsd must be a finite positive number',

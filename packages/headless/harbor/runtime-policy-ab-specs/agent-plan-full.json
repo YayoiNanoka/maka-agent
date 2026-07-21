@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "agent-plan-full",
+  "arms": [
+    {
+      "id": "agent-plan-off",
+      "contextEnv": {
+        "MAKA_CONTEXT_AGENT_PLAN": "off",
+        "MAKA_CONTEXT_TASK_LEDGER": "off"
+      }
+    },
+    {
+      "id": "agent-plan-on",
+      "contextEnv": {
+        "MAKA_CONTEXT_AGENT_PLAN": "on",
+        "MAKA_CONTEXT_TASK_LEDGER": "off"
+      }
+    }
+  ],
+  "sharedAgentEnv": {},
+  "pilotTaskIds": [
+    "polyglot-rust-c",
+    "sqlite-db-truncate",
+    "reshard-c4-data",
+    "sanitize-git-repo",
+    "build-cython-ext"
+  ],
+  "evaluationTaskSet": "terminal-bench-2.1",
+  "fullReps": 2,
+  "nonInferiorityMargin": 0.1
+}

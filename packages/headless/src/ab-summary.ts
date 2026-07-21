@@ -7,6 +7,7 @@ import { assertRatio } from './numeric-guards.js';
 import type {
   AbArmSummary,
   AbAgentPlanSummary,
+  AbTaskLedgerSummary,
   AbArmLabel,
   AbAttemptRef,
   AbAttemptPairSummary,
@@ -28,6 +29,7 @@ import type {
 import type {
   HarborCellAgentPlanSummary,
   HarborCellContextBudgetSummary,
+  HarborCellTaskLedgerSummary,
   HarborCellTaskToolSummary,
 } from './cell-output.js';
 
@@ -142,6 +144,7 @@ function summarizeArm(
   const continuation = summarizeContinuation(observed, wallTimeoutMs);
   const taskTools = summarizeTaskTools(observed);
   const agentPlans = summarizeAgentPlans(observed);
+  const taskLedger = summarizeTaskLedger(observed);
   const activePruneSubset = summarizeActivePruneSubset(observedAttempts, activePrunePairIds);
   const contextBudgetPolicy = summarizeContextBudgetPolicy(observed);
   const tokenCostSummary = summarizeTokenCost(observed);
@@ -167,6 +170,7 @@ function summarizeArm(
     ...(continuation ? { continuation } : {}),
     ...(taskTools ? { taskTools } : {}),
     ...(agentPlans ? { agentPlans } : {}),
+    ...(taskLedger ? { taskLedger } : {}),
     ...(activePruneSubset ? { activePruneSubset } : {}),
   };
 }
@@ -403,6 +407,31 @@ function summarizeAgentPlans(
   };
 }
 
+function summarizeTaskLedger(
+  events: readonly FixedPromptTaskWalEvent[],
+): AbTaskLedgerSummary | undefined {
+  const summaries: { event: FixedPromptTaskWalEvent; summary: HarborCellTaskLedgerSummary }[] = [];
+  for (const event of events) {
+    if ('taskLedgerSummary' in event && event.taskLedgerSummary) {
+      summaries.push({ event, summary: event.taskLedgerSummary });
+    }
+  }
+  if (summaries.length === 0) return undefined;
+  const triggered = summaries.filter((entry) => entry.summary.triggered);
+  return {
+    attempts: events.length,
+    enabledAttempts: summaries.length,
+    triggeredAttempts: triggered.length,
+    triggeredAttemptIds: triggered.map((entry) => entry.event.id),
+    createCalls: sum(summaries.map((entry) => entry.summary.calls.create)),
+    updateCalls: sum(summaries.map((entry) => entry.summary.calls.update)),
+    listCalls: sum(summaries.map((entry) => entry.summary.calls.list)),
+    getCalls: sum(summaries.map((entry) => entry.summary.calls.get)),
+    taskCount: sum(summaries.map((entry) => entry.summary.taskCount)),
+    terminalTasks: sum(summaries.map((entry) => entry.summary.terminalTasks)),
+  };
+}
+
 function sumCountRecords(records: readonly Record<string, number>[]): Record<string, number> {
   const result: Record<string, number> = {};
   for (const record of records) {
@@ -434,7 +463,10 @@ function summarizeInvestigationRefs(
       (attempt) =>
         ('contextBudgetSummary' in attempt.event &&
           isActivePruneActivated(attempt.event.contextBudgetSummary)) ||
-        ('agentPlanSummary' in attempt.event && attempt.event.agentPlanSummary?.triggered === true),
+        ('agentPlanSummary' in attempt.event &&
+          attempt.event.agentPlanSummary?.triggered === true) ||
+        ('taskLedgerSummary' in attempt.event &&
+          attempt.event.taskLedgerSummary?.triggered === true),
     )
     .map(attemptRef);
 

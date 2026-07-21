@@ -6,6 +6,7 @@ import {
   type HarborCellContextBudgetPolicySnapshot,
   type HarborCellContextBudgetSummary,
   type HarborCellAgentPlanSummary,
+  type HarborCellTaskLedgerSummary,
   type HarborCellContinuationSummary,
   type HarborCellDeadlineSettlement,
   type HarborCellExecutionIdentity,
@@ -128,6 +129,7 @@ export interface FixedPromptTaskCompletedEvent {
   continuationSummary?: HarborCellContinuationSummary;
   taskToolSummary?: HarborCellTaskToolSummary;
   agentPlanSummary?: HarborCellAgentPlanSummary;
+  taskLedgerSummary?: HarborCellTaskLedgerSummary;
   steps: number;
   durationMs: number;
   runtimeEventsPath: string;
@@ -209,6 +211,7 @@ export interface FixedPromptTaskBudgetExhaustedEvent {
   continuationSummary?: HarborCellContinuationSummary;
   taskToolSummary?: HarborCellTaskToolSummary;
   agentPlanSummary?: HarborCellAgentPlanSummary;
+  taskLedgerSummary?: HarborCellTaskLedgerSummary;
   steps?: number;
   durationMs?: number;
 }
@@ -243,6 +246,7 @@ export interface FixedPromptTaskPlumbingFailedEvent {
   continuationSummary?: HarborCellContinuationSummary;
   taskToolSummary?: HarborCellTaskToolSummary;
   agentPlanSummary?: HarborCellAgentPlanSummary;
+  taskLedgerSummary?: HarborCellTaskLedgerSummary;
   steps?: number;
   durationMs?: number;
   runtimeEventsPath?: string;
@@ -912,6 +916,7 @@ function taskCompletedEvent(input: {
       : {}),
     ...(output.cell.taskToolSummary ? { taskToolSummary: output.cell.taskToolSummary } : {}),
     ...(output.cell.agentPlanSummary ? { agentPlanSummary: output.cell.agentPlanSummary } : {}),
+    ...(output.cell.taskLedgerSummary ? { taskLedgerSummary: output.cell.taskLedgerSummary } : {}),
     steps: output.cell.steps,
     durationMs: output.cell.durationMs,
     runtimeEventsPath: output.cell.runtimeEventsPath,
@@ -983,6 +988,9 @@ function taskPlumbingFailedEvent(input: {
       : {}),
     ...(input.output.cell.agentPlanSummary
       ? { agentPlanSummary: input.output.cell.agentPlanSummary }
+      : {}),
+    ...(input.output.cell.taskLedgerSummary
+      ? { taskLedgerSummary: input.output.cell.taskLedgerSummary }
       : {}),
     steps: input.output.cell.steps,
     durationMs: input.output.cell.durationMs,
@@ -1283,6 +1291,7 @@ function taskBudgetExhaustedEvent(input: {
       : {}),
     ...(cellOutput?.taskToolSummary ? { taskToolSummary: cellOutput.taskToolSummary } : {}),
     ...(cellOutput?.agentPlanSummary ? { agentPlanSummary: cellOutput.agentPlanSummary } : {}),
+    ...(cellOutput?.taskLedgerSummary ? { taskLedgerSummary: cellOutput.taskLedgerSummary } : {}),
     ...(cellOutput ? { steps: cellOutput.steps, durationMs: cellOutput.durationMs } : {}),
   };
 }
@@ -1323,6 +1332,7 @@ function projectLegacyTimeoutOutcome(event: FixedPromptWalEvent): FixedPromptWal
     ...(event.continuationSummary ? { continuationSummary: event.continuationSummary } : {}),
     ...(event.taskToolSummary ? { taskToolSummary: event.taskToolSummary } : {}),
     ...(event.agentPlanSummary ? { agentPlanSummary: event.agentPlanSummary } : {}),
+    ...(event.taskLedgerSummary ? { taskLedgerSummary: event.taskLedgerSummary } : {}),
     ...(event.steps !== undefined ? { steps: event.steps } : {}),
     ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
   };

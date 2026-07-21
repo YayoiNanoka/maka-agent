@@ -9,7 +9,11 @@ import { DEFAULT_HEADLESS_SYSTEM_PROMPT } from '@maka/headless';
 import { createFileCredentialStore } from '@maka/storage';
 import { ensureAbRunManifest } from '#ab-manifest';
 import { createCodexOAuthHarnessCredentialBinding } from '#codex-oauth-harness';
-import { discoverCachedHarborTasks, resolveFixedPromptRunRoot } from '#fixed-prompt-task-source';
+import {
+  discoverCachedHarborTasks,
+  fingerprintFixedPromptTaskTree,
+  resolveFixedPromptRunRoot,
+} from '#fixed-prompt-task-source';
 import { createHarborTaskRunner } from '#harbor-task-runner';
 import { providerCredentialEnv } from '#provider-env';
 import { runRuntimePolicyAbLifecycle } from '#runtime-policy-ab-lifecycle';
@@ -19,6 +23,11 @@ import {
   renderRuntimePolicyAbComparisonMarkdown,
 } from '#runtime-policy-ab-run';
 import { parseRuntimePolicyAbSpec } from '#runtime-policy-ab-spec';
+import {
+  assertTerminalBench21TaskSet,
+  assertTerminalBench21TaskTreeFingerprint,
+  TERMINAL_BENCH_2_1_TASK_IDS,
+} from '#harness-ab-manifest';
 import {
   buildSubjectFingerprint,
   buildTaskSourceFingerprint,
@@ -70,10 +79,12 @@ async function resolveRuntimePolicyCredentials(executionProfile) {
     }
     const credentialsRoot = envPath('MAKA_RUNTIME_AB_WORKSPACE_ROOT', defaultMakaWorkspaceRoot());
     const credentialStore = createFileCredentialStore(credentialsRoot);
-    const apiKey = await credentialStore.getSecret(executionProfile.llmConnectionSlug, 'api_key');
+    const credentialConnectionSlug =
+      process.env.MAKA_RUNTIME_AB_CREDENTIAL_CONNECTION_SLUG || executionProfile.llmConnectionSlug;
+    const apiKey = await credentialStore.getSecret(credentialConnectionSlug, 'api_key');
     if (!apiKey?.trim()) {
       throw new Error(
-        `Maka API key is unavailable for ${executionProfile.llmConnectionSlug}; set MAKA_RUNTIME_AB_KEY_FILE or sign in through Maka`,
+        `Maka API key is unavailable for ${credentialConnectionSlug}; set MAKA_RUNTIME_AB_KEY_FILE, MAKA_RUNTIME_AB_CREDENTIAL_CONNECTION_SLUG, or sign in through Maka`,
       );
     }
     return { resolveProviderCredential: async () => ({ value: apiKey }) };
@@ -100,10 +111,23 @@ async function main() {
   const executionProfile = parseRuntimePolicyAbExecutionProfile(
     JSON.parse(await readFile(profilePath, 'utf8')),
   );
-  const selectedTaskIds = new Set([...spec.pilotTaskIds, ...spec.evaluationTaskIds]);
-  const allTasks = await discoverCachedHarborTasks(tasksRoot, selectedTaskIds);
+  const evaluationTaskIds =
+    spec.evaluationTaskSet === 'terminal-bench-2.1'
+      ? TERMINAL_BENCH_2_1_TASK_IDS
+      : spec.evaluationTaskIds;
+  if (!evaluationTaskIds)
+    throw new Error('runtime policy A/B evaluation task selection is missing');
+  const selectedTaskIds = new Set([...spec.pilotTaskIds, ...evaluationTaskIds]);
+  const allTasks = await discoverCachedHarborTasks(
+    tasksRoot,
+    spec.evaluationTaskSet ? undefined : selectedTaskIds,
+  );
+  if (spec.evaluationTaskSet === 'terminal-bench-2.1') {
+    assertTerminalBench21TaskSet(allTasks.map((task) => task.id));
+    assertTerminalBench21TaskTreeFingerprint(await fingerprintFixedPromptTaskTree(allTasks));
+  }
   const pilotTasks = selectTasks(allTasks, spec.pilotTaskIds, 'pilotTaskIds');
-  const evaluationTasks = selectTasks(allTasks, spec.evaluationTaskIds, 'evaluationTaskIds');
+  const evaluationTasks = selectTasks(allTasks, evaluationTaskIds, 'evaluationTaskIds');
   const systemPrompt = DEFAULT_HEADLESS_SYSTEM_PROMPT;
   const runManifest = buildRuntimePolicyAbRunManifest({
     arms: spec.arms,

@@ -19,6 +19,10 @@ import {
   appendHeadlessAgentPlanPolicyToSystemPrompt,
   resolveHeadlessAgentPlanPolicy,
 } from '../agent-plan-policy.js';
+import {
+  appendHeadlessTaskLedgerPolicyToSystemPrompt,
+  resolveHeadlessTaskLedgerPolicy,
+} from '../headless-task-ledger-policy.js';
 
 const config: Config = {
   id: 'cfg-runtime-policy-ab',
@@ -202,6 +206,38 @@ describe('runRuntimePolicyAbComparison', () => {
         .filter((event) => event.type === 'task_completed')
         .map((event) => event.promptHash);
       assert.equal(new Set(promptHashes).size, 2);
+    });
+  });
+
+  test('accepts the effective prompt hash and metrics for true Task Ledger arms', async () => {
+    await withDir(async (dir) => {
+      const systemPromptPath = join(dir, 'system_prompt.md');
+      const resultsJsonlPath = join(dir, 'results.jsonl');
+      await writeFile(systemPromptPath, 'fixed prompt\n', 'utf8');
+      const result = await runRuntimePolicyAbComparison({
+        runId: 'runtime-task-ledger-ab',
+        runRoot: dir,
+        config,
+        systemPromptPath,
+        resultsJsonlPath,
+        evaluationTasks: [{ id: 't1', path: '/bench/t1' }],
+        reps: 1,
+        arms: [
+          { id: 'task-ledger-off', contextEnv: { MAKA_CONTEXT_TASK_LEDGER: 'off' } },
+          { id: 'task-ledger-on', contextEnv: { MAKA_CONTEXT_TASK_LEDGER: 'on' } },
+        ],
+        executionProfile,
+        harborRunner: async (input) => harborOutput(input),
+        now: () => 100,
+        newId: idFactory(),
+      });
+
+      assert.equal(result.baseline.taskLedger, undefined);
+      assert.equal(result.candidate.taskLedger?.triggeredAttempts, 1);
+      assert.equal(result.candidate.taskLedger?.createCalls, 2);
+      assert.equal(result.candidate.taskLedger?.updateCalls, 3);
+      assert.equal(result.candidate.taskLedger?.taskCount, 2);
+      assert.equal(result.candidate.taskLedger?.terminalTasks, 2);
     });
   });
 
@@ -472,8 +508,12 @@ describe('runRuntimePolicyAbComparison', () => {
 function harborOutput(input: HarborTaskRunInput): HarborTaskRunOutput {
   const pruneOn = input.agentEnv?.MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE === 'on';
   const agentPlanOn = input.agentEnv?.MAKA_CONTEXT_AGENT_PLAN === 'on';
+  const taskLedgerOn = input.agentEnv?.MAKA_CONTEXT_TASK_LEDGER === 'on';
   const effectiveSystemPrompt = appendHeadlessAgentPlanPolicyToSystemPrompt(
-    input.systemPrompt,
+    appendHeadlessTaskLedgerPolicyToSystemPrompt(
+      input.systemPrompt,
+      resolveHeadlessTaskLedgerPolicy(input.agentEnv ?? {}),
+    ),
     resolveHeadlessAgentPlanPolicy(input.agentEnv ?? {}),
   );
   return {
@@ -526,6 +566,20 @@ function harborOutput(input: HarborTaskRunInput): HarborTaskRunOutput {
                 completedSteps: 2,
                 skippedSteps: 0,
               },
+            },
+          }
+        : {}),
+      ...(taskLedgerOn
+        ? {
+            taskLedgerSummary: {
+              enabled: true as const,
+              policyVersion: 'maka-headless-task-ledger.v1',
+              triggered: true,
+              calls: { create: 2, update: 3, list: 1, get: 1 },
+              taskCount: 2,
+              pendingTasks: 0,
+              inProgressTasks: 0,
+              terminalTasks: 2,
             },
           }
         : {}),

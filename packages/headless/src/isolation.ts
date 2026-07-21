@@ -1,6 +1,8 @@
 import type { ShellPlan } from '@maka/runtime';
 import type { PlanStore } from '@maka/core/plan';
+import type { TaskLedgerStore } from '@maka/core';
 import type { HeadlessAgentPlanPolicy } from './agent-plan-policy.js';
+import type { HeadlessTaskLedgerPolicy } from './headless-task-ledger-policy.js';
 import type { Config, Task } from './contracts.js';
 import type { HeavyTaskEvidenceRecorder } from './heavy-task-evidence.js';
 import type { HeavyTaskModeSelection } from './heavy-task-policy.js';
@@ -196,6 +198,10 @@ export interface HeadlessBackendContext extends Partial<HeadlessSessionCapabilit
   planStore?: PlanStore;
   /** Optional autonomous Plan policy resolved for this cell. */
   agentPlanPolicy?: HeadlessAgentPlanPolicy;
+  /** Shared durable Task Ledger store for the optional Headless experiment policy. */
+  taskLedgerStore?: TaskLedgerStore;
+  /** Optional true Task Ledger policy resolved for this cell. */
+  taskLedgerPolicy?: HeadlessTaskLedgerPolicy;
   /**
    * Present only for model-backed backends and only after the caller has
    * explicitly asserted an isolation boundary.
