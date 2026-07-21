@@ -1882,6 +1882,7 @@ with tempfile.TemporaryDirectory() as tmp:
     gateway_agent = MakaAgent(Path(tmp), extra_env={
         "MAKA_HOST_API_KEY_FILE": "/host/deepseek-key",
         "MAKA_PROVIDER": "openai-compatible",
+        "MAKA_LLM_CONNECTION_SLUG": "benchmark-subscription",
         "MAKA_MODEL": "anthropic/claude-sonnet-4-5",
         "MAKA_TRIAL_INPUT_USD_PER_1M": "0.145",
         "MAKA_TRIAL_OUTPUT_USD_PER_1M": "0.29",
@@ -1896,6 +1897,7 @@ with tempfile.TemporaryDirectory() as tmp:
     })
     gateway_env = gateway_agent._cell_env(Path("/logs/agent/instruction.txt"))
     assert gateway_env["MAKA_PROVIDER"] == "openai-compatible", gateway_env
+    assert gateway_env["MAKA_LLM_CONNECTION_SLUG"] == "benchmark-subscription", gateway_env
     assert gateway_env["MAKA_MODEL"] == "anthropic/claude-sonnet-4-5", gateway_env
     assert "MAKA_WORKDIR" not in gateway_env, gateway_env
     # Trial pricing must reach the in-container cell so it can price unknown models.

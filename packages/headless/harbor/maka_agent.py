@@ -440,6 +440,9 @@ class MakaAgent(BaseInstalledAgent):
             "MAKA_TRIAL_CACHE_WRITE_USD_PER_1M",
             "MAKA_TRIAL_PRICING_SOURCE",
             "MAKA_REASONING_EFFORT",
+            # Preserve the runtime connection identity independently of the
+            # provider wire used by the host-side backend.
+            "MAKA_LLM_CONNECTION_SLUG",
             # Default per-command timeout floor for the in-container Bash tool, so
             # long builds/tests do not hit a hard-coded 2-minute ceiling.
             "MAKA_CELL_COMMAND_TIMEOUT_MS",
