@@ -183,11 +183,10 @@ async function main() {
       ? { thinkingLevel: executionProfile.reasoningEffort }
       : {}),
   };
-  const [baseUrlEnvName] = providerCredentialEnv(executionProfile.provider)?.baseUrls ?? [];
-  if (!baseUrlEnvName)
-    throw new Error(
-      `runtime policy A/B provider ${executionProfile.provider} does not declare a base URL environment variable`,
-    );
+  const baseUrlAgentEnv = runtimePolicyBaseUrlAgentEnv(
+    executionProfile.provider,
+    executionProfile.baseUrl,
+  );
   const harborRunner = createHarborTaskRunner({
     makaRepoPath,
     jobsDir,
@@ -200,7 +199,7 @@ async function main() {
       : {}),
     pricing: executionProfile.pricing,
     agentEnv: {
-      [baseUrlEnvName]: executionProfile.baseUrl,
+      ...baseUrlAgentEnv,
       MAKA_CELL_TIMEOUT_SEC: String(executionProfile.taskBudgetSec),
     },
     harborTimeoutMs: executionProfile.harborTimeoutMs,
@@ -237,6 +236,11 @@ async function main() {
   console.log(
     `status: ${state.status}${state.reason ? ` (${state.reason})` : ''}${state.full ? `; decision: ${state.full.decision}` : ''}`,
   );
+}
+
+export function runtimePolicyBaseUrlAgentEnv(provider, baseUrl) {
+  const [baseUrlEnvName] = providerCredentialEnv(provider)?.baseUrls ?? [];
+  return baseUrlEnvName ? { [baseUrlEnvName]: baseUrl } : { MAKA_BASE_URL: baseUrl };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

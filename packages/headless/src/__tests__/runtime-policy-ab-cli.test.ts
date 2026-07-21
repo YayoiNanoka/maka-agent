@@ -8,6 +8,20 @@ import { test } from 'node:test';
 
 const execFileAsync = promisify(execFile);
 
+test('runtime policy A/B uses the generic base URL for Codex OAuth profiles', async () => {
+  const scriptPath = new URL('../../harbor/run-runtime-policy-ab.mjs', import.meta.url);
+  const { runtimePolicyBaseUrlAgentEnv } = await import(scriptPath.href);
+  assert.deepEqual(
+    runtimePolicyBaseUrlAgentEnv('openai-codex', 'https://chatgpt.com/backend-api'),
+    {
+      MAKA_BASE_URL: 'https://chatgpt.com/backend-api',
+    },
+  );
+  assert.deepEqual(runtimePolicyBaseUrlAgentEnv('deepseek', 'https://api.deepseek.com'), {
+    DEEPSEEK_BASE_URL: 'https://api.deepseek.com',
+  });
+});
+
 test('runtime policy A/B CLI dry-run builds one executable Flash manifest without reading a key', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'maka-runtime-ab-cli-'));
   try {
