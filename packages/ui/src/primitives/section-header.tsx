@@ -13,6 +13,8 @@ import { cn } from '../utils.js';
 
 export interface SectionHeaderProps {
   title: ReactNode;
+  /** `id` on the title element, for a section's `aria-labelledby` link. */
+  titleId?: string;
   /** Muted trailing count (e.g. "3 个" / "2 份"). */
   count?: ReactNode;
   /** One quiet line under the title (permission's layer explainer). */
@@ -21,12 +23,15 @@ export interface SectionHeaderProps {
   action?: ReactNode;
   /** Leading accent bar (daily-review's section marker). */
   accent?: boolean;
-  as?: 'h4' | 'span';
+  /** Heading level for the title, or a non-heading `span`. `h3` is for a
+   *  section that sits directly under a page `h2` (关于 privacy, 数据 config). */
+  as?: 'h3' | 'h4' | 'span';
   className?: string;
 }
 
 export function SectionHeader({
   title,
+  titleId,
   count,
   subtitle,
   action,
@@ -41,6 +46,7 @@ export function SectionHeader({
     >
       <div className="min-w-0">
         <Tag
+          id={titleId}
           className={cn(
             'm-0 inline-flex items-center gap-2 text-[length:var(--font-size-ui)] font-semibold text-foreground',
             accent &&

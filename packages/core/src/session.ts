@@ -334,6 +334,7 @@ export interface TokenUsageMessage {
   requestShapeChangeReason?: PrefixChangeReason;
   promptSegments?: PromptSegmentEstimate[];
   contextBudget?: ContextBudgetDiagnostic;
+  providerRequestTraceId?: string;
 }
 
 export interface TurnStateMessage {
@@ -429,6 +430,7 @@ const TOKEN_USAGE_MESSAGE_SHAPE = defineObjectShape<TokenUsageMessage>()(
     'requestShapeChangeReason',
     'promptSegments',
     'contextBudget',
+    'providerRequestTraceId',
   ],
 );
 const TURN_STATE_MESSAGE_SHAPE = defineObjectShape<TurnStateMessage>()(
@@ -545,7 +547,8 @@ function decodeStoredMessage(
       if (
         hasExactShape(message, TOKEN_USAGE_MESSAGE_SHAPE) &&
         hasMessageEnvelope(message, true) &&
-        isTokenUsageFields(message)
+        isTokenUsageFields(message) &&
+        isOptionalString(message.providerRequestTraceId)
       )
         return message as unknown as TokenUsageMessage;
       break;
