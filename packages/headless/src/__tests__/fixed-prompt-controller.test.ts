@@ -29,6 +29,43 @@ const config: Config = {
 };
 
 describe('fixed prompt controller', () => {
+  test('accepts an attested bare model for a provider-qualified configured model', async () => {
+    await withDir(async (dir) => {
+      const systemPromptPath = join(dir, 'system_prompt.md');
+      await writeFile(systemPromptPath, 'fixed prompt\n', 'utf8');
+      const qualifiedConfig: Config = {
+        ...config,
+        llmConnectionSlug: 'codex-subscription',
+        model: 'openai-codex/gpt-5.6-sol',
+        thinkingLevel: 'max',
+      };
+
+      const result = await runFixedPromptController({
+        runId: 'run-1',
+        roundId: 'round-1',
+        config: qualifiedConfig,
+        systemPromptPath,
+        resultsJsonlPath: join(dir, 'results.jsonl'),
+        tasks: [{ id: 'task-a', path: '/bench/task-a' }],
+        requireExecutionIdentity: true,
+        expectedPricingProfile: 'test-profile',
+        harborRunner: async () =>
+          harborOutput({
+            taskId: 'task-a',
+            executionIdentity: {
+              llmConnectionSlug: 'codex-subscription',
+              model: 'gpt-5.6-sol',
+              reasoningEffort: 'max',
+              systemPromptHash: hashSystemPrompt('fixed prompt\n'),
+              pricingProfile: 'test-profile',
+            },
+          }),
+      });
+
+      assert.equal(result.events[0]?.type, 'task_completed');
+    });
+  });
+
   test('persists structured verifier attempts in the terminal WAL event', async () => {
     await withDir(async (dir) => {
       const systemPromptPath = join(dir, 'system_prompt.md');

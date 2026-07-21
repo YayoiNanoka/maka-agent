@@ -1088,10 +1088,11 @@ function classifyExecutionIdentityFailure(
     };
   }
   if (identity) {
-    const modelPrefix = `${expectedConfig.llmConnectionSlug}/`;
-    const expectedModel = expectedConfig.model?.startsWith(modelPrefix)
-      ? expectedConfig.model.slice(modelPrefix.length)
-      : expectedConfig.model;
+    const qualifiedModelSeparator = expectedConfig.model?.indexOf('/') ?? -1;
+    const expectedModel =
+      qualifiedModelSeparator >= 0
+        ? expectedConfig.model?.slice(qualifiedModelSeparator + 1)
+        : expectedConfig.model;
     if (
       identity.llmConnectionSlug !== expectedConfig.llmConnectionSlug ||
       identity.model !== expectedModel ||
