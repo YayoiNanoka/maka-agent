@@ -1,4 +1,5 @@
 import type { HarborBillingMode, HarborTaskPricing } from './harbor-task-runner.js';
+import type { ThinkingLevel } from '@maka/core';
 
 export interface RuntimePolicyAbExecutionProfile {
   schemaVersion: 1;
@@ -7,6 +8,7 @@ export interface RuntimePolicyAbExecutionProfile {
   provider: string;
   baseUrl: string;
   model: string;
+  reasoningEffort?: ThinkingLevel;
   billingMode?: HarborBillingMode;
   pricing: HarborTaskPricing & { source: string };
   taskBudgetSec: number;
@@ -26,6 +28,14 @@ export function parseRuntimePolicyAbExecutionProfile(
   }
   if (!String(value.model).startsWith(`${String(value.provider)}/`)) {
     throw new Error('runtime policy A/B execution profile model must be qualified by its provider');
+  }
+  if (
+    value.reasoningEffort !== undefined &&
+    !['none', 'low', 'medium', 'high', 'max'].includes(String(value.reasoningEffort))
+  ) {
+    throw new Error(
+      'runtime policy A/B execution profile reasoningEffort must be none, low, medium, high, or max',
+    );
   }
   if (
     value.billingMode !== undefined &&

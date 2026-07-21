@@ -6,7 +6,9 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_HEADLESS_SYSTEM_PROMPT } from '@maka/headless';
+import { createFileCredentialStore } from '@maka/storage';
 import { ensureAbRunManifest } from '#ab-manifest';
+import { createCodexOAuthHarnessCredentialBinding } from '#codex-oauth-harness';
 import { discoverCachedHarborTasks, resolveFixedPromptRunRoot } from '#fixed-prompt-task-source';
 import { createHarborTaskRunner } from '#harbor-task-runner';
 import { providerCredentialEnv } from '#provider-env';
@@ -35,6 +37,52 @@ function selectTasks(allTasks, taskIds, label) {
   if (missing.length > 0)
     throw new Error(`${label} contains unknown task id(s): ${missing.join(', ')}`);
   return taskIds.map((id) => byId.get(id));
+}
+
+function defaultMakaWorkspaceRoot() {
+  if (process.platform === 'darwin') {
+    return join(homedir(), 'Library', 'Application Support', 'Maka', 'workspaces', 'default');
+  }
+  if (process.platform === 'win32') {
+    return join(
+      process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'),
+      'Maka',
+      'workspaces',
+      'default',
+    );
+  }
+  return join(
+    process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'),
+    'Maka',
+    'workspaces',
+    'default',
+  );
+}
+
+async function resolveRuntimePolicyCredentials(executionProfile) {
+  if (executionProfile.provider !== 'openai-codex') {
+    if (process.env.MAKA_RUNTIME_AB_KEY_FILE) {
+      const apiKeyFile = envPath('MAKA_RUNTIME_AB_KEY_FILE');
+      if ((await readFile(apiKeyFile, 'utf8')).trim().length === 0) {
+        throw new Error('runtime policy A/B credential is empty');
+      }
+      return { apiKeyFile };
+    }
+    const credentialsRoot = envPath('MAKA_RUNTIME_AB_WORKSPACE_ROOT', defaultMakaWorkspaceRoot());
+    const credentialStore = createFileCredentialStore(credentialsRoot);
+    const apiKey = await credentialStore.getSecret(executionProfile.llmConnectionSlug, 'api_key');
+    if (!apiKey?.trim()) {
+      throw new Error(
+        `Maka API key is unavailable for ${executionProfile.llmConnectionSlug}; set MAKA_RUNTIME_AB_KEY_FILE or sign in through Maka`,
+      );
+    }
+    return { resolveProviderCredential: async () => ({ value: apiKey }) };
+  }
+  return createCodexOAuthHarnessCredentialBinding({
+    credentialsRoot: envPath('MAKA_RUNTIME_AB_WORKSPACE_ROOT', defaultMakaWorkspaceRoot()),
+    connectionSlug:
+      process.env.MAKA_RUNTIME_AB_OAUTH_CONNECTION_SLUG || executionProfile.llmConnectionSlug,
+  });
 }
 
 async function main() {
@@ -91,11 +139,7 @@ async function main() {
     return;
   }
 
-  const keyFile = envPath(
-    'MAKA_RUNTIME_AB_KEY_FILE',
-    join(repoRoot, '.local-secrets/deepseek-key'),
-  );
-  await readFile(keyFile, 'utf8');
+  const credentials = await resolveRuntimePolicyCredentials(executionProfile);
   const controllerDir = join(runRoot, 'controller');
   const jobsDir = join(runRoot, 'jobs');
   const promptsDir = join(runRoot, 'prompts');
@@ -109,6 +153,10 @@ async function main() {
     backend: 'harbor',
     llmConnectionSlug: executionProfile.llmConnectionSlug,
     model: executionProfile.model,
+    heavyTaskMode: false,
+    ...(executionProfile.reasoningEffort
+      ? { thinkingLevel: executionProfile.reasoningEffort }
+      : {}),
   };
   const [baseUrlEnvName] = providerCredentialEnv(executionProfile.provider)?.baseUrls ?? [];
   if (!baseUrlEnvName)
@@ -120,7 +168,11 @@ async function main() {
     jobsDir,
     model: executionProfile.model,
     provider: executionProfile.provider,
-    apiKeyFile: keyFile,
+    reasoningEffort: executionProfile.reasoningEffort,
+    ...credentials,
+    ...(executionProfile.provider === 'openai-codex'
+      ? { apiKeyEnvName: 'OPENAI_CODEX_OAUTH_TOKEN' }
+      : {}),
     pricing: executionProfile.pricing,
     agentEnv: {
       [baseUrlEnvName]: executionProfile.baseUrl,

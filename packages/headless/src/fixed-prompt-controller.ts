@@ -5,6 +5,7 @@ import {
   validateHarborCellOutput,
   type HarborCellContextBudgetPolicySnapshot,
   type HarborCellContextBudgetSummary,
+  type HarborCellAgentPlanSummary,
   type HarborCellContinuationSummary,
   type HarborCellDeadlineSettlement,
   type HarborCellExecutionIdentity,
@@ -126,6 +127,7 @@ export interface FixedPromptTaskCompletedEvent {
   contextBudgetSummary?: HarborCellContextBudgetSummary;
   continuationSummary?: HarborCellContinuationSummary;
   taskToolSummary?: HarborCellTaskToolSummary;
+  agentPlanSummary?: HarborCellAgentPlanSummary;
   steps: number;
   durationMs: number;
   runtimeEventsPath: string;
@@ -206,6 +208,7 @@ export interface FixedPromptTaskBudgetExhaustedEvent {
   contextBudgetSummary?: HarborCellContextBudgetSummary;
   continuationSummary?: HarborCellContinuationSummary;
   taskToolSummary?: HarborCellTaskToolSummary;
+  agentPlanSummary?: HarborCellAgentPlanSummary;
   steps?: number;
   durationMs?: number;
 }
@@ -239,6 +242,7 @@ export interface FixedPromptTaskPlumbingFailedEvent {
   contextBudgetSummary?: HarborCellContextBudgetSummary;
   continuationSummary?: HarborCellContinuationSummary;
   taskToolSummary?: HarborCellTaskToolSummary;
+  agentPlanSummary?: HarborCellAgentPlanSummary;
   steps?: number;
   durationMs?: number;
   runtimeEventsPath?: string;
@@ -363,6 +367,8 @@ export interface RunFixedPromptControllerInput {
   roundId: string;
   config: Config;
   systemPromptPath: string;
+  /** Actual runtime prompt hash when a runtime policy appends a deterministic suffix. */
+  expectedEffectivePromptHash?: string;
   resultsJsonlPath: string;
   resultsTsvPath?: string;
   tasks: readonly FixedPromptTask[];
@@ -415,7 +421,10 @@ export async function runFixedPromptController(
   const terminalInfraFailures = input.protectPassAtOne || input.infraFailurePolicy === 'terminal';
   assertUniqueTaskIds(input.tasks.map((task) => task.id));
   const systemPrompt = await readFile(input.systemPromptPath, 'utf8');
-  const expectedPromptHash = hashSystemPrompt(systemPrompt);
+  const expectedPromptHash = input.expectedEffectivePromptHash ?? hashSystemPrompt(systemPrompt);
+  if (!/^sha256:[a-f0-9]{64}$/.test(expectedPromptHash)) {
+    throw new Error('expectedEffectivePromptHash must be a sha256 fingerprint');
+  }
   const config = { ...input.config, systemPrompt };
   const events = await readFixedPromptWal(input.resultsJsonlPath);
   const attemptEvents = input.protectPassAtOne
@@ -902,6 +911,7 @@ function taskCompletedEvent(input: {
       ? { continuationSummary: output.cell.continuationSummary }
       : {}),
     ...(output.cell.taskToolSummary ? { taskToolSummary: output.cell.taskToolSummary } : {}),
+    ...(output.cell.agentPlanSummary ? { agentPlanSummary: output.cell.agentPlanSummary } : {}),
     steps: output.cell.steps,
     durationMs: output.cell.durationMs,
     runtimeEventsPath: output.cell.runtimeEventsPath,
@@ -970,6 +980,9 @@ function taskPlumbingFailedEvent(input: {
       : {}),
     ...(input.output.cell.taskToolSummary
       ? { taskToolSummary: input.output.cell.taskToolSummary }
+      : {}),
+    ...(input.output.cell.agentPlanSummary
+      ? { agentPlanSummary: input.output.cell.agentPlanSummary }
       : {}),
     steps: input.output.cell.steps,
     durationMs: input.output.cell.durationMs,
@@ -1269,6 +1282,7 @@ function taskBudgetExhaustedEvent(input: {
       ? { continuationSummary: cellOutput.continuationSummary }
       : {}),
     ...(cellOutput?.taskToolSummary ? { taskToolSummary: cellOutput.taskToolSummary } : {}),
+    ...(cellOutput?.agentPlanSummary ? { agentPlanSummary: cellOutput.agentPlanSummary } : {}),
     ...(cellOutput ? { steps: cellOutput.steps, durationMs: cellOutput.durationMs } : {}),
   };
 }
@@ -1308,6 +1322,7 @@ function projectLegacyTimeoutOutcome(event: FixedPromptWalEvent): FixedPromptWal
     ...(event.contextBudgetSummary ? { contextBudgetSummary: event.contextBudgetSummary } : {}),
     ...(event.continuationSummary ? { continuationSummary: event.continuationSummary } : {}),
     ...(event.taskToolSummary ? { taskToolSummary: event.taskToolSummary } : {}),
+    ...(event.agentPlanSummary ? { agentPlanSummary: event.agentPlanSummary } : {}),
     ...(event.steps !== undefined ? { steps: event.steps } : {}),
     ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
   };

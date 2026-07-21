@@ -1,7 +1,11 @@
-import type { RuntimeEvent } from '@maka/core';
+import type { PlanSessionState, RuntimeEvent } from '@maka/core';
 import type { ThinkingLevel } from '@maka/core';
 import type { ContextBudgetPolicy, InvocationResult } from '@maka/runtime';
 import type { HeadlessSystemPromptMode } from './contracts.js';
+import {
+  latestHeadlessAgentPlanExecution,
+  type HeadlessAgentPlanPolicy,
+} from './agent-plan-policy.js';
 
 export const HARBOR_CELL_OUTPUT_SCHEMA_VERSION = 1;
 
@@ -104,6 +108,24 @@ export interface HarborCellTaskToolSummary {
   todoWriteCalls: number;
 }
 
+export interface HarborCellAgentPlanSummary {
+  enabled: true;
+  policyVersion: string;
+  triggered: boolean;
+  updatePlanCalls: number;
+  executionCount: number;
+  latestExecution?: {
+    planId: string;
+    executionId: string;
+    status: 'active' | 'completed' | 'cancelled' | 'interrupted';
+    stepCount: number;
+    pendingSteps: number;
+    inProgressSteps: number;
+    completedSteps: number;
+    skippedSteps: number;
+  };
+}
+
 export interface HarborCellOutput {
   schemaVersion: typeof HARBOR_CELL_OUTPUT_SCHEMA_VERSION;
   status: InvocationResult['status'];
@@ -118,6 +140,7 @@ export interface HarborCellOutput {
   continuationSummary?: HarborCellContinuationSummary;
   toolSummary: HarborCellToolSummary;
   taskToolSummary?: HarborCellTaskToolSummary;
+  agentPlanSummary?: HarborCellAgentPlanSummary;
   steps: number;
   durationMs: number;
   startedAt: number;
@@ -133,6 +156,8 @@ export function buildHarborCellOutput(input: {
   contextBudgetPolicy?: HarborCellContextBudgetPolicySnapshot;
   continuationSummary?: HarborCellContinuationSummary;
   taskToolSummaryEnabled?: boolean;
+  agentPlanPolicy?: HeadlessAgentPlanPolicy;
+  agentPlanState?: PlanSessionState;
 }): HarborCellOutput {
   const { invocation } = input;
   const tokenSummary = summarizeCellTokens(invocation.events);
@@ -150,6 +175,15 @@ export function buildHarborCellOutput(input: {
     ...(input.continuationSummary ? { continuationSummary: input.continuationSummary } : {}),
     toolSummary: summarizeCellTools(invocation.events),
     ...taskToolSummaryField(invocation.events, input.taskToolSummaryEnabled ?? false),
+    ...(input.agentPlanPolicy?.enabled
+      ? {
+          agentPlanSummary: summarizeCellAgentPlan(
+            invocation.events,
+            input.agentPlanPolicy,
+            input.agentPlanState,
+          ),
+        }
+      : {}),
     steps: countRuntimeSteps(invocation.events),
     durationMs: invocation.finishedAt - invocation.startedAt,
     startedAt: invocation.startedAt,
@@ -230,6 +264,8 @@ export function validateHarborCellOutput(value: unknown): HarborCellOutput {
   const toolSummary = validateToolSummary(value.toolSummary);
   const taskToolSummary =
     'taskToolSummary' in value ? validateTaskToolSummary(value.taskToolSummary) : undefined;
+  const agentPlanSummary =
+    'agentPlanSummary' in value ? validateAgentPlanSummary(value.agentPlanSummary) : undefined;
   const steps = requireNumber(value.steps, 'steps');
   const durationMs = requireNumber(value.durationMs, 'durationMs');
   const startedAt = requireNumber(value.startedAt, 'startedAt');
@@ -249,6 +285,7 @@ export function validateHarborCellOutput(value: unknown): HarborCellOutput {
     ...(continuationSummary !== undefined ? { continuationSummary } : {}),
     toolSummary,
     ...(taskToolSummary !== undefined ? { taskToolSummary } : {}),
+    ...(agentPlanSummary !== undefined ? { agentPlanSummary } : {}),
     steps,
     durationMs,
     startedAt,
@@ -316,6 +353,44 @@ export function summarizeCellTaskTools(events: readonly RuntimeEvent[]): HarborC
     summary.todoWriteCalls += 1;
   }
   return summary;
+}
+
+export function summarizeCellAgentPlan(
+  events: readonly RuntimeEvent[],
+  policy: HeadlessAgentPlanPolicy,
+  state: PlanSessionState | undefined,
+): HarborCellAgentPlanSummary {
+  const executions =
+    state?.executions.filter((execution) => execution.source === 'agent_initiated') ?? [];
+  const latest = state ? latestHeadlessAgentPlanExecution(state) : undefined;
+  const statusCounts = latest
+    ? {
+        pendingSteps: latest.steps.filter((step) => step.status === 'pending').length,
+        inProgressSteps: latest.steps.filter((step) => step.status === 'in_progress').length,
+        completedSteps: latest.steps.filter((step) => step.status === 'completed').length,
+        skippedSteps: latest.steps.filter((step) => step.status === 'skipped').length,
+      }
+    : undefined;
+  return {
+    enabled: true,
+    policyVersion: policy.policyVersion,
+    triggered: executions.length > 0,
+    updatePlanCalls: events.filter(
+      (event) => event.content?.kind === 'function_call' && event.content.name === 'update_plan',
+    ).length,
+    executionCount: executions.length,
+    ...(latest && statusCounts
+      ? {
+          latestExecution: {
+            planId: latest.planId,
+            executionId: latest.executionId,
+            status: latest.status,
+            stepCount: latest.steps.length,
+            ...statusCounts,
+          },
+        }
+      : {}),
+  };
 }
 
 function validateContinuationSummary(value: unknown): HarborCellContinuationSummary {
@@ -584,6 +659,53 @@ function validateTaskToolSummary(value: unknown): HarborCellTaskToolSummary {
   if (!isRecord(value)) throw new Error('taskToolSummary must be a JSON object');
   return {
     todoWriteCalls: requireNumber(value.todoWriteCalls, 'taskToolSummary.todoWriteCalls'),
+  };
+}
+
+function validateAgentPlanSummary(value: unknown): HarborCellAgentPlanSummary {
+  if (!isRecord(value)) throw new Error('agentPlanSummary must be a JSON object');
+  if (value.enabled !== true) throw new Error('agentPlanSummary.enabled must be true');
+  const latest = value.latestExecution;
+  return {
+    enabled: true,
+    policyVersion: requireString(value.policyVersion, 'agentPlanSummary.policyVersion'),
+    triggered: requireBoolean(value.triggered, 'agentPlanSummary.triggered'),
+    updatePlanCalls: requireNumber(value.updatePlanCalls, 'agentPlanSummary.updatePlanCalls'),
+    executionCount: requireNumber(value.executionCount, 'agentPlanSummary.executionCount'),
+    ...(latest !== undefined ? { latestExecution: validateAgentPlanExecutionSummary(latest) } : {}),
+  };
+}
+
+function validateAgentPlanExecutionSummary(
+  value: unknown,
+): NonNullable<HarborCellAgentPlanSummary['latestExecution']> {
+  if (!isRecord(value)) throw new Error('agentPlanSummary.latestExecution must be a JSON object');
+  return {
+    planId: requireString(value.planId, 'agentPlanSummary.latestExecution.planId'),
+    executionId: requireString(value.executionId, 'agentPlanSummary.latestExecution.executionId'),
+    status: requireStringUnion(value.status, 'agentPlanSummary.latestExecution.status', [
+      'active',
+      'completed',
+      'cancelled',
+      'interrupted',
+    ] as const),
+    stepCount: requireNumber(value.stepCount, 'agentPlanSummary.latestExecution.stepCount'),
+    pendingSteps: requireNumber(
+      value.pendingSteps,
+      'agentPlanSummary.latestExecution.pendingSteps',
+    ),
+    inProgressSteps: requireNumber(
+      value.inProgressSteps,
+      'agentPlanSummary.latestExecution.inProgressSteps',
+    ),
+    completedSteps: requireNumber(
+      value.completedSteps,
+      'agentPlanSummary.latestExecution.completedSteps',
+    ),
+    skippedSteps: requireNumber(
+      value.skippedSteps,
+      'agentPlanSummary.latestExecution.skippedSteps',
+    ),
   };
 }
 

@@ -6,6 +6,7 @@ import type { HarborCellTokenSummary } from './cell-output.js';
 import { assertRatio } from './numeric-guards.js';
 import type {
   AbArmSummary,
+  AbAgentPlanSummary,
   AbArmLabel,
   AbAttemptRef,
   AbAttemptPairSummary,
@@ -24,7 +25,11 @@ import type {
   AbTokenCostSummary,
   SummarizeAbComparisonInput,
 } from './ab-types.js';
-import type { HarborCellContextBudgetSummary, HarborCellTaskToolSummary } from './cell-output.js';
+import type {
+  HarborCellAgentPlanSummary,
+  HarborCellContextBudgetSummary,
+  HarborCellTaskToolSummary,
+} from './cell-output.js';
 
 const DEFAULT_NON_INFERIORITY_MARGIN = 0.1;
 const NON_INFERIORITY_CONFIDENCE_LEVEL = 0.95;
@@ -136,6 +141,7 @@ function summarizeArm(
   const contextBudget = summarizeContextBudget(observedAttempts);
   const continuation = summarizeContinuation(observed, wallTimeoutMs);
   const taskTools = summarizeTaskTools(observed);
+  const agentPlans = summarizeAgentPlans(observed);
   const activePruneSubset = summarizeActivePruneSubset(observedAttempts, activePrunePairIds);
   const contextBudgetPolicy = summarizeContextBudgetPolicy(observed);
   const tokenCostSummary = summarizeTokenCost(observed);
@@ -160,6 +166,7 @@ function summarizeArm(
     ...(contextBudget ? { contextBudget } : {}),
     ...(continuation ? { continuation } : {}),
     ...(taskTools ? { taskTools } : {}),
+    ...(agentPlans ? { agentPlans } : {}),
     ...(activePruneSubset ? { activePruneSubset } : {}),
   };
 }
@@ -370,6 +377,32 @@ function summarizeTaskTools(
   };
 }
 
+function summarizeAgentPlans(
+  events: readonly FixedPromptTaskWalEvent[],
+): AbAgentPlanSummary | undefined {
+  const summaries: { event: FixedPromptTaskWalEvent; summary: HarborCellAgentPlanSummary }[] = [];
+  for (const event of events) {
+    if ('agentPlanSummary' in event && event.agentPlanSummary) {
+      summaries.push({ event, summary: event.agentPlanSummary });
+    }
+  }
+  if (summaries.length === 0) return undefined;
+  const triggered = summaries.filter((entry) => entry.summary.triggered);
+  const statuses = summaries.map((entry) => entry.summary.latestExecution?.status);
+  return {
+    attempts: events.length,
+    enabledAttempts: summaries.length,
+    triggeredAttempts: triggered.length,
+    triggeredAttemptIds: triggered.map((entry) => entry.event.id),
+    updatePlanCalls: sum(summaries.map((entry) => entry.summary.updatePlanCalls)),
+    executionCount: sum(summaries.map((entry) => entry.summary.executionCount)),
+    completedExecutions: statuses.filter((status) => status === 'completed').length,
+    interruptedExecutions: statuses.filter((status) => status === 'interrupted').length,
+    cancelledExecutions: statuses.filter((status) => status === 'cancelled').length,
+    activeExecutions: statuses.filter((status) => status === 'active').length,
+  };
+}
+
 function sumCountRecords(records: readonly Record<string, number>[]): Record<string, number> {
   const result: Record<string, number> = {};
   for (const record of records) {
@@ -399,8 +432,9 @@ function summarizeInvestigationRefs(
   const activatedAttempts = [...baselineByPair.values(), ...candidateByPair.values()]
     .filter(
       (attempt) =>
-        'contextBudgetSummary' in attempt.event &&
-        isActivePruneActivated(attempt.event.contextBudgetSummary),
+        ('contextBudgetSummary' in attempt.event &&
+          isActivePruneActivated(attempt.event.contextBudgetSummary)) ||
+        ('agentPlanSummary' in attempt.event && attempt.event.agentPlanSummary?.triggered === true),
     )
     .map(attemptRef);
 

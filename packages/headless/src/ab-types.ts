@@ -69,6 +69,7 @@ export interface AbArmSummary {
   contextBudget?: AbContextBudgetSummary;
   continuation?: AbContinuationSummary;
   taskTools?: AbTaskToolSummary;
+  agentPlans?: AbAgentPlanSummary;
   activePruneSubset?: AbActivePruneSubsetSummary;
 }
 
@@ -150,6 +151,19 @@ export interface AbTaskToolSummary {
   activatedAttempts: number;
   activatedAttemptIds: string[];
   todoWriteCalls: number;
+}
+
+export interface AbAgentPlanSummary {
+  attempts: number;
+  enabledAttempts: number;
+  triggeredAttempts: number;
+  triggeredAttemptIds: string[];
+  updatePlanCalls: number;
+  executionCount: number;
+  completedExecutions: number;
+  interruptedExecutions: number;
+  cancelledExecutions: number;
+  activeExecutions: number;
 }
 
 export interface AbTaskArmSummary {

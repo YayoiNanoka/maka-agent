@@ -1,5 +1,6 @@
 import type {
   AbAttemptRef,
+  AbAgentPlanSummary,
   AbComparisonSummary,
   AbContinuationSummary,
   AbContextBudgetSummary,
@@ -15,6 +16,7 @@ export function renderAbComparisonMarkdown(summary: AbComparisonSummary): string
   const contextBudgetPolicyLine = renderContextBudgetPolicyLine(summary);
   const continuationLine = renderContinuationLine(summary);
   const taskToolLine = renderTaskToolLine(summary);
+  const agentPlanLine = renderAgentPlanLine(summary);
   const investigationRefLines = renderInvestigationRefLines(summary);
   const lines = [
     '# A/B Comparison',
@@ -41,6 +43,7 @@ export function renderAbComparisonMarkdown(summary: AbComparisonSummary): string
     ...(contextBudgetPolicyLine ? [contextBudgetPolicyLine] : []),
     ...(continuationLine ? [continuationLine] : []),
     ...(taskToolLine ? [taskToolLine] : []),
+    ...(agentPlanLine ? [agentPlanLine] : []),
     ...(contextBudgetLine ? [contextBudgetLine] : []),
     ...(activePruneSubsetLine ? [activePruneSubsetLine] : []),
     '',
@@ -178,6 +181,41 @@ function taskToolsOrZero(summary: AbTaskToolSummary | undefined): AbTaskToolSumm
       activatedAttempts: 0,
       activatedAttemptIds: [],
       todoWriteCalls: 0,
+    }
+  );
+}
+
+function renderAgentPlanLine(summary: AbComparisonSummary): string | undefined {
+  if (!summary.baseline.agentPlans && !summary.candidate.agentPlans) return undefined;
+  return `- Agent Plan: A ${renderAgentPlanMetrics(agentPlansOrZero(summary.baseline.agentPlans))}, B ${renderAgentPlanMetrics(agentPlansOrZero(summary.candidate.agentPlans))}`;
+}
+
+function renderAgentPlanMetrics(summary: AbAgentPlanSummary): string {
+  return [
+    `enabled=${summary.enabledAttempts}/${summary.attempts}`,
+    `triggered=${summary.triggeredAttempts}`,
+    `update_plan=${summary.updatePlanCalls}`,
+    `executions=${summary.executionCount}`,
+    `completed=${summary.completedExecutions}`,
+    `interrupted=${summary.interruptedExecutions}`,
+    `cancelled=${summary.cancelledExecutions}`,
+    `active=${summary.activeExecutions}`,
+  ].join(' ');
+}
+
+function agentPlansOrZero(summary: AbAgentPlanSummary | undefined): AbAgentPlanSummary {
+  return (
+    summary ?? {
+      attempts: 0,
+      enabledAttempts: 0,
+      triggeredAttempts: 0,
+      triggeredAttemptIds: [],
+      updatePlanCalls: 0,
+      executionCount: 0,
+      completedExecutions: 0,
+      interruptedExecutions: 0,
+      cancelledExecutions: 0,
+      activeExecutions: 0,
     }
   );
 }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -15,6 +15,10 @@ import {
 } from '../runtime-policy-ab-run.js';
 import { tokenSummary } from './helpers/cell-output-fixtures.js';
 import type { RuntimePolicyAbExecutionProfile } from '../runtime-policy-ab-profile.js';
+import {
+  appendHeadlessAgentPlanPolicyToSystemPrompt,
+  resolveHeadlessAgentPlanPolicy,
+} from '../agent-plan-policy.js';
 
 const config: Config = {
   id: 'cfg-runtime-policy-ab',
@@ -155,6 +159,49 @@ describe('runRuntimePolicyAbComparison', () => {
         'ab-task-tools-off-r0-t1:{}',
         'ab-task-tools-on-r0-t1:{"MAKA_CONTEXT_TASK_TOOLS":"on","MAKA_CONTEXT_TASK_REPLAY_MAX_CHARS":"700"}',
       ]);
+    });
+  });
+
+  test('accepts the effective prompt hash for autonomous Plan on and off arms', async () => {
+    await withDir(async (dir) => {
+      const systemPromptPath = join(dir, 'system_prompt.md');
+      const resultsJsonlPath = join(dir, 'results.jsonl');
+      await writeFile(systemPromptPath, 'fixed prompt\n', 'utf8');
+      const result = await runRuntimePolicyAbComparison({
+        runId: 'runtime-agent-plan-ab',
+        runRoot: dir,
+        config,
+        systemPromptPath,
+        resultsJsonlPath,
+        evaluationTasks: [{ id: 't1', path: '/bench/t1' }],
+        reps: 1,
+        arms: [
+          { id: 'agent-plan-off', contextEnv: { MAKA_CONTEXT_AGENT_PLAN: 'off' } },
+          { id: 'agent-plan-on', contextEnv: { MAKA_CONTEXT_AGENT_PLAN: 'on' } },
+        ],
+        executionProfile,
+        harborRunner: async (input) => harborOutput(input),
+        now: () => 100,
+        newId: idFactory(),
+      });
+
+      assert.equal(result.baseline.valid, 1);
+      assert.equal(result.candidate.valid, 1);
+      assert.equal(result.baseline.agentPlans, undefined);
+      assert.equal(result.candidate.agentPlans?.attempts, 1);
+      assert.equal(result.candidate.agentPlans?.enabledAttempts, 1);
+      assert.equal(result.candidate.agentPlans?.triggeredAttempts, 1);
+      assert.equal(result.candidate.agentPlans?.triggeredAttemptIds.length, 1);
+      assert.equal(result.candidate.agentPlans?.updatePlanCalls, 2);
+      assert.equal(result.candidate.agentPlans?.completedExecutions, 1);
+      const events = (await readFile(resultsJsonlPath, 'utf8'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as { type: string; promptHash?: string });
+      const promptHashes = events
+        .filter((event) => event.type === 'task_completed')
+        .map((event) => event.promptHash);
+      assert.equal(new Set(promptHashes).size, 2);
     });
   });
 
@@ -424,16 +471,21 @@ describe('runRuntimePolicyAbComparison', () => {
 
 function harborOutput(input: HarborTaskRunInput): HarborTaskRunOutput {
   const pruneOn = input.agentEnv?.MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE === 'on';
+  const agentPlanOn = input.agentEnv?.MAKA_CONTEXT_AGENT_PLAN === 'on';
+  const effectiveSystemPrompt = appendHeadlessAgentPlanPolicyToSystemPrompt(
+    input.systemPrompt,
+    resolveHeadlessAgentPlanPolicy(input.agentEnv ?? {}),
+  );
   return {
     harbor: { reward: 1 },
     cell: {
       schemaVersion: 1,
       status: 'completed',
-      promptHash: hashSystemPrompt(input.systemPrompt),
+      promptHash: hashSystemPrompt(effectiveSystemPrompt),
       executionIdentity: {
         llmConnectionSlug: 'deepseek',
         model: 'deepseek-v4-flash',
-        systemPromptHash: hashSystemPrompt(input.systemPrompt),
+        systemPromptHash: hashSystemPrompt(effectiveSystemPrompt),
         pricingProfile: 'test-profile',
       },
       tokenSummary: tokenSummary({ input: 4, output: 6, reasoning: 0, total: 10, costUsd: 0.01 }),
@@ -456,6 +508,27 @@ function harborOutput(input: HarborTaskRunInput): HarborTaskRunOutput {
             minRecentTurns: 2,
           }
         : { enabled: false },
+      ...(agentPlanOn
+        ? {
+            agentPlanSummary: {
+              enabled: true as const,
+              policyVersion: 'maka-headless-agent-plan.v1',
+              triggered: true,
+              updatePlanCalls: 2,
+              executionCount: 1,
+              latestExecution: {
+                planId: 'plan-1',
+                executionId: 'execution-1',
+                status: 'completed' as const,
+                stepCount: 2,
+                pendingSteps: 0,
+                inProgressSteps: 0,
+                completedSteps: 2,
+                skippedSteps: 0,
+              },
+            },
+          }
+        : {}),
       toolSummary: {
         providerVisibleToolCount: 1,
         actualToolCalls: 1,

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "openai-codex-gpt-5.6-sol-account-plan",
+  "llmConnectionSlug": "codex-subscription",
+  "provider": "openai-codex",
+  "baseUrl": "https://chatgpt.com/backend-api/codex",
+  "model": "openai-codex/gpt-5.6-sol",
+  "reasoningEffort": "max",
+  "billingMode": "account-plan",
+  "pricing": {
+    "inputUsdPer1M": 0,
+    "outputUsdPer1M": 0,
+    "cacheReadUsdPer1M": 0,
+    "cacheWriteUsdPer1M": 0,
+    "source": "openai-codex-gpt-5.6-sol-account-plan"
+  },
+  "taskBudgetSec": 1800,
+  "harborTimeoutMs": 2100000,
+  "observedCostStopUsd": 100,
+  "maxConcurrentAttempts": 2
+}

@@ -26,6 +26,18 @@ test('checked-in attention A/B profile pins GLM 5.2 identity and public pricing'
   assert.equal(profile.maxConcurrentAttempts, 2);
 });
 
+test('checked-in Agent Plan profiles pin DeepSeek V4 Pro and Codex Sol reasoning', async () => {
+  const paths = [
+    '../../harbor/runtime-policy-ab-profiles/deepseek-v4-pro.json',
+    '../../harbor/runtime-policy-ab-profiles/openai-codex-gpt-5.6-sol.json',
+  ];
+  for (const relativePath of paths) {
+    const path = new URL(relativePath, import.meta.url);
+    const profile = parseRuntimePolicyAbExecutionProfile(JSON.parse(await readFile(path, 'utf8')));
+    assert.ok(profile.reasoningEffort === 'high' || profile.reasoningEffort === 'max');
+  }
+});
+
 test('profile parser rejects the old ambiguous attempt concurrency', () => {
   assert.throws(
     () =>

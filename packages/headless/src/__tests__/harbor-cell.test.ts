@@ -24,7 +24,8 @@ import {
   type ToolResultArchiveReader,
   type ToolResultArchiveRecorder,
 } from '@maka/runtime';
-import { createArtifactStore } from '@maka/storage';
+import { createArtifactStore, createPlanStore } from '@maka/storage';
+import { resolveHeadlessAgentPlanPolicy } from '../agent-plan-policy.js';
 import type { Config } from '../contracts.js';
 import type {
   HeadlessBackendContext,
@@ -2315,6 +2316,139 @@ describe('runHarborCell', () => {
         /Use todo_write at the start of long-running, multi-step tasks/,
       );
       assert.match(todoReplay ?? '', /Run focused benchmark slice/);
+    });
+  });
+
+  test('Headless agent Plan flag adds only update_plan and replays durable progress', async () => {
+    assert.ok(HARBOR_CELL_CONTEXT_ENV_KEYS.includes('MAKA_CONTEXT_AGENT_PLAN' as never));
+    await withDirs(async ({ workspaceDir }) => {
+      const registry = new BackendRegistry();
+      const toolExecutor = fakeToolExecutor();
+      const planStore = createPlanStore(workspaceDir, {
+        now: () => 123,
+        newId: testIdFactory(),
+      });
+      const register = buildAiSdkCellBackendRegistration({
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          MAKA_CONTEXT_AGENT_PLAN: 'on',
+          MAKA_CONTEXT_TASK_TOOLS: 'off',
+        },
+        now: () => 123,
+        newId: testIdFactory(),
+      });
+      await register(registry, {
+        config: {
+          id: 'harbor-agent-plan',
+          backend: 'ai-sdk',
+          llmConnectionSlug: 'openai',
+          model: 'gpt-4o-mini',
+          systemPrompt: 'Use internal plans for complex work.',
+        },
+        task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        storageRoot: workspaceDir,
+        workspaceDir,
+        planStore,
+        agentPlanPolicy: resolveHeadlessAgentPlanPolicy({ MAKA_CONTEXT_AGENT_PLAN: 'on' }),
+        realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
+        toolExecutor,
+      });
+
+      const backend = await registry.build('ai-sdk', backendContext(workspaceDir));
+      const backendInput = (
+        backend as unknown as {
+          input: {
+            tools: Array<{ name: string; impl: Function }>;
+            turnTailPrompt?: (context: { sessionId: string }) => Promise<string | undefined>;
+            planTraceContext?: { mode: string; storeVersion: number };
+          };
+        }
+      ).input;
+      assert.ok(backendInput.tools.some((tool) => tool.name === 'update_plan'));
+      assert.ok(!backendInput.tools.some((tool) => tool.name === 'todo_write'));
+      assert.ok(!backendInput.tools.some((tool) => tool.name.startsWith('task_')));
+      assert.deepEqual(backendInput.planTraceContext, { mode: 'agent', storeVersion: 0 });
+
+      const updatePlan = backendInput.tools.find((tool) => tool.name === 'update_plan');
+      assert.ok(updatePlan);
+      await updatePlan.impl(
+        {
+          title: 'Inspect and verify',
+          steps: [
+            {
+              id: 'inspect',
+              title: 'Inspect files',
+              description: 'Read the relevant source files',
+              status: 'completed',
+            },
+            {
+              id: 'verify',
+              title: 'Verify result',
+              description: 'Run the relevant read-only verification',
+              status: 'in_progress',
+            },
+          ],
+        },
+        {
+          sessionId: 'session-1',
+          turnId: 'turn-1',
+          cwd: workspaceDir,
+          toolCallId: 'tool-update-plan',
+          abortSignal: new AbortController().signal,
+          emitOutput: () => {},
+        },
+      );
+      const replay = await backendInput.turnTailPrompt?.({ sessionId: 'session-1' });
+      assert.match(replay ?? '', /<agent_plan_context>/);
+      assert.match(replay ?? '', /Inspect files/);
+      assert.match(replay ?? '', /Verify result/);
+    });
+  });
+
+  test('Headless cell interrupts an unfinished autonomous Plan when the turn ends', async () => {
+    await withDirs(async ({ workspaceDir, outputDir, storageRoot }) => {
+      const result = await runHarborCell({
+        config,
+        instruction: 'Inspect and verify the repository',
+        cwd: workspaceDir,
+        outputDir,
+        storageRoot,
+        agentPlanPolicy: resolveHeadlessAgentPlanPolicy({ MAKA_CONTEXT_AGENT_PLAN: 'on' }),
+        registerBackends: async (registry, context) => {
+          assert.ok(context.planStore);
+          registry.register('fake', async (ctx) => {
+            await context.planStore!.applyExecutionSnapshot({
+              sessionId: ctx.sessionId,
+              title: 'Inspect and verify',
+              steps: [
+                {
+                  id: 'inspect',
+                  title: 'Inspect files',
+                  description: 'Read the relevant files',
+                  status: 'completed',
+                },
+                {
+                  id: 'verify',
+                  title: 'Verify result',
+                  description: 'Check the collected evidence',
+                  status: 'in_progress',
+                },
+              ],
+            });
+            return new CellReportingBackend(ctx);
+          });
+        },
+      });
+
+      assert.equal(result.output.agentPlanSummary?.triggered, true);
+      assert.equal(result.output.agentPlanSummary?.latestExecution?.status, 'interrupted');
+      const state = await createPlanStore(storageRoot).readState(
+        result.output.runtimeRefs.sessionId,
+      );
+      assert.equal(state.executions[0]?.status, 'interrupted');
+      assert.equal(state.executions[0]?.interruptionReason, 'turn_completed_with_active_plan');
     });
   });
 

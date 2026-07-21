@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { RuntimeEvent } from '@maka/core';
+import { emptyPlanSessionState } from '@maka/core';
 import type { InvocationResult } from '@maka/runtime';
 import {
   buildHarborCellOutput,
   validateHarborCellOutput,
   type HarborCellOutput,
 } from '../cell-output.js';
+import { resolveHeadlessAgentPlanPolicy } from '../agent-plan-policy.js';
 
 describe('Harbor cell output contract', () => {
   test('summarizes runtime outcome, prompt hash, token cost, and event path', () => {
@@ -499,6 +501,76 @@ describe('Harbor cell output contract', () => {
       todoWriteCalls: 0,
     });
     assert.deepEqual(validateHarborCellOutput(enabled), enabled);
+  });
+
+  test('summarizes autonomous Plan activation and final step status', () => {
+    const invocation = invocationFixture();
+    invocation.events.push(
+      runtimeEvent({
+        id: 'update-plan',
+        content: {
+          kind: 'function_call',
+          id: 'tool-plan',
+          name: 'update_plan',
+          args: {},
+        },
+      }),
+    );
+    const state = emptyPlanSessionState('session-1');
+    state.storeVersion = 2;
+    state.executions.push({
+      executionId: 'execution-1',
+      planId: 'plan-1',
+      source: 'agent_initiated',
+      sessionId: 'session-1',
+      title: 'Read-only verification',
+      status: 'completed',
+      steps: [
+        {
+          id: 'inspect',
+          title: 'Inspect files',
+          description: 'Read source files',
+          status: 'completed',
+          updatedAt: 100,
+        },
+        {
+          id: 'verify',
+          title: 'Verify evidence',
+          description: 'Check findings',
+          status: 'skipped',
+          updatedAt: 101,
+        },
+      ],
+      startedAt: 90,
+      updatedAt: 101,
+      completedAt: 101,
+    });
+
+    const output = buildHarborCellOutput({
+      invocation,
+      runtimeEventsPath: '/logs/agent/runtime-events.jsonl',
+      agentPlanPolicy: resolveHeadlessAgentPlanPolicy({ MAKA_CONTEXT_AGENT_PLAN: 'on' }),
+      agentPlanState: state,
+    });
+
+    assert.deepEqual(output.agentPlanSummary, {
+      enabled: true,
+      policyVersion: 'maka-headless-agent-plan.v1',
+      triggered: true,
+      updatePlanCalls: 1,
+      executionCount: 1,
+      latestExecution: {
+        planId: 'plan-1',
+        executionId: 'execution-1',
+        status: 'completed',
+        stepCount: 2,
+        pendingSteps: 0,
+        inProgressSteps: 0,
+        completedSteps: 1,
+        skippedSteps: 1,
+      },
+    });
+    assert.deepEqual(validateHarborCellOutput(output), output);
   });
 });
 

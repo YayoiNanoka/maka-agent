@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { BackendKind, PricingConfig, ProviderType } from '@maka/core';
-import { isThinkingLevel } from '@maka/core';
+import { activePlanExecution, isThinkingLevel } from '@maka/core';
 import {
   AiSdkBackend,
   BackendRegistry,
@@ -11,6 +11,7 @@ import {
   SessionManager,
   buildChildAgentTools,
   buildProviderOptions,
+  buildUpdatePlanTool,
   buildSubscriptionModelFetch,
   createProviderRequestCaptureRecorder,
   getAIModel,
@@ -24,6 +25,7 @@ import {
 import {
   createAgentRunStore,
   createArtifactStore,
+  createPlanStore,
   createRuntimeEventStore,
   createSessionStore,
   persistProviderRequestCaptureArtifact,
@@ -46,7 +48,7 @@ import { providerFromEnv, resolveHarborCellAiSdkEnv } from './provider-env.js';
 import { backendNeedsIsolation } from './runner.js';
 import { buildIsolatedHeadlessToolAvailability, buildIsolatedHeadlessTools } from './tools.js';
 import { createHeadlessSessionCapabilityBridge } from './session-capabilities.js';
-import { resolveHeadlessSystemPrompt } from './system-prompts.js';
+import { hashHeadlessSystemPrompt, resolveHeadlessSystemPrompt } from './system-prompts.js';
 import {
   createInMemoryTaskLedgerExperimentStore,
   renderTaskLedgerExperimentReplay,
@@ -66,6 +68,13 @@ import {
   buildHarborCellAiSdkTools,
   createHarborCellLocalToolExecutor,
 } from './harbor-cell-tool-executor.js';
+import {
+  appendHeadlessAgentPlanPolicyToSystemPrompt,
+  latestHeadlessAgentPlanExecution,
+  renderHeadlessAgentPlanReplay,
+  resolveHeadlessAgentPlanPolicy,
+  type HeadlessAgentPlanPolicy,
+} from './agent-plan-policy.js';
 
 // The Harbor cell orchestration module keeps `#harbor-cell` (and './harbor-cell.js')
 // as the stable public surface. After the sink-file split the moved symbols live in
@@ -114,6 +123,7 @@ export interface RunHarborCellInput {
   contextBudgetPolicy?: HarborCellContextBudgetPolicySnapshot;
   continuationPolicy?: HarborCellContinuationPolicy;
   taskToolSummaryEnabled?: boolean;
+  agentPlanPolicy?: HeadlessAgentPlanPolicy;
   settleAfterMs?: number;
   now?: () => number;
   newId?: () => string;
@@ -254,8 +264,24 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
   };
   const heavyTaskMode = resolveHeavyTaskMode(input.config, task);
   const economyTaskMode = resolveEconomyTaskMode(input.config, task);
-  const prompt = resolveHeadlessSystemPrompt(input.config, { heavyTaskMode, economyTaskMode });
+  const resolvedPrompt = resolveHeadlessSystemPrompt(input.config, {
+    heavyTaskMode,
+    economyTaskMode,
+  });
+  const agentPlanPolicy = input.agentPlanPolicy ?? resolveHeadlessAgentPlanPolicy({});
+  const systemPrompt = appendHeadlessAgentPlanPolicyToSystemPrompt(
+    resolvedPrompt.systemPrompt,
+    agentPlanPolicy,
+  );
+  const prompt = {
+    ...resolvedPrompt,
+    systemPrompt,
+    systemPromptHash: hashHeadlessSystemPrompt(systemPrompt),
+  };
   const config = { ...input.config, systemPrompt: prompt.systemPrompt };
+  const planStore = agentPlanPolicy.enabled
+    ? createPlanStore(input.storageRoot, { newId, now })
+    : undefined;
   const registerBackends =
     input.registerBackends ?? ((registry: BackendRegistry) => registerFakeBackend(registry));
   await registerBackends(backends, {
@@ -263,6 +289,7 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
     task,
     storageRoot: input.storageRoot,
     workspaceDir: input.cwd,
+    ...(planStore ? { planStore, agentPlanPolicy } : {}),
     ...sessionCapabilities.capabilities,
     ...(backendNeedsIsolation(input.config.backend)
       ? {
@@ -291,6 +318,7 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
   let invocation: InvocationResult | undefined;
   const manager = new SessionManager({
     store: sessionStore,
+    ...(planStore ? { planStore } : {}),
     runStore: agentRunStore,
     runtimeEventStore,
     backends,
@@ -395,6 +423,19 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
     throw new Error('Harbor cell finished without a runtime invocation result');
   }
   const combinedInvocation = combineInvocations(invocations);
+  let agentPlanState = planStore ? await planStore.readState(session.id) : undefined;
+  if (planStore && agentPlanState?.activeExecutionId) {
+    const reason = deadlineReached
+      ? 'benchmark_deadline'
+      : sendMessageError
+        ? 'turn_error'
+        : continuationPolicy.enabled &&
+            totalRuntimeSteps(invocations) >= continuationPolicy.maxTotalRuntimeSteps
+          ? 'continuation_exhausted'
+          : 'turn_completed_with_active_plan';
+    await planStore.interruptActiveExecution(session.id, reason);
+    agentPlanState = await planStore.readState(session.id);
+  }
   const terminalRun = deadlineReached
     ? await agentRunStore.readRun(session.id, combinedInvocation.runId).catch(() => undefined)
     : undefined;
@@ -426,6 +467,7 @@ export async function runHarborCell(input: RunHarborCellInput): Promise<RunHarbo
       ...(input.taskToolSummaryEnabled !== undefined
         ? { taskToolSummaryEnabled: input.taskToolSummaryEnabled }
         : {}),
+      ...(agentPlanPolicy.enabled ? { agentPlanPolicy, agentPlanState } : {}),
     }),
   );
   await writeHarborCellArtifact(outputPath, `${JSON.stringify(output, null, 2)}\n`);
@@ -457,6 +499,7 @@ export async function runHarborCellFromEnv(
   const continuationPolicy = buildHarborCellContinuationPolicy(resolvedEnv);
   const economyTaskMode = economyTaskModeFromEnv(resolvedEnv.MAKA_ECONOMY_TASK_MODE);
   const taskLedgerExperimentPolicy = buildHarborCellTaskLedgerExperimentPolicy(resolvedEnv);
+  const agentPlanPolicy = resolveHeadlessAgentPlanPolicy(resolvedEnv);
   const maxSteps = harborCellMaxStepsFromEnv(resolvedEnv);
   const settleAfterMs = harborCellSoftTimeoutMsFromEnv(resolvedEnv);
   const reasoningEffort = reasoningEffortFromEnv(resolvedEnv.MAKA_REASONING_EFFORT);
@@ -547,6 +590,7 @@ export async function runHarborCellFromEnv(
     ...(contextBudgetPolicy ? { contextBudgetPolicy } : {}),
     ...(continuationPolicy ? { continuationPolicy } : {}),
     ...(taskLedgerExperimentPolicy ? { taskToolSummaryEnabled: true } : {}),
+    ...(agentPlanPolicy.enabled ? { agentPlanPolicy } : {}),
     ...(settleAfterMs !== undefined ? { settleAfterMs } : {}),
     ...(registerBackends ? { registerBackends } : {}),
     ...(backendNeedsIsolation(backend)
@@ -747,13 +791,13 @@ export function buildAiSdkCellBackendRegistration(input: {
       artifactStore,
       contextBudgetBackendOptions.contextBudget?.synthesisCache?.enabled === true,
     );
-    registry.register('ai-sdk', (ctx) => {
+    registry.register('ai-sdk', async (ctx) => {
       const subscriptionFetch = buildSubscriptionModelFetch({
         connection,
         sessionId: ctx.sessionId,
         modelId: input.model,
       });
-      const tools = buildHarborCellAiSdkTools(context.toolExecutor!, {
+      const isolatedTools = buildHarborCellAiSdkTools(context.toolExecutor!, {
         ...(context.heavyTaskEvidence ? { heavyTaskEvidence: context.heavyTaskEvidence } : {}),
         ...(context.heavyTaskProgress ? { heavyTaskProgress: context.heavyTaskProgress } : {}),
         ...(context.heavyTaskSelfCheck ? { heavyTaskSelfCheck: context.heavyTaskSelfCheck } : {}),
@@ -761,6 +805,42 @@ export function buildAiSdkCellBackendRegistration(input: {
           ? { taskLedgerExperiment: { store: taskLedgerExperimentStore } }
           : {}),
       });
+      const planState = context.planStore
+        ? await context.planStore.readState(ctx.sessionId)
+        : undefined;
+      const latestPlanExecution = planState
+        ? latestHeadlessAgentPlanExecution(planState)
+        : undefined;
+      const planExecution = planState
+        ? (activePlanExecution(planState) ??
+          (latestPlanExecution?.status === 'interrupted' ? latestPlanExecution : undefined))
+        : undefined;
+      const tools = [
+        ...isolatedTools,
+        ...(context.agentPlanPolicy?.enabled && context.planStore && !ctx.tools
+          ? [buildUpdatePlanTool(context.planStore)]
+          : []),
+      ];
+      const turnTailPrompt =
+        taskLedgerExperimentStore || (context.agentPlanPolicy?.enabled && context.planStore)
+          ? async ({ sessionId }: { sessionId: string }) => {
+              const [taskReplay, planReplay] = await Promise.all([
+                taskLedgerExperimentStore && taskLedgerExperimentPolicy
+                  ? renderTaskLedgerExperimentReplay(
+                      await taskLedgerExperimentStore.list(sessionId),
+                      { maxChars: taskLedgerExperimentPolicy.replayMaxChars },
+                    )
+                  : undefined,
+                context.agentPlanPolicy?.enabled && context.planStore
+                  ? renderHeadlessAgentPlanReplay(context.planStore, sessionId)
+                  : undefined,
+              ]);
+              const sections = [taskReplay, planReplay].filter((section): section is string =>
+                Boolean(section?.trim()),
+              );
+              return sections.length > 0 ? sections.join('\n\n') : undefined;
+            }
+          : undefined;
       return new AiSdkBackend({
         sessionId: ctx.sessionId,
         header: { ...ctx.header, model: input.model },
@@ -776,6 +856,20 @@ export function buildAiSdkCellBackendRegistration(input: {
             ...(subscriptionFetch ? { fetch: subscriptionFetch } : {}),
           }),
         tools,
+        ...(context.agentPlanPolicy?.enabled && planState
+          ? {
+              planTraceContext: {
+                mode: 'agent' as const,
+                storeVersion: planState.storeVersion,
+                ...(planExecution
+                  ? {
+                      planId: planExecution.planId,
+                      executionId: planExecution.executionId,
+                    }
+                  : {}),
+              },
+            }
+          : {}),
         toolAvailability: buildIsolatedHeadlessToolAvailability(tools.map((tool) => tool.name)),
         spawnChildAgent: context.spawnChildAgent
           ? (childInput) => context.spawnChildAgent!(ctx.sessionId, childInput)
@@ -790,14 +884,7 @@ export function buildAiSdkCellBackendRegistration(input: {
         ...(streamConnectTimeoutMs !== undefined ? { streamConnectTimeoutMs } : {}),
         ...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {}),
         systemPrompt: context.config.systemPrompt,
-        ...(taskLedgerExperimentStore && taskLedgerExperimentPolicy
-          ? {
-              turnTailPrompt: async ({ sessionId }) =>
-                renderTaskLedgerExperimentReplay(await taskLedgerExperimentStore.list(sessionId), {
-                  maxChars: taskLedgerExperimentPolicy.replayMaxChars,
-                }),
-            }
-          : {}),
+        ...(turnTailPrompt ? { turnTailPrompt } : {}),
         lookupPricing,
         ...contextBudgetBackendOptions,
         ...synthesisCacheCallbacks,

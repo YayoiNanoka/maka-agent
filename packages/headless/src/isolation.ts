@@ -1,4 +1,6 @@
 import type { ShellPlan } from '@maka/runtime';
+import type { PlanStore } from '@maka/core/plan';
+import type { HeadlessAgentPlanPolicy } from './agent-plan-policy.js';
 import type { Config, Task } from './contracts.js';
 import type { HeavyTaskEvidenceRecorder } from './heavy-task-evidence.js';
 import type { HeavyTaskModeSelection } from './heavy-task-policy.js';
@@ -190,6 +192,10 @@ export interface HeadlessBackendContext extends Partial<HeadlessSessionCapabilit
   storageRoot: string;
   /** Absolute throwaway workspace path for this run. */
   workspaceDir: string;
+  /** Shared durable Plan store for the optional autonomous Plan policy. */
+  planStore?: PlanStore;
+  /** Optional autonomous Plan policy resolved for this cell. */
+  agentPlanPolicy?: HeadlessAgentPlanPolicy;
   /**
    * Present only for model-backed backends and only after the caller has
    * explicitly asserted an isolation boundary.

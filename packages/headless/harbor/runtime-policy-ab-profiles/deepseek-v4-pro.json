@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "deepseek-v4-pro-public-2026-07-22",
+  "llmConnectionSlug": "deepseek",
+  "provider": "deepseek",
+  "baseUrl": "https://api.deepseek.com",
+  "model": "deepseek/deepseek-v4-pro",
+  "reasoningEffort": "high",
+  "pricing": {
+    "inputUsdPer1M": 0.435,
+    "outputUsdPer1M": 0.87,
+    "cacheReadUsdPer1M": 0.003625,
+    "cacheWriteUsdPer1M": 0,
+    "source": "deepseek-v4-pro-public-2026-07-22"
+  },
+  "taskBudgetSec": 1800,
+  "harborTimeoutMs": 2100000,
+  "observedCostStopUsd": 100,
+  "maxConcurrentAttempts": 2
+}

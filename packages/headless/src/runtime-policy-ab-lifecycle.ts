@@ -120,8 +120,10 @@ function pilotClearanceFailure(summary: RuntimePolicyAbComparisonSummary): strin
     return 'pilot_plumbing_failure';
   if (summary.baseline.coverageRate !== 1 || summary.candidate.coverageRate !== 1)
     return 'pilot_incomplete';
-  if ((summary.candidate.contextBudget?.activatedAttempts ?? 0) === 0)
-    return 'pilot_candidate_not_activated';
+  const candidateActivated =
+    (summary.candidate.contextBudget?.activatedAttempts ?? 0) > 0 ||
+    (summary.candidate.agentPlans?.triggeredAttempts ?? 0) > 0;
+  if (!candidateActivated) return 'pilot_candidate_not_activated';
   return undefined;
 }
 

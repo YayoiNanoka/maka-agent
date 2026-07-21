@@ -15,12 +15,18 @@ import type {
 } from './ab-types.js';
 import type { Config } from './contracts.js';
 import { withAbRunLock } from './ab-run-lock.js';
+import { readFile } from 'node:fs/promises';
 import type { RuntimePolicyAbExecutionProfile } from './runtime-policy-ab-profile.js';
 import {
   HARBOR_CELL_CONTEXT_ENV_KEYS,
   normalizeHarborCellContextEnv,
   type HarborCellContextEnvKey,
 } from './harbor-cell-context-budget-env.js';
+import {
+  appendHeadlessAgentPlanPolicyToSystemPrompt,
+  resolveHeadlessAgentPlanPolicy,
+} from './agent-plan-policy.js';
+import { hashSystemPrompt } from './fixed-prompt-controller.js';
 
 export const RUNTIME_POLICY_CONTEXT_ENV_KEYS = HARBOR_CELL_CONTEXT_ENV_KEYS;
 export const RUNTIME_POLICY_SHARED_AGENT_ENV_KEYS = [
@@ -123,6 +129,7 @@ export async function runRuntimePolicyAbComparisonUnlocked(
   assertProfileIdentity(input.executionProfile, input.config);
   const maxConcurrency = pairConcurrency(input.executionProfile.maxConcurrentAttempts);
   const sharedAgentEnv = sanitizeSharedAgentEnv(input.sharedAgentEnv ?? {});
+  const baseSystemPrompt = await readFile(input.systemPromptPath, 'utf8');
   return runAbComparison({
     runId: input.runId,
     arms: [runtimeArmSpec(input.arms[0]), runtimeArmSpec(input.arms[1])],
@@ -139,6 +146,10 @@ export async function runRuntimePolicyAbComparisonUnlocked(
       const runtimeArm = input.arms.find((candidate) => candidate.id === arm.id);
       if (!runtimeArm) throw new Error(`runtime policy A/B arm ${arm.id} is not configured`);
       const contextEnv = sanitizeContextEnv(runtimeArm.contextEnv);
+      const agentPlanPolicy = resolveHeadlessAgentPlanPolicy(contextEnv);
+      const expectedEffectivePromptHash = hashSystemPrompt(
+        appendHeadlessAgentPlanPolicyToSystemPrompt(baseSystemPrompt, agentPlanPolicy),
+      );
       const resumeFingerprint = runtimePolicyArmResumeFingerprint(input, runtimeArm);
       const agentEnv = { ...sharedAgentEnv, ...contextEnv };
       const result = await runFixedPromptController({
@@ -146,6 +157,7 @@ export async function runRuntimePolicyAbComparisonUnlocked(
         roundId,
         config: input.config,
         systemPromptPath: input.systemPromptPath,
+        expectedEffectivePromptHash,
         resultsJsonlPath: input.resultsJsonlPath,
         resultsTsvPath: `${input.resultsJsonlPath}.${roundId}.tsv`,
         tasks: [task],
@@ -203,11 +215,12 @@ function runtimeArmSpec(
   sharedMetadata: Record<string, unknown> = {},
 ): AbArmSpec {
   const contextEnv = sanitizeContextEnv(arm.contextEnv);
+  const agentPlanPolicy = resolveHeadlessAgentPlanPolicy(contextEnv);
   return {
     id: arm.id,
     kind: 'runtime' as const,
     fingerprint: contextEnvFingerprint(contextEnv),
-    metadata: { ...sharedMetadata, contextEnv },
+    metadata: { ...sharedMetadata, contextEnv, agentPlanPolicy },
   };
 }
 
