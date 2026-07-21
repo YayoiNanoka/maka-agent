@@ -1035,6 +1035,7 @@ async function hostSideProviderRuntime(options: HarborTaskRunnerOptions): Promis
   telemetry?: () => ProviderRequestTelemetry[];
   close?: () => Promise<void>;
 } | null> {
+  const isMakaAgent = options.agent === undefined || options.agent === 'maka';
   const provider = options.provider ?? 'deepseek';
   if (usesHostProviderProxy(options.agent) && provider === 'github-copilot') {
     const adapter =
@@ -1082,7 +1083,7 @@ async function hostSideProviderRuntime(options: HarborTaskRunnerOptions): Promis
     if (!baseUrl) throw new Error(`${options.agent} provider ${provider} requires a base URL`);
     const proxy = await startProviderAuthProxy({
       upstreamBaseUrl: baseUrl,
-      ...(options.agent === 'maka' ? { advertisedHost: '127.0.0.1' } : {}),
+      ...(isMakaAgent ? { advertisedHost: '127.0.0.1' } : {}),
       ...(resolveProviderCredential
         ? { resolveUpstreamCredential: resolveProviderCredential }
         : { apiKeyFile: apiKeyFile! }),
@@ -1091,7 +1092,7 @@ async function hostSideProviderRuntime(options: HarborTaskRunnerOptions): Promis
     });
     return {
       env:
-        options.agent === 'maka'
+        isMakaAgent
           ? {
               MAKA_HOST_BASE_URL: proxy.baseUrl,
               MAKA_HOST_API_KEY: proxy.token,

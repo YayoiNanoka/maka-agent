@@ -640,7 +640,7 @@ describe('createHarborTaskRunner', () => {
     });
   });
 
-  test('routes the Maka arm through the same rotating OAuth proxy boundary', async () => {
+  test('routes the default Maka arm through the same rotating OAuth proxy boundary', async () => {
     await withRun(async ({ jobsDir, repo }) => {
       const captured: { config?: Record<string, unknown> } = {};
       let upstreamAuthorization = '';
@@ -655,7 +655,6 @@ describe('createHarborTaskRunner', () => {
         const runner = createHarborTaskRunner({
           makaRepoPath: repo,
           jobsDir,
-          agent: 'maka',
           model: 'openai-codex/gpt-5.6-sol',
           provider: 'openai-codex',
           reasoningEffort: 'max',
