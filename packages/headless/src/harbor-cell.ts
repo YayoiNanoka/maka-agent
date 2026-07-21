@@ -84,6 +84,9 @@ import {
   type HeadlessTaskLedgerPolicy,
 } from './headless-task-ledger-policy.js';
 
+export { resolveHeadlessAgentPlanPolicy } from './agent-plan-policy.js';
+export { resolveHeadlessTaskLedgerPolicy } from './headless-task-ledger-policy.js';
+
 // The Harbor cell orchestration module keeps `#harbor-cell` (and './harbor-cell.js')
 // as the stable public surface. After the sink-file split the moved symbols live in
 // dedicated leaves; re-export them here so existing importers keep resolving them

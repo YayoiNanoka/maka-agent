@@ -15,6 +15,8 @@ import {
   normalizeHarborCellContextEnv,
   providerApiKeyEnvName,
   reasoningEffortFromEnv,
+  resolveHeadlessAgentPlanPolicy,
+  resolveHeadlessTaskLedgerPolicy,
   runHarborCell,
   writeHarborCellUsageCheckpoint,
 } from '#harbor-cell';
@@ -46,6 +48,8 @@ export async function main(options = {}) {
   const continuationPolicy = buildHarborCellContinuationPolicy(env);
   const economyTaskMode = economyTaskModeFromEnv(env.MAKA_ECONOMY_TASK_MODE);
   const taskLedgerExperimentPolicy = buildHarborCellTaskLedgerExperimentPolicy(env);
+  const agentPlanPolicy = resolveHeadlessAgentPlanPolicy(contextEnv);
+  const taskLedgerPolicy = resolveHeadlessTaskLedgerPolicy(contextEnv);
   const maxSteps = harborCellMaxStepsFromEnv(env);
   const settleAfterMs = harborCellSoftTimeoutMsFromEnv(env);
   const reasoningEffort = reasoningEffortFromEnv(env.MAKA_REASONING_EFFORT);
@@ -70,6 +74,8 @@ export async function main(options = {}) {
     ...(contextBudgetPolicy ? { contextBudgetPolicy } : {}),
     ...(continuationPolicy ? { continuationPolicy } : {}),
     ...(taskLedgerExperimentPolicy ? { taskToolSummaryEnabled: true } : {}),
+    ...(agentPlanPolicy.enabled ? { agentPlanPolicy } : {}),
+    ...(taskLedgerPolicy.enabled ? { taskLedgerPolicy } : {}),
     ...(settleAfterMs !== undefined ? { settleAfterMs } : {}),
     registerBackends:
       options.registerBackends ??

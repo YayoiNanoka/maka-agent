@@ -27,5 +27,6 @@
   ],
   "evaluationTaskSet": "terminal-bench-2.1",
   "fullReps": 2,
-  "nonInferiorityMargin": 0.1
+  "nonInferiorityMargin": 0.1,
+  "requirePilotCandidateActivation": false
 }

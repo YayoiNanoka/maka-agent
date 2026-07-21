@@ -143,6 +143,10 @@ describe('Harbor adapter contract', () => {
       source,
       /recordUsageCheckpoint:\s*\(usage\)\s*=>\s*writeHarborCellUsageCheckpoint\(outputDir, usage\)/,
     );
+    assert.match(source, /resolveHeadlessAgentPlanPolicy\(contextEnv\)/);
+    assert.match(source, /resolveHeadlessTaskLedgerPolicy\(contextEnv\)/);
+    assert.match(source, /agentPlanPolicy\.enabled \? \{ agentPlanPolicy \}/);
+    assert.match(source, /taskLedgerPolicy\.enabled \? \{ taskLedgerPolicy \}/);
   });
 
   test('run-host-cell.mjs forwards Harbor cell context schema env keys to the backend', async () => {

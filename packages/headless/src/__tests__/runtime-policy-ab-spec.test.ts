@@ -18,6 +18,11 @@ test('runtime A/B spec requires a real pilot and repeated full evidence', () => 
   };
 
   assert.equal(parseRuntimePolicyAbSpec(base).fullReps, 2);
+  assert.equal(
+    parseRuntimePolicyAbSpec({ ...base, requirePilotCandidateActivation: false })
+      .requirePilotCandidateActivation,
+    false,
+  );
   assert.throws(
     () => parseRuntimePolicyAbSpec({ ...base, fullReps: 1 }),
     /fullReps must be an integer of at least 2/,
@@ -35,5 +40,9 @@ test('runtime A/B spec requires a real pilot and repeated full evidence', () => 
   assert.throws(
     () => parseRuntimePolicyAbSpec({ ...base, evaluationTaskSet: 'terminal-bench-2.1' }),
     /exactly one of evaluationTaskIds or evaluationTaskSet/,
+  );
+  assert.throws(
+    () => parseRuntimePolicyAbSpec({ ...base, requirePilotCandidateActivation: 'no' }),
+    /requirePilotCandidateActivation must be a boolean/,
   );
 });

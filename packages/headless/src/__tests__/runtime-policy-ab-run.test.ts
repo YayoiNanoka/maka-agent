@@ -88,6 +88,10 @@ describe('runRuntimePolicyAbComparison', () => {
       ['deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-flash'],
     );
     assert.deepEqual(
+      manifest.arms.map((arm) => arm.metadata?.requirePilotCandidateActivation),
+      [true, true],
+    );
+    assert.deepEqual(
       manifest.arms.map((arm) => arm.metadata?.sharedAgentEnv),
       [
         {

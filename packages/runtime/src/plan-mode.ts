@@ -36,7 +36,8 @@ export function selectCollaborationTools(input: {
 export function renderAgentModePlanningPrompt(): string {
   return [
     '<agent_planning>',
-    'For work expected to finish in the current turn, use update_plan after initial reconnaissance and before broad execution when the task has three or more dependent stages, spans multiple components, requires investigation followed by implementation or verification, or has intermediate results that determine later work.',
+    'For work expected to finish in the current turn, you must call update_plan after initial reconnaissance and before the first mutating tool call when the task has three or more dependent stages, spans multiple components, requires investigation followed by implementation or verification, or has intermediate results that determine later work.',
+    'Repository-wide audits or refactors, multi-file implementations, debugging followed by fixes and tests, and build or installation work followed by verification are qualifying complex work. For such work, update_plan is a mandatory execution gate, not optional bookkeeping.',
     'Do not create a plan for simple factual questions, single-step work, or requests that require no multi-stage investigation.',
     'Do not use task_create or task_update to represent the ordered execution steps of the current request. The Task Ledger is only for durable, independently trackable work that must remain visible across turns or agents. Never duplicate the same work as both Plan steps and Task Ledger tasks.',
     'Before the first update_plan call, privately review that the plan is complete, ordered, feasible, and no more detailed than necessary. A new agent-initiated plan must contain at least two steps.',

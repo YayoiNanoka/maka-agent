@@ -85,6 +85,7 @@ export interface RuntimePolicyAbRunManifestInput
   promptHash: string;
   sharedAgentEnv?: Partial<Record<RuntimePolicySharedAgentEnvKey, string>>;
   executionProfile: RuntimePolicyAbExecutionProfile;
+  requirePilotCandidateActivation?: boolean;
 }
 
 export type RuntimePolicyAbRunManifest = AbRunManifest;
@@ -96,6 +97,7 @@ export function buildRuntimePolicyAbRunManifest(
     arms,
     promptHash,
     executionProfile,
+    requirePilotCandidateActivation,
     sharedAgentEnv: rawSharedAgentEnv,
     ...abInput
   } = input;
@@ -108,6 +110,7 @@ export function buildRuntimePolicyAbRunManifest(
     model: executionProfile.model,
     executionProfile,
     sharedAgentEnv,
+    requirePilotCandidateActivation: requirePilotCandidateActivation ?? true,
   };
   return buildAbRunManifest({
     ...abInput,

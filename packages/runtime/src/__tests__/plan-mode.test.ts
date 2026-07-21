@@ -102,7 +102,10 @@ describe('Plan Mode tool surface', () => {
 
     const prompt = renderAgentModePlanningPrompt();
     assert.match(prompt, /three or more dependent stages/);
-    assert.match(prompt, /before broad execution/);
+    assert.match(prompt, /must call update_plan/);
+    assert.match(prompt, /before the first mutating tool call/);
+    assert.match(prompt, /Repository-wide audits or refactors/);
+    assert.match(prompt, /mandatory execution gate/);
     assert.match(prompt, /simple factual questions/);
     assert.doesNotMatch(prompt, /purely informational requests/);
     assert.match(prompt, /Do not use task_create or task_update/);
@@ -113,7 +116,13 @@ describe('Plan Mode tool surface', () => {
     assert.match(prompt, /Completed and skipped steps are immutable/);
 
     const updatePlan = buildUpdatePlanTool({} as never);
-    assert.match(updatePlan.description, /Start or update the main Agent's current internal execution plan/);
+    assert.match(
+      updatePlan.description,
+      /Start or update the main Agent's current internal execution plan/,
+    );
+    assert.match(updatePlan.description, /must call this tool/);
+    assert.match(updatePlan.description, /before the first mutating tool call/);
+    assert.match(updatePlan.description, /mandatory execution gate/);
     assert.match(updatePlan.description, /three or more dependent stages/);
     assert.match(updatePlan.description, /Do not use task_create or task_update as a substitute/);
     assert.match(updatePlan.description, /without waiting for user approval/);

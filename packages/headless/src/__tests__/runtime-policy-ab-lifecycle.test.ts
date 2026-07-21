@@ -227,6 +227,39 @@ test('pilot without candidate activation does not launch full execution', async 
   });
 });
 
+test('report-only pilot activation still launches full execution', async () => {
+  await withDir(async (dir) => {
+    const promptPath = join(dir, 'prompt.md');
+    await writeFile(promptPath, 'shared prompt\n', 'utf8');
+    const calls: string[] = [];
+    const state = await runRuntimePolicyAbLifecycle({
+      runId: 'run-1',
+      runRoot: dir,
+      manifestFingerprint: 'sha256:manifest',
+      config,
+      systemPromptPath: promptPath,
+      resultsJsonlPath: join(dir, 'results.jsonl'),
+      pilotTasks: [{ id: 'pilot', path: '/tasks/pilot' }],
+      evaluationTasks: [{ id: 'full', path: '/tasks/full' }],
+      fullReps: 2,
+      requirePilotCandidateActivation: false,
+      arms: [
+        { id: 'prune-off', contextEnv: { MAKA_CONTEXT_BUDGET: 'off' } },
+        { id: 'prune-on', contextEnv: { MAKA_CONTEXT_STALE_TOOL_RESULT_PRUNE: 'on' } },
+      ],
+      executionProfile,
+      harborRunner: async (runInput) => {
+        calls.push(runInput.roundId);
+        return output(runInput, false);
+      },
+    });
+
+    assert.equal(state.status, 'full_completed');
+    assert.equal(state.reason, undefined);
+    assert.equal(calls.length, 6);
+  });
+});
+
 test('pilot candidate pass against an attested baseline timeout can launch full execution', async () => {
   await withDir(async (dir) => {
     const promptPath = join(dir, 'prompt.md');

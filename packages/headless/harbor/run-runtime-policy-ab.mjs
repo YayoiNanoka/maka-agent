@@ -133,6 +133,7 @@ async function main() {
     arms: spec.arms,
     promptHash: `sha256:${createHash('sha256').update(JSON.stringify(systemPrompt)).digest('hex')}`,
     executionProfile,
+    requirePilotCandidateActivation: spec.requirePilotCandidateActivation ?? true,
     sharedAgentEnv: spec.sharedAgentEnv,
     subjectFingerprint: await buildSubjectFingerprint(
       makaRepoPath,
@@ -214,6 +215,7 @@ async function main() {
     pilotTasks,
     evaluationTasks,
     fullReps: spec.fullReps,
+    requirePilotCandidateActivation: spec.requirePilotCandidateActivation ?? true,
     arms: spec.arms,
     executionProfile,
     nonInferiorityMargin: spec.nonInferiorityMargin,

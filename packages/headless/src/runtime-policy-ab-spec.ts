@@ -15,6 +15,7 @@ export interface RuntimePolicyAbSpec {
   evaluationTaskSet?: 'terminal-bench-2.1';
   fullReps: number;
   nonInferiorityMargin: number;
+  requirePilotCandidateActivation?: boolean;
 }
 
 export function parseRuntimePolicyAbSpec(value: unknown): RuntimePolicyAbSpec {
@@ -52,6 +53,12 @@ export function parseRuntimePolicyAbSpec(value: unknown): RuntimePolicyAbSpec {
     value.nonInferiorityMargin > 1
   ) {
     throw new Error('runtime policy A/B spec nonInferiorityMargin must be a number in [0, 1]');
+  }
+  if (
+    value.requirePilotCandidateActivation !== undefined &&
+    typeof value.requirePilotCandidateActivation !== 'boolean'
+  ) {
+    throw new Error('runtime policy A/B spec requirePilotCandidateActivation must be a boolean');
   }
   return value as unknown as RuntimePolicyAbSpec;
 }

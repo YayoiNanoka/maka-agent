@@ -1091,19 +1091,18 @@ async function hostSideProviderRuntime(options: HarborTaskRunnerOptions): Promis
       usageProtocol: providerProxyUsageProtocol(options.agent, provider),
     });
     return {
-      env:
-        isMakaAgent
-          ? {
-              MAKA_HOST_BASE_URL: proxy.baseUrl,
-              MAKA_HOST_API_KEY: proxy.token,
-              MAKA_HOST_API_KEY_ENV_NAME: normalizeRawKeyEnvName(
-                options.apiKeyEnvName ?? requireProviderCredentialEnv(provider).apiKeys[0]!,
-              ),
-            }
-          : {
-              MAKA_PROVIDER_PROXY_URL: proxy.baseUrl,
-              MAKA_PROVIDER_PROXY_TOKEN: proxy.token,
-            },
+      env: isMakaAgent
+        ? {
+            MAKA_HOST_BASE_URL: proxy.baseUrl,
+            MAKA_HOST_API_KEY: proxy.token,
+            MAKA_HOST_API_KEY_ENV_NAME: normalizeRawKeyEnvName(
+              options.apiKeyEnvName ?? requireProviderCredentialEnv(provider).apiKeys[0]!,
+            ),
+          }
+        : {
+            MAKA_PROVIDER_PROXY_URL: proxy.baseUrl,
+            MAKA_PROVIDER_PROXY_TOKEN: proxy.token,
+          },
       usage: proxy.usage,
       telemetry: proxy.telemetry,
       close: proxy.close,

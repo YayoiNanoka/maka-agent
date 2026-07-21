@@ -22,6 +22,7 @@ export interface RunRuntimePolicyAbLifecycleInput
   pilotTasks: RunRuntimePolicyAbComparisonInput['evaluationTasks'];
   evaluationTasks: RunRuntimePolicyAbComparisonInput['evaluationTasks'];
   fullReps: number;
+  requirePilotCandidateActivation?: boolean;
 }
 
 export interface RuntimePolicyAbLifecycleState {
@@ -67,7 +68,10 @@ export async function runRuntimePolicyAbLifecycle(
         roundIdPrefix: 'pilot',
       });
       const pilot: RuntimePolicyAbComparisonSummary = pilotResult;
-      const clearanceFailure = pilotClearanceFailure(pilot);
+      const clearanceFailure = pilotClearanceFailure(
+        pilot,
+        input.requirePilotCandidateActivation ?? true,
+      );
       state = {
         schemaVersion: 'maka.runtime_policy_ab.lifecycle.v2',
         manifestFingerprint: input.manifestFingerprint,
@@ -118,7 +122,10 @@ export async function runRuntimePolicyAbLifecycle(
   });
 }
 
-function pilotClearanceFailure(summary: RuntimePolicyAbComparisonSummary): string | undefined {
+function pilotClearanceFailure(
+  summary: RuntimePolicyAbComparisonSummary,
+  requireCandidateActivation: boolean,
+): string | undefined {
   if (summary.stopReason) return summary.stopReason;
   if (summary.baseline.infraFailed + summary.candidate.infraFailed > 0)
     return 'pilot_infra_failure';
@@ -130,7 +137,7 @@ function pilotClearanceFailure(summary: RuntimePolicyAbComparisonSummary): strin
     (summary.candidate.contextBudget?.activatedAttempts ?? 0) > 0 ||
     (summary.candidate.agentPlans?.triggeredAttempts ?? 0) > 0 ||
     (summary.candidate.taskLedger?.triggeredAttempts ?? 0) > 0;
-  if (!candidateActivated) return 'pilot_candidate_not_activated';
+  if (requireCandidateActivation && !candidateActivated) return 'pilot_candidate_not_activated';
   return undefined;
 }
 
@@ -207,7 +214,7 @@ async function rebuildLegacyState(
     };
   }
   if (pilot) {
-    const reason = pilotClearanceFailure(pilot);
+    const reason = pilotClearanceFailure(pilot, input.requirePilotCandidateActivation ?? true);
     return {
       schemaVersion: 'maka.runtime_policy_ab.lifecycle.v2',
       manifestFingerprint: input.manifestFingerprint,
