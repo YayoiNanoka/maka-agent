@@ -332,10 +332,19 @@ class MakaAgent(BaseInstalledAgent):
 
     def _host_side_llm_enabled(self) -> bool:
         return bool(
-            self._get_env("MAKA_HOST_API_KEY_FILE")
-            or self._get_env("MAKA_HOST_API_KEY")
-            or self._get_env("MAKA_HOST_NO_AUTH") == "true"
+            self._host_provider_env("MAKA_HOST_API_KEY_FILE")
+            or self._host_provider_env("MAKA_HOST_API_KEY")
+            or self._host_provider_env("MAKA_HOST_NO_AUTH") == "true"
         )
+
+    def _host_provider_env(self, key: str) -> str | None:
+        direct = self._get_env(key)
+        if direct:
+            return direct
+        path = self._get_env("MAKA_HARBOR_RUNNER_ENV_FILE")
+        if not path:
+            return None
+        return _load_env_file(Path(path)).get(key)
 
     def _harbor_backend(self) -> str:
         backend = self._resolved_flags.get("backend", "") or self._get_env("MAKA_BACKEND") or "ai-sdk"
@@ -394,7 +403,7 @@ class MakaAgent(BaseInstalledAgent):
         env["MAKA_HARBOR_TOOL_EXECUTOR_TOKEN"] = executor.token
         env["MAKA_CELL_SOFT_TIMEOUT_MS"] = str(self._cell_soft_timeout_ms())
         for key in ("MAKA_HOST_API_KEY", "MAKA_HOST_API_KEY_FILE", "MAKA_HOST_API_KEY_ENV_NAME", "MAKA_HOST_BASE_URL"):
-            value = self._get_env(key)
+            value = self._host_provider_env(key)
             if value:
                 env[key] = value
         return env

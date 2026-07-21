@@ -236,15 +236,20 @@ export function createHarborTaskRunner(options: HarborTaskRunnerOptions): Harbor
         undefined ||
       (!usesHostProviderProxy(runnerOptions.agent) &&
         !providerRequiresSecret(runnerOptions.provider));
+    const hostProviderEnvPath = join(jobsDir, '.maka-host-provider.env');
+    const configAgentEnv = hasHostProviderRuntime
+      ? {
+          ...taskAgentEnvWithoutProviderSecrets(runnerOptions),
+          MAKA_HARBOR_RUNNER_ENV_FILE: hostProviderEnvPath,
+        }
+      : undefined;
     const configPath = join(jobsDir, 'job-config.json');
     const { agentEnv: _attemptAgentEnv, ...inputWithoutAttemptEnv } = input;
     const config = buildHarborJobConfig(inputWithoutAttemptEnv, {
       ...runnerOptions,
       jobsDir,
       jobName,
-      ...(hasHostProviderRuntime
-        ? { agentEnv: taskAgentEnvWithoutProviderSecrets(runnerOptions) }
-        : {}),
+      ...(configAgentEnv ? { agentEnv: configAgentEnv } : {}),
     });
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 
@@ -256,6 +261,9 @@ export function createHarborTaskRunner(options: HarborTaskRunnerOptions): Harbor
     try {
       const providerRuntime = await hostSideProviderRuntime(runnerOptions);
       try {
+        if (providerRuntime) {
+          await writeHostProviderEnvFile(hostProviderEnvPath, providerRuntime.env);
+        }
         result = await runHarbor({
           harborBin,
           configPath,
@@ -267,6 +275,7 @@ export function createHarborTaskRunner(options: HarborTaskRunnerOptions): Harbor
           env: { PYTHONPATH: pythonPath, ...(providerRuntime?.env ?? {}) },
         });
       } finally {
+        await rm(hostProviderEnvPath, { force: true });
         await providerRuntime?.close?.();
         providerUsage = providerRuntime?.usage?.() ?? null;
         providerTelemetry = providerRuntime?.telemetry?.() ?? [];
@@ -397,6 +406,22 @@ export function createHarborTaskRunner(options: HarborTaskRunnerOptions): Harbor
     }
   };
   return runner;
+}
+
+async function writeHostProviderEnvFile(
+  path: string,
+  env: Readonly<Record<string, string>>,
+): Promise<void> {
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(env).sort(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(key) || value.includes('\n') || value.includes('\r')) {
+      throw new Error(`host provider environment contains an unsupported entry: ${key}`);
+    }
+    lines.push(`${key}=${value}`);
+  }
+  await writeFile(path, `${lines.join('\n')}\n`, { encoding: 'utf8', mode: 0o600 });
 }
 
 function providerTelemetryArtifactRefs(

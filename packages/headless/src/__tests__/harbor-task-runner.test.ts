@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -329,6 +329,9 @@ describe('createHarborTaskRunner', () => {
     await withRun(async ({ jobsDir, repo, keyFile }) => {
       const captured: { config?: Record<string, unknown> } = {};
       let harborEnv: Record<string, string> | undefined;
+      let hostProviderEnvPath = '';
+      let hostProviderEnvContents = '';
+      let hostProviderEnvMode = 0;
       const runner = createHarborTaskRunner({
         makaRepoPath: repo,
         jobsDir,
@@ -344,6 +347,11 @@ describe('createHarborTaskRunner', () => {
         agentEnv: { DEEPSEEK_BASE_URL: 'https://api.deepseek.com' },
         runHarbor: async (request) => {
           harborEnv = request.env;
+          const config = JSON.parse(await readFile(request.configPath, 'utf8'));
+          const agentEnv = config.agents[0].env as Record<string, string>;
+          hostProviderEnvPath = agentEnv.MAKA_HARBOR_RUNNER_ENV_FILE;
+          hostProviderEnvContents = await readFile(hostProviderEnvPath, 'utf8');
+          hostProviderEnvMode = (await stat(hostProviderEnvPath)).mode & 0o777;
           return fakeRunner({ reward: '0\n', captured })(request);
         },
       });
@@ -383,6 +391,11 @@ describe('createHarborTaskRunner', () => {
       assert.equal(harborEnv?.MAKA_HOST_API_KEY_FILE, keyFile);
       assert.equal(harborEnv?.MAKA_HOST_API_KEY_ENV_NAME, 'DEEPSEEK_API_KEY');
       assert.equal(harborEnv?.MAKA_HOST_BASE_URL, 'https://api.deepseek.com');
+      assert.match(hostProviderEnvPath, /\.maka-host-provider\.env$/);
+      assert.equal(hostProviderEnvMode, 0o600);
+      assert.match(hostProviderEnvContents, /MAKA_HOST_API_KEY_FILE=/);
+      assert.match(hostProviderEnvContents, /MAKA_HOST_BASE_URL=https:\/\/api\.deepseek\.com/);
+      await assert.rejects(readFile(hostProviderEnvPath, 'utf8'), /ENOENT/);
       assert.deepEqual(config.tasks, [{ path: '/tasks/cobol-modernization', overwrite: false }]);
     });
   });

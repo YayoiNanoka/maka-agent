@@ -1719,6 +1719,21 @@ with tempfile.TemporaryDirectory() as tmp:
     else:
         raise AssertionError("expected Harbor adapter to reject pi-agent cell env")
 
+    runner_env_path = Path(tmp) / "host-provider.env"
+    runner_env_path.write_text(
+        "MAKA_HOST_API_KEY=proxy-token\n"
+        "MAKA_HOST_API_KEY_ENV_NAME=DEEPSEEK_API_KEY\n"
+        "MAKA_HOST_BASE_URL=http://127.0.0.1:4567\n",
+        encoding="utf-8",
+    )
+    runner_env_agent = MakaAgent(Path(tmp), extra_env={
+        "MAKA_HARBOR_RUNNER_ENV_FILE": str(runner_env_path),
+    })
+    assert runner_env_agent._host_side_llm_enabled()
+    runner_cell_env = runner_env_agent._cell_env(Path("/logs/agent/instruction.txt"))
+    assert runner_cell_env["MAKA_BACKEND"] == "ai-sdk"
+    assert "proxy-token" not in json.dumps(runner_cell_env)
+
     try:
         MakaAgent(Path(tmp))._cell_env(Path("/logs/agent/instruction.txt"))
     except RuntimeError as exc:
