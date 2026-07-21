@@ -56,6 +56,30 @@ describe('tool activity presentation', () => {
     assert.equal(materializeTools(messages)[0]?.activityKind, 'edit');
   });
 
+  it('keeps internal plan updates out of persisted tool activity', () => {
+    const messages: StoredMessage[] = [
+      {
+        type: 'tool_call',
+        id: 'plan-tool',
+        turnId: 'turn-1',
+        ts: 1,
+        toolName: 'update_plan',
+        args: {},
+      },
+      {
+        type: 'tool_result',
+        id: 'plan-result',
+        turnId: 'turn-1',
+        ts: 2,
+        toolUseId: 'plan-tool',
+        isError: false,
+        content: { kind: 'json', value: { kind: 'plan_execution_started' } },
+      },
+    ];
+
+    assert.deepEqual(materializeTools(messages), []);
+  });
+
   it('keeps a running command detail collapsed by default', () => {
     const markup = renderTool({
       toolUseId: 'tool-running',

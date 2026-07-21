@@ -19,6 +19,7 @@ import {
   type PlanStore,
   type RequestPlanRevisionInput,
   type SubmitPlanProposalInput,
+  type ApplyPlanExecutionSnapshotInput,
   type UpdatePlanExecutionInput,
 } from '@maka/core/plan';
 import { appendJsonl } from './jsonl-append.js';
@@ -192,8 +193,11 @@ class FilePlanStore implements PlanStore {
       const execution: PlanExecution = {
         executionId: this.newId(),
         planId: proposal.planId,
+        source: 'user_approved',
         proposalId: proposal.proposalId,
         sessionId: input.sessionId,
+        title: proposal.title,
+        ...(proposal.overview ? { overview: proposal.overview } : {}),
         status: 'active',
         steps: proposal.steps.map((step) => ({
           ...structuredClone(step),
@@ -247,6 +251,118 @@ class FilePlanStore implements PlanStore {
               ? { explanation: optionalText(input.explanation) }
               : {}),
           };
+    });
+  }
+
+  async applyExecutionSnapshot(
+    input: ApplyPlanExecutionSnapshotInput,
+  ): Promise<PlanMutationResult> {
+    return this.mutate(input.sessionId, async (state) => {
+      const active = activePlanExecution(state);
+      const interruptedAgentExecution = [...state.executions]
+        .reverse()
+        .find(
+          (execution) =>
+            execution.source === 'agent_initiated' && execution.status === 'interrupted',
+        );
+      const execution = active ?? interruptedAgentExecution;
+
+      if (input.executionStatus === 'cancelled') {
+        if (!execution || execution.source !== 'agent_initiated') {
+          throw new PlanConflictError('There is no agent-initiated plan to cancel');
+        }
+        return {
+          type: 'plan_execution_cancelled',
+          id: this.newId(),
+          sessionId: input.sessionId,
+          ts: this.now(),
+          storeVersion: state.storeVersion + 1,
+          executionId: execution.executionId,
+          reason: requiredText(input.explanation ?? '', 'Plan cancellation reason'),
+        };
+      }
+
+      const now = this.now();
+      const title = requiredPlainText(input.title, 'Plan title');
+      const overview = optionalText(input.overview);
+      const snapshot = normalizeExecutionSnapshot(input.steps, now);
+
+      if (!execution) {
+        if (snapshot.length < 2) {
+          throw new PlanConflictError('An agent-initiated plan must contain at least two steps');
+        }
+        if (snapshot.every(isTerminalStep)) {
+          throw new PlanConflictError('A new agent-initiated plan must contain unfinished work');
+        }
+        const created: PlanExecution = {
+          executionId: this.newId(),
+          planId: this.newId(),
+          source: 'agent_initiated',
+          sessionId: input.sessionId,
+          title,
+          ...(overview ? { overview } : {}),
+          status: 'active',
+          steps: snapshot,
+          startedAt: now,
+          updatedAt: now,
+        };
+        return {
+          type: 'plan_execution_started',
+          id: this.newId(),
+          sessionId: input.sessionId,
+          ts: now,
+          storeVersion: state.storeVersion + 1,
+          execution: created,
+        };
+      }
+
+      const steps =
+        execution.source === 'agent_initiated'
+          ? mergeAgentExecutionSteps(execution, snapshot, now)
+          : mergeApprovedExecutionSnapshot(execution, title, overview, snapshot, now);
+      const completed = steps.every(isTerminalStep);
+      if (completed) {
+        return {
+          type: 'plan_execution_completed',
+          id: this.newId(),
+          sessionId: input.sessionId,
+          ts: now,
+          storeVersion: state.storeVersion + 1,
+          executionId: execution.executionId,
+          ...(execution.source === 'agent_initiated'
+            ? { title, ...(overview ? { overview } : {}) }
+            : {}),
+          steps,
+        };
+      }
+      if (execution.status === 'interrupted') {
+        return {
+          type: 'plan_execution_resumed',
+          id: this.newId(),
+          sessionId: input.sessionId,
+          ts: now,
+          storeVersion: state.storeVersion + 1,
+          executionId: execution.executionId,
+          title,
+          ...(overview ? { overview } : {}),
+          steps,
+        };
+      }
+      return {
+        type: 'plan_progress_updated',
+        id: this.newId(),
+        sessionId: input.sessionId,
+        ts: now,
+        storeVersion: state.storeVersion + 1,
+        executionId: execution.executionId,
+        ...(execution.source === 'agent_initiated'
+          ? { title, ...(overview ? { overview } : {}) }
+          : {}),
+        steps,
+        ...(optionalText(input.explanation)
+          ? { explanation: optionalText(input.explanation) }
+          : {}),
+      };
     });
   }
 
@@ -432,14 +548,25 @@ export function applyPlanEvent(state: PlanSessionState, event: PlanEvent): PlanS
       next.activeExecutionId = event.execution.executionId;
       break;
     }
+    case 'plan_execution_started':
+      if (next.activeExecutionId) {
+        throw new Error('A plan execution is already active');
+      }
+      next.executions.push(structuredClone(event.execution));
+      next.activeExecutionId = event.execution.executionId;
+      break;
     case 'plan_progress_updated': {
       const execution = executionById(next, event.executionId);
+      if (event.title) execution.title = event.title;
+      if (event.overview) execution.overview = event.overview;
       execution.steps = structuredClone(event.steps);
       execution.updatedAt = event.ts;
       break;
     }
     case 'plan_execution_completed': {
       const execution = executionById(next, event.executionId);
+      if (event.title) execution.title = event.title;
+      if (event.overview) execution.overview = event.overview;
       execution.steps = structuredClone(event.steps);
       execution.status = 'completed';
       execution.updatedAt = event.ts;
@@ -469,6 +596,9 @@ export function applyPlanEvent(state: PlanSessionState, event: PlanEvent): PlanS
       const execution = executionById(next, event.executionId);
       execution.status = 'active';
       execution.updatedAt = event.ts;
+      if (event.title) execution.title = event.title;
+      if (event.overview) execution.overview = event.overview;
+      if (event.steps) execution.steps = structuredClone(event.steps);
       delete execution.interruptedAt;
       delete execution.interruptionReason;
       next.activeExecutionId = execution.executionId;
@@ -508,6 +638,97 @@ function mergeExecutionSteps(
     throw new PlanConflictError('Only one plan step may be in progress');
   }
   return merged;
+}
+
+function normalizeExecutionSnapshot(
+  steps: ApplyPlanExecutionSnapshotInput['steps'],
+  now: number,
+): PlanExecutionStep[] {
+  const definitions = normalizeDefinitions(steps);
+  const normalized = definitions.map((definition, index) => ({
+    ...definition,
+    status: steps[index]!.status,
+    ...(optionalText(steps[index]!.note) ? { note: optionalText(steps[index]!.note) } : {}),
+    updatedAt: now,
+  }));
+  if (normalized.filter((step) => step.status === 'in_progress').length > 1) {
+    throw new PlanConflictError('Only one plan step may be in progress');
+  }
+  return normalized;
+}
+
+function mergeApprovedExecutionSnapshot(
+  execution: PlanExecution,
+  title: string,
+  overview: string | undefined,
+  snapshot: PlanExecutionStep[],
+  now: number,
+): PlanExecutionStep[] {
+  if (title !== execution.title || overview !== execution.overview) {
+    throw new PlanConflictError('An approved plan structure cannot be modified');
+  }
+  if (
+    snapshot.length !== execution.steps.length ||
+    snapshot.some((step, index) => !sameRequiredStepDefinition(step, execution.steps[index]!))
+  ) {
+    throw new PlanConflictError('An approved plan structure cannot be modified');
+  }
+  return mergeExecutionSteps(
+    execution,
+    snapshot.map(({ id, status, note }) => ({ id, status, ...(note ? { note } : {}) })),
+    now,
+  );
+}
+
+function mergeAgentExecutionSteps(
+  execution: PlanExecution,
+  snapshot: PlanExecutionStep[],
+  now: number,
+): PlanExecutionStep[] {
+  const existingById = new Map(execution.steps.map((step) => [step.id, step]));
+  const snapshotById = new Map(snapshot.map((step) => [step.id, step]));
+  for (const existing of execution.steps) {
+    const next = snapshotById.get(existing.id);
+    if (!next) {
+      throw new PlanConflictError(`Plan step ${existing.id} must be marked skipped, not deleted`);
+    }
+    if (isTerminalStep(existing)) {
+      const oldIndex = execution.steps.findIndex((step) => step.id === existing.id);
+      const newIndex = snapshot.findIndex((step) => step.id === existing.id);
+      if (
+        next.status !== existing.status ||
+        oldIndex !== newIndex ||
+        !sameStepDefinition(next, existing) ||
+        next.note !== existing.note
+      ) {
+        throw new PlanConflictError(`Terminal plan step ${existing.id} cannot be changed`);
+      }
+    }
+  }
+  return snapshot.map((step) => {
+    const existing = existingById.get(step.id);
+    return isTerminalStep(existing) ? structuredClone(existing) : { ...step, updatedAt: now };
+  });
+}
+
+function sameStepDefinition(left: PlanExecutionStep, right: PlanExecutionStep): boolean {
+  return (
+    sameRequiredStepDefinition(left, right) &&
+    JSON.stringify(left.files ?? []) === JSON.stringify(right.files ?? []) &&
+    left.complexity === right.complexity
+  );
+}
+
+function sameRequiredStepDefinition(left: PlanExecutionStep, right: PlanExecutionStep): boolean {
+  return (
+    left.id === right.id && left.title === right.title && left.description === right.description
+  );
+}
+
+function isTerminalStep(
+  step: Pick<PlanExecutionStep, 'status'> | undefined,
+): step is Pick<PlanExecutionStep, 'status'> {
+  return step?.status === 'completed' || step?.status === 'skipped';
 }
 
 function normalizeDefinitions(steps: PlanStepDefinition[]): PlanStepDefinition[] {
@@ -609,6 +830,7 @@ function decodePlanEvent(value: unknown, sessionId: string): PlanEvent {
       'plan_revision_requested',
       'plan_abandoned',
       'plan_approved',
+      'plan_execution_started',
       'plan_progress_updated',
       'plan_execution_completed',
       'plan_execution_cancelled',

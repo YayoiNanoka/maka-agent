@@ -36,7 +36,7 @@ export function usePlanModeState(session: SessionSummary | undefined): PlanModeS
     if (!session) return;
     const refreshOrReport = () => void refresh().catch((cause) => setError(message(cause)));
     refreshOrReport();
-    return window.maka.sessions.subscribeEvents(session.id, (event: SessionEvent) => {
+    const unsubscribeEvents = window.maka.sessions.subscribeEvents(session.id, (event: SessionEvent) => {
       if (
         event.type === 'plan_submitted'
         || event.type === 'complete'
@@ -46,6 +46,13 @@ export function usePlanModeState(session: SessionSummary | undefined): PlanModeS
         refreshOrReport();
       }
     });
+    const unsubscribeChanges = window.maka.sessions.subscribeChanges((event) => {
+      if (event.sessionId === session.id) refreshOrReport();
+    });
+    return () => {
+      unsubscribeEvents();
+      unsubscribeChanges();
+    };
   }, [session?.id, session?.collaborationMode, refresh]);
 
   const run = useCallback(async (action: () => Promise<void>): Promise<void> => {
@@ -191,7 +198,7 @@ export function PlanExecutionPanel(props: {
     (item) => item.executionId === planMode.state?.activeExecutionId,
   );
   const interrupted = [...(planMode.state?.executions ?? [])].reverse().find(
-    (item) => item.status === 'interrupted',
+    (item) => item.source === 'user_approved' && item.status === 'interrupted',
   );
   const execution = active ?? interrupted;
   useEffect(() => {
@@ -199,9 +206,7 @@ export function PlanExecutionPanel(props: {
   }, [execution?.executionId]);
   if (!execution) return null;
 
-  const proposal = planMode.state?.proposals.find(
-    (item) => item.proposalId === execution.proposalId,
-  );
+  const agentInitiated = execution.source === 'agent_initiated';
   const completedCount = execution.steps.filter(
     (step) => step.status === 'completed' || step.status === 'skipped',
   ).length;
@@ -216,8 +221,12 @@ export function PlanExecutionPanel(props: {
         onClick={() => setExpanded((current) => !current)}
       >
         <div>
-          <span>{execution.status === 'interrupted' ? '计划已中断' : '正在执行计划'}</span>
-          <strong>{proposal?.title ?? '已批准计划'}</strong>
+          <span>{agentInitiated
+            ? '正在处理'
+            : execution.status === 'interrupted'
+              ? '计划已中断'
+              : '正在执行计划'}</span>
+          <strong>{execution.title}</strong>
         </div>
         <span className="plan-execution-summary">
           <span className="plan-execution-count">{completedCount}/{execution.steps.length} 步</span>
@@ -241,7 +250,7 @@ export function PlanExecutionPanel(props: {
               </li>
             ))}
           </ol>
-          {execution.status === 'interrupted' && (
+          {!agentInitiated && execution.status === 'interrupted' && (
             <div className="plan-execution-actions">
               <UiButton
                 type="button"
@@ -259,7 +268,7 @@ export function PlanExecutionPanel(props: {
                 disabled={planMode.pending}
                 onClick={() => void planMode.abandon(
                   execution.executionId,
-                  proposal?.title ?? '已批准计划',
+                  execution.title,
                 )}
               >
                 放弃计划
@@ -279,6 +288,8 @@ function isPlanToolResult(event: SessionEvent): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const kind = (value as { kind?: unknown }).kind;
   return kind === 'plan_progress_updated'
+    || kind === 'plan_execution_started'
+    || kind === 'plan_execution_resumed'
     || kind === 'plan_execution_completed'
     || kind === 'plan_execution_cancelled';
 }

@@ -58,8 +58,9 @@ function buildTaskCreateTool(
     name,
     displayName: 'Task Create',
     description:
-      'Add one or more tasks to the session task ledger. The full updated ledger is re-shown each turn, ' +
-      `so use this to record work you plan to do; update status with ${updateToolName} as you progress.`,
+      'Add durable, independently trackable work items to the session task ledger. Use this only when ' +
+      'work must remain tracked across turns or agents; do not use it to represent the ordered execution ' +
+      `steps of the current request. Use update_plan for complex current-turn execution. Update durable task status with ${updateToolName}.`,
     parameters: z.object({
       tasks: z
         .array(
@@ -125,7 +126,8 @@ function buildTaskUpdateTool(
     name,
     displayName: 'Task Update',
     description:
-      'Update a task in the session task ledger by id. Mark tasks in_progress when you start them; ' +
+      'Update a durable work item in the session task ledger by id. This does not update the current ' +
+      'execution plan; use update_plan for current-plan steps. Mark tasks in_progress when you start them; ' +
       'blocked, failed, and completed updates require a reason or evidence field. ' +
       'Reopening completed/cancelled tasks requires explicitReopen=true.',
     parameters: z

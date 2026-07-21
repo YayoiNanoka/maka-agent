@@ -22,6 +22,8 @@ import {
   persistSynthesisCacheBlocksToArtifacts,
   recordLlmCall,
   recordToolInvocation,
+  renderAgentModePlanningPrompt,
+  renderAgentPlanExecutionContext,
   renderPlanExecutionPrompt,
   renderInterruptedPlanContext,
   renderPlanModePrompt,
@@ -159,9 +161,18 @@ export function createAiSdkBackendFactory(deps: AiSdkBackendFactoryDeps): Backen
     const collaborationMode = ctx.header.collaborationMode ?? 'agent';
     const planState = await planStore.readState(ctx.sessionId);
     const activeExecution = activePlanExecution(planState);
-    const interruptedExecution = [...planState.executions]
+    const interruptedApprovedExecution = [...planState.executions]
       .reverse()
-      .find((execution) => execution.status === 'interrupted');
+      .find(
+        (execution) =>
+          execution.source === 'user_approved' && execution.status === 'interrupted',
+      );
+    const interruptedAgentExecution = [...planState.executions]
+      .reverse()
+      .find(
+        (execution) =>
+          execution.source === 'agent_initiated' && execution.status === 'interrupted',
+      );
     const candidateTools = isComputerUseRealModelE2e
       ? computerUseTools
       : ctx.tools
@@ -182,11 +193,13 @@ export function createAiSdkBackendFactory(deps: AiSdkBackendFactoryDeps): Backen
       ? { role: 'lead' as const, teamId: expertTeamId, agentId: 'lead' }
       : undefined);
     const planControlTools = collaborationMode === 'plan'
-      ? [buildSubmitPlanTool(planStore, interruptedExecution?.executionId)]
-      : activeExecution
+      ? [buildSubmitPlanTool(planStore, interruptedApprovedExecution?.executionId)]
+      : !ctx.tools
         ? [
-            buildUpdatePlanTool(planStore, activeExecution.executionId),
-            buildCancelPlanTool(planStore, activeExecution.executionId),
+            buildUpdatePlanTool(planStore),
+            ...(activeExecution?.source === 'user_approved'
+              ? [buildCancelPlanTool(planStore, activeExecution.executionId)]
+              : []),
           ]
         : [];
     const backendTools = computerUseToolsForModel(
@@ -234,7 +247,10 @@ export function createAiSdkBackendFactory(deps: AiSdkBackendFactoryDeps): Backen
         ...(activeExecution
           ? {
               planId: activeExecution.planId,
-              proposalId: activeExecution.proposalId,
+              source: activeExecution.source,
+              ...(activeExecution.proposalId
+                ? { proposalId: activeExecution.proposalId }
+                : {}),
               executionId: activeExecution.executionId,
             }
           : {}),
@@ -260,14 +276,18 @@ export function createAiSdkBackendFactory(deps: AiSdkBackendFactoryDeps): Backen
             host: backendSkillHost,
           },
         );
-        return collaborationMode === 'plan' ? `${base}\n\n${renderPlanModePrompt()}` : base;
+        if (collaborationMode === 'plan') return `${base}\n\n${renderPlanModePrompt()}`;
+        return ctx.tools ? base : `${base}\n\n${renderAgentModePlanningPrompt()}`;
       },
       turnTailPrompt: async ({ cwd, sessionId }) => {
         const base = await systemPromptService.buildTurnTailPrompt(cwd, sessionId);
-        const execution = activeExecution ?? (
-          collaborationMode === 'plan' ? interruptedExecution : undefined
-        );
+        const execution = activeExecution ?? (collaborationMode === 'plan'
+          ? interruptedApprovedExecution
+          : interruptedAgentExecution);
         if (!execution) return base;
+        if (execution.source === 'agent_initiated') {
+          return `${base}\n\n${renderAgentPlanExecutionContext(execution)}`;
+        }
         const proposal = planState.proposals.find(
           (candidate) => candidate.proposalId === execution.proposalId,
         );
@@ -462,7 +482,6 @@ export function createSessionStreamer(deps: SessionStreamerDeps): StreamEvents {
         computerUseTools.clearSession(sessionId);
       },
       onDrained: async (outcome) => {
-        emitSessionsChanged('message-appended', sessionId);
         if (
           interruptActivePlanExecution &&
           (outcome.kind === 'aborted' || outcome.kind === 'errored')
@@ -472,6 +491,7 @@ export function createSessionStreamer(deps: SessionStreamerDeps): StreamEvents {
             outcome.kind === 'aborted' ? 'turn_aborted' : `turn_error:${outcome.reason}`,
           ).catch(() => undefined);
         }
+        emitSessionsChanged('message-appended', sessionId);
       },
     });
     if (started.kind === 'unavailable') throw new Error(started.reason);

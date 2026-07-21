@@ -51,9 +51,31 @@ describe('Plan Mode proposal presentation', () => {
 
     assert.match(source, /isPlanToolResult\(event\)/);
     assert.match(source, /kind === 'plan_progress_updated'/);
+    assert.match(source, /kind === 'plan_execution_started'/);
     assert.match(source, /className="plan-execution-steps"/);
     assert.match(source, /executionStepStatusLabel\(step\.status\)/);
     assert.match(source, /<span>\{step\.title\}<\/span>/);
+  });
+
+  it('hides interrupted agent plans and refreshes after their durable state changes', async () => {
+    const source = await readFile(resolve(rendererRoot, 'plan-mode-panel.tsx'), 'utf8');
+
+    assert.match(source, /item\.source === 'user_approved' && item\.status === 'interrupted'/);
+    assert.match(source, /window\.maka\.sessions\.subscribeChanges/);
+    assert.match(source, /event\.sessionId === session\.id/);
+    assert.match(source, /!agentInitiated && execution\.status === 'interrupted'/);
+  });
+
+  it('makes autonomous planning available to the main agent from the start of a turn', async () => {
+    const source = await readFile(
+      resolve(repoRoot, 'apps', 'desktop', 'src', 'main', 'session-stream.ts'),
+      'utf8',
+    );
+
+    assert.match(source, /!ctx\.tools[\s\S]*?buildUpdatePlanTool\(planStore\)/);
+    assert.match(source, /renderAgentModePlanningPrompt\(\)/);
+    assert.match(source, /execution\.source === 'agent_initiated'/);
+    assert.match(source, /renderAgentPlanExecutionContext\(execution\)/);
   });
 
   it('keeps execution details collapsed by default and offers interrupted actions', async () => {

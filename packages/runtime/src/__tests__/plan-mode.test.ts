@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
 import {
+  renderAgentModePlanningPrompt,
+  renderAgentPlanExecutionContext,
   renderInterruptedPlanContext,
   renderPlanExecutionPrompt,
   renderPlanModePrompt,
   selectCollaborationTools,
 } from '../plan-mode.js';
-import { buildSubmitPlanTool } from '../plan-tools.js';
+import { buildSubmitPlanTool, buildUpdatePlanTool } from '../plan-tools.js';
 import type { MakaTool } from '../tool-runtime.js';
 
 describe('Plan Mode tool surface', () => {
@@ -82,6 +84,76 @@ describe('Plan Mode tool surface', () => {
     );
   });
 
+  test('requires autonomous planning for complex current-turn work before an execution exists', () => {
+    const selected = selectCollaborationTools({
+      mode: 'agent',
+      hasActiveExecution: false,
+      tools: [
+        tool('Write', 'file_write'),
+        tool('SubmitPlan'),
+        tool('update_plan'),
+        tool('cancel_plan'),
+      ],
+    });
+    assert.deepEqual(
+      selected.map((tool) => tool.name),
+      ['Write', 'update_plan'],
+    );
+
+    const prompt = renderAgentModePlanningPrompt();
+    assert.match(prompt, /three or more dependent stages/);
+    assert.match(prompt, /before broad execution/);
+    assert.match(prompt, /simple factual questions/);
+    assert.doesNotMatch(prompt, /purely informational requests/);
+    assert.match(prompt, /Do not use task_create or task_update/);
+    assert.match(prompt, /only for durable, independently trackable work/);
+    assert.match(prompt, /Never duplicate the same work/);
+    assert.match(prompt, /does not require user approval/);
+    assert.match(prompt, /Continue execution in the same turn/);
+    assert.match(prompt, /Completed and skipped steps are immutable/);
+
+    const updatePlan = buildUpdatePlanTool({} as never);
+    assert.match(updatePlan.description, /Start or update the main Agent's current internal execution plan/);
+    assert.match(updatePlan.description, /three or more dependent stages/);
+    assert.match(updatePlan.description, /Do not use task_create or task_update as a substitute/);
+    assert.match(updatePlan.description, /without waiting for user approval/);
+  });
+
+  test('lets the agent decide how to handle an interrupted internal plan', () => {
+    const prompt = renderAgentPlanExecutionContext({
+      executionId: 'execution-1',
+      planId: 'plan-1',
+      source: 'agent_initiated',
+      sessionId: 'session-1',
+      title: 'Internal implementation plan',
+      status: 'interrupted',
+      steps: [
+        {
+          id: 'inspect',
+          title: 'Inspect code',
+          description: 'Inspect the implementation.',
+          status: 'completed',
+          updatedAt: 2,
+        },
+        {
+          id: 'change',
+          title: 'Change code',
+          description: 'Implement the change.',
+          status: 'pending',
+          updatedAt: 2,
+        },
+      ],
+      startedAt: 1,
+      updatedAt: 2,
+      interruptedAt: 2,
+      interruptionReason: 'turn_aborted',
+    });
+
+    assert.match(prompt, /decide whether to continue it, revise it and continue, or cancel it/);
+    assert.match(prompt, /executionStatus cancelled/);
+    assert.match(prompt, /Do not ask the user to manage the plan through UI controls/);
+  });
+
   test('injects interrupted progress as replanning context without resuming execution', () => {
     const prompt = renderInterruptedPlanContext({
       proposal: {
@@ -98,8 +170,10 @@ describe('Plan Mode tool surface', () => {
       execution: {
         executionId: 'execution-1',
         planId: 'plan-1',
+        source: 'user_approved',
         proposalId: 'proposal-1',
         sessionId: 'session-1',
+        title: 'Original plan',
         status: 'interrupted',
         steps: [
           {
@@ -140,8 +214,10 @@ describe('Plan Mode tool surface', () => {
       execution: {
         executionId: 'execution-1',
         planId: 'plan-1',
+        source: 'user_approved',
         proposalId: 'proposal-1',
         sessionId: 'session-1',
+        title: 'Implement plan',
         status: 'active',
         steps: [
           {

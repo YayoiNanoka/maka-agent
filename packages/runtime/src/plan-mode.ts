@@ -27,11 +27,25 @@ export function selectCollaborationTools(input: {
   return input.tools.filter((tool) => {
     if (tool.name === 'SubmitPlan') return false;
     if (tool.categoryHint === 'subagent' && input.hasActiveExecution) return false;
-    if (tool.name === 'update_plan' || tool.name === 'cancel_plan') {
-      return input.hasActiveExecution;
-    }
+    if (tool.name === 'update_plan') return true;
+    if (tool.name === 'cancel_plan') return input.hasActiveExecution;
     return true;
   });
+}
+
+export function renderAgentModePlanningPrompt(): string {
+  return [
+    '<agent_planning>',
+    'For work expected to finish in the current turn, use update_plan after initial reconnaissance and before broad execution when the task has three or more dependent stages, spans multiple components, requires investigation followed by implementation or verification, or has intermediate results that determine later work.',
+    'Do not create a plan for simple factual questions, single-step work, or requests that require no multi-stage investigation.',
+    'Do not use task_create or task_update to represent the ordered execution steps of the current request. The Task Ledger is only for durable, independently trackable work that must remain visible across turns or agents. Never duplicate the same work as both Plan steps and Task Ledger tasks.',
+    'Before the first update_plan call, privately review that the plan is complete, ordered, feasible, and no more detailed than necessary. A new agent-initiated plan must contain at least two steps.',
+    'Creating a plan does not change Collaboration Mode and does not require user approval. Continue execution in the same turn immediately after creating it.',
+    'Submit the complete plan snapshot on every update. Keep at most one step in_progress, update progress promptly after completing work, and make every finished or skipped step terminal before the final response.',
+    'You may revise pending work while executing. Never delete a step: mark unnecessary work skipped. Completed and skipped steps are immutable.',
+    'Treat the plan as internal execution state, not as the response deliverable. Do not ask the user to manage it through UI controls.',
+    '</agent_planning>',
+  ].join('\n');
 }
 
 export function renderPlanModePrompt(): string {
@@ -84,8 +98,31 @@ export function renderPlanExecutionPrompt(input: {
     input.proposal.overview ? `Overview: ${input.proposal.overview}` : '',
     'Approved steps:',
     steps,
-    'Execute this approved plan. Before implementation, call update_plan with the first actionable step in_progress and every other step at its current status. Immediately after finishing a step, call update_plan again to mark it completed and move the next step to in_progress. Before the final response, update every finished or skipped step so the execution can close. If the user explicitly abandons the plan, call cancel_plan. Do not delegate to subagents while this execution is active.',
+    'Execute this approved plan. Before implementation, call update_plan with the plan title, overview, and the complete approved step definitions and statuses; set the first actionable step in_progress and leave every other step at its current status. The approved title, overview, step order, titles, and descriptions are immutable. Immediately after finishing a step, call update_plan again to mark it completed and move the next step to in_progress. Before the final response, update every finished or skipped step so the execution can close. If the user explicitly abandons the plan, call cancel_plan. Do not delegate to subagents while this execution is active.',
     '</plan_execution_context>',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+export function renderAgentPlanExecutionContext(execution: PlanExecution): string {
+  const steps = execution.steps.map((step) => renderExecutionStep(step)).join('\n');
+  const interrupted = execution.status === 'interrupted';
+  return [
+    '<agent_plan_context>',
+    `Plan: ${execution.title}`,
+    `Plan ID: ${execution.planId}`,
+    `Execution ID: ${execution.executionId}`,
+    execution.overview ? `Overview: ${execution.overview}` : '',
+    interrupted && execution.interruptionReason
+      ? `Interruption reason: ${execution.interruptionReason}`
+      : '',
+    'Current steps:',
+    steps,
+    interrupted
+      ? 'This internal plan was interrupted in the previous turn. Use the latest user message to decide whether to continue it, revise it and continue, or cancel it with update_plan executionStatus cancelled. Do not ask the user to manage the plan through UI controls.'
+      : 'Continue this internal plan. Update the complete snapshot as work progresses, revise pending work when necessary, and complete or skip every remaining step before the final response.',
+    '</agent_plan_context>',
   ]
     .filter(Boolean)
     .join('\n');

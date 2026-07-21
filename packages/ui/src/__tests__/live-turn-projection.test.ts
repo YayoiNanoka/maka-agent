@@ -80,6 +80,32 @@ describe('applyLiveTurnEvent', () => {
     }]);
   });
 
+  it('keeps internal plan updates out of the live conversation timeline', () => {
+    const started = applyLiveTurnEvent(undefined, {
+      type: 'tool_start',
+      id: 'event-1',
+      turnId: 'turn-1',
+      stepId: 'step-1',
+      toolUseId: 'plan-tool-1',
+      toolName: 'update_plan',
+      args: {},
+      ts: 100,
+    });
+    assert.deepEqual(started.steps, []);
+    assert.deepEqual(started.hiddenToolUseIds, ['plan-tool-1']);
+
+    const settled = applyLiveTurnEvent(started, {
+      type: 'tool_result',
+      id: 'event-2',
+      turnId: 'turn-1',
+      toolUseId: 'plan-tool-1',
+      isError: false,
+      content: { kind: 'json', value: { kind: 'plan_execution_started' } },
+      ts: 101,
+    });
+    assert.deepEqual(settled.steps, []);
+  });
+
   it('replaces the live reasoning with thinking_complete on the same step', () => {
     const partial = applyLiveTurnEvent(undefined, {
       type: 'thinking_delta',

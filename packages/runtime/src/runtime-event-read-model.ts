@@ -1046,6 +1046,8 @@ function isLegacyPlanToolResult(value: unknown): boolean {
   const kind = (value as { kind?: unknown }).kind;
   return (
     kind === 'plan_submitted' ||
+    kind === 'plan_execution_started' ||
+    kind === 'plan_execution_resumed' ||
     kind === 'plan_progress_updated' ||
     kind === 'plan_execution_completed' ||
     kind === 'plan_execution_cancelled'

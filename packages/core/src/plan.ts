@@ -7,6 +7,9 @@ export type PlanExecutionStatus = (typeof PLAN_EXECUTION_STATUSES)[number];
 export const PLAN_STEP_STATUSES = ['pending', 'in_progress', 'completed', 'skipped'] as const;
 export type PlanStepStatus = (typeof PLAN_STEP_STATUSES)[number];
 
+export const PLAN_EXECUTION_SOURCES = ['user_approved', 'agent_initiated'] as const;
+export type PlanExecutionSource = (typeof PLAN_EXECUTION_SOURCES)[number];
+
 export interface PlanStepDefinition {
   id: string;
   title: string;
@@ -41,8 +44,11 @@ export interface PlanExecutionStep extends PlanStepDefinition {
 export interface PlanExecution {
   executionId: string;
   planId: string;
-  proposalId: string;
+  source: PlanExecutionSource;
+  proposalId?: string;
   sessionId: string;
+  title: string;
+  overview?: string;
   status: PlanExecutionStatus;
   steps: PlanExecutionStep[];
   startedAt: number;
@@ -91,14 +97,22 @@ export type PlanEvent =
       execution: PlanExecution;
     })
   | (PlanEventBase & {
+      type: 'plan_execution_started';
+      execution: PlanExecution;
+    })
+  | (PlanEventBase & {
       type: 'plan_progress_updated';
       executionId: string;
+      title?: string;
+      overview?: string;
       steps: PlanExecutionStep[];
       explanation?: string;
     })
   | (PlanEventBase & {
       type: 'plan_execution_completed';
       executionId: string;
+      title?: string;
+      overview?: string;
       steps: PlanExecutionStep[];
     })
   | (PlanEventBase & {
@@ -114,6 +128,9 @@ export type PlanEvent =
   | (PlanEventBase & {
       type: 'plan_execution_resumed';
       executionId: string;
+      title?: string;
+      overview?: string;
+      steps?: PlanExecutionStep[];
     });
 
 export interface SubmitPlanProposalInput {
@@ -155,6 +172,20 @@ export interface UpdatePlanExecutionInput {
   explanation?: string;
 }
 
+export interface ApplyPlanExecutionSnapshotInput {
+  sessionId: string;
+  title: string;
+  overview?: string;
+  executionStatus?: 'active' | 'cancelled';
+  steps: Array<
+    PlanStepDefinition & {
+      status: PlanStepStatus;
+      note?: string;
+    }
+  >;
+  explanation?: string;
+}
+
 export interface CancelPlanExecutionInput {
   sessionId: string;
   executionId: string;
@@ -173,6 +204,7 @@ export interface PlanStore {
   abandonProposal(input: AbandonPlanProposalInput): Promise<PlanMutationResult>;
   approveProposal(input: ApprovePlanProposalInput): Promise<PlanMutationResult>;
   updateExecution(input: UpdatePlanExecutionInput): Promise<PlanMutationResult>;
+  applyExecutionSnapshot(input: ApplyPlanExecutionSnapshotInput): Promise<PlanMutationResult>;
   cancelExecution(input: CancelPlanExecutionInput): Promise<PlanMutationResult>;
   interruptActiveExecution(sessionId: string, reason: string): Promise<PlanMutationResult | null>;
   resumeExecution(sessionId: string, executionId: string): Promise<PlanMutationResult>;

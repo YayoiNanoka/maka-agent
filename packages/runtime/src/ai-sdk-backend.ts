@@ -1993,11 +1993,15 @@ export class AiSdkBackend implements AgentBackend {
     const traceType = result.kind;
     this.currentRunTrace?.emit('plan', traceType, 'Plan execution state changed', {
       planId: result.execution.planId,
-      proposalId: result.execution.proposalId,
+      source: result.execution.source,
+      ...(result.execution.proposalId ? { proposalId: result.execution.proposalId } : {}),
       executionId: result.execution.executionId,
       storeVersion: result.storeVersion,
     });
-    if (result.kind === 'plan_execution_completed' || result.kind === 'plan_execution_cancelled') {
+    if (
+      result.execution.source === 'user_approved' &&
+      (result.kind === 'plan_execution_completed' || result.kind === 'plan_execution_cancelled')
+    ) {
       this.stopAfterStepRequested = true;
     }
   }
@@ -2999,6 +3003,8 @@ function isPlanToolResult(output: unknown): output is PlanToolResult {
   if (!output || typeof output !== 'object') return false;
   return [
     'plan_submitted',
+    'plan_execution_started',
+    'plan_execution_resumed',
     'plan_progress_updated',
     'plan_execution_completed',
     'plan_execution_cancelled',

@@ -106,6 +106,8 @@ describe('task ledger contract', () => {
     assert.match(tail, /写单元测试/);
     assert.match(tail, /仅供当前回复参考/);
     assert.match(tail, /task_create\/task_update\/task_list\/task_get/);
+    assert.match(tail, /只用于需要跨 turn 或 Agent 独立跟踪的持久工作项/);
+    assert.match(tail, /不要用它代替 update_plan/);
     assert.doesNotMatch(tail, /TaskCreate\/TaskUpdate/);
   });
 

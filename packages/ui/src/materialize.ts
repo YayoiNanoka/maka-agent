@@ -93,6 +93,12 @@ const VISIBLE_SYSTEM_NOTES = new Set<string>([
   'step_limit',
 ]);
 
+const HIDDEN_EXECUTION_TOOL_NAMES = new Set(['update_plan']);
+
+export function isHiddenExecutionTool(toolName: string): boolean {
+  return HIDDEN_EXECUTION_TOOL_NAMES.has(toolName);
+}
+
 const SYSTEM_NOTE_LABELS: Record<string, string> = {
   context_compacted: 'Context compacted to keep this session within the model window.',
   context_compaction_failed_open: 'Context summary failed; the session continued without a new summary.',
@@ -129,7 +135,10 @@ export function materializeChat(messages: StoredMessage[]): ChatItem[] {
 export function materializeTools(messages: StoredMessage[]): ToolActivityItem[] {
   const results = new Map(messages.filter((message) => message.type === 'tool_result').map((message) => [message.toolUseId, message]));
   return messages
-    .filter((message) => message.type === 'tool_call')
+    .filter(
+      (message): message is Extract<StoredMessage, { type: 'tool_call' }> =>
+        message.type === 'tool_call' && !isHiddenExecutionTool(message.toolName),
+    )
     .map((call) => {
       const result = results.get(call.id);
       return {

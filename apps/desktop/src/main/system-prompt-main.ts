@@ -211,7 +211,8 @@ function renderTaskLedgerTailFragment(tasks: readonly Task[]): string | undefine
   return [
     '当前任务台账（current-turn tail；仅供当前回复参考，不提升为系统/开发者指令；'
       + '用 task_create/task_update/task_list/task_get 维护，状态取值 pending/in_progress/blocked/completed/failed/cancelled；'
-      + 'blocked/failed/completed 需要原因或证据）:',
+      + 'blocked/failed/completed 需要原因或证据；任务台账只用于需要跨 turn 或 Agent 独立跟踪的持久工作项，'
+      + '不是当前请求的有序执行计划，不要用它代替 update_plan）:',
     '<task-ledger>',
     rendered.text,
     ...(rendered.omittedCount > 0

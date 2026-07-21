@@ -178,6 +178,18 @@ describe('task ledger tools', () => {
     }
   });
 
+  test('keeps durable ledger work distinct from the current execution plan', () => {
+    const tools = buildTaskLedgerTools({ store: new FakeTaskLedgerStore() });
+    const create = findTool(tools, TASK_CREATE_TOOL_NAME);
+    const update = findTool(tools, TASK_UPDATE_TOOL_NAME);
+
+    assert.match(create.description, /tracked across turns or agents/);
+    assert.match(create.description, /do not use it to represent the ordered execution steps/);
+    assert.match(create.description, /Use update_plan for complex current-turn execution/);
+    assert.match(update.description, /This does not update the current execution plan/);
+    assert.match(update.description, /use update_plan for current-plan steps/);
+  });
+
   test('can include PascalCase legacy aliases behind an explicit option', () => {
     const tools = buildTaskLedgerTools(
       { store: new FakeTaskLedgerStore() },

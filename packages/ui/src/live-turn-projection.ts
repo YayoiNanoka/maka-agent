@@ -1,7 +1,7 @@
 import type { SessionEvent, StoredMessage, UiLocale } from '@maka/core';
 import { applyAssistantComplete, applyAssistantDelta } from './assistant-stream.js';
 import { projectToolActivityArgs, toolResultActivityStatus } from '@maka/core';
-import type { ToolActivityItem } from './materialize.js';
+import { isHiddenExecutionTool, type ToolActivityItem } from './materialize.js';
 import { applyThinkingComplete, applyThinkingDelta } from './thinking-stream.js';
 import { applyToolOutputChunk } from './tool-output-stream.js';
 
@@ -33,6 +33,7 @@ export interface LiveTurnProjection {
   turnId: string;
   phase: 'waiting' | 'streamed';
   terminal?: true;
+  hiddenToolUseIds?: string[];
   steps: LiveTurnStepProjection[];
 }
 
@@ -111,6 +112,18 @@ export function applyLiveTurnEvent(
   const prior = current?.turnId === event.turnId
     ? current
     : { turnId: event.turnId, phase: 'streamed' as const, steps: [] };
+  if (event.type === 'tool_start' && isHiddenExecutionTool(event.toolName)) {
+    return {
+      ...prior,
+      hiddenToolUseIds: Array.from(new Set([...(prior.hiddenToolUseIds ?? []), event.toolUseId])),
+    };
+  }
+  if (
+    'toolUseId' in event
+    && prior.hiddenToolUseIds?.includes(event.toolUseId)
+  ) {
+    return prior;
+  }
   const messageEvent = event.type === 'thinking_delta'
     || event.type === 'thinking_complete'
     || event.type === 'text_delta'

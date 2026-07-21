@@ -223,7 +223,174 @@ describe('FilePlanStore', () => {
       assert.equal(await store.interruptActiveExecution('session-1', 'shutdown'), null);
     });
   });
+
+  test('creates and completes an agent-initiated plan without a proposal', async () => {
+    await withStore(async (store) => {
+      const started = await store.applyExecutionSnapshot({
+        sessionId: 'session-1',
+        title: 'Implement complex change',
+        overview: 'Coordinate runtime and UI changes.',
+        steps: [
+          agentStep('runtime', 'Update runtime', 'Change the runtime state.', 'in_progress'),
+          agentStep('ui', 'Update UI', 'Render current progress.', 'pending'),
+        ],
+      });
+
+      assert.equal(started.event.type, 'plan_execution_started');
+      assert.equal(started.state.proposals.length, 0);
+      assert.equal(started.state.executions[0]?.source, 'agent_initiated');
+      assert.equal(started.state.executions[0]?.title, 'Implement complex change');
+      assert.equal(started.state.activeExecutionId, started.state.executions[0]?.executionId);
+
+      const completed = await store.applyExecutionSnapshot({
+        sessionId: 'session-1',
+        title: 'Implement complex change',
+        overview: 'Coordinate runtime and UI changes.',
+        steps: [
+          agentStep('runtime', 'Update runtime', 'Change the runtime state.', 'completed'),
+          agentStep('ui', 'Update UI', 'Render current progress.', 'completed'),
+        ],
+      });
+
+      assert.equal(completed.event.type, 'plan_execution_completed');
+      assert.equal(completed.state.activeExecutionId, undefined);
+      assert.equal(completed.state.executions[0]?.status, 'completed');
+    });
+  });
+
+  test('uses the same update tool for an approved plan without changing its structure', async () => {
+    await withStore(async (store) => {
+      const submitted = await store.submitProposal({
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        title: 'Approved plan',
+        overview: 'Keep this structure fixed.',
+        steps: [{ id: 'one', title: 'First step', description: 'Complete the first step.' }],
+      });
+      const proposal = submitted.state.proposals[0]!;
+      await store.approveProposal({
+        sessionId: 'session-1',
+        proposalId: proposal.proposalId,
+        expectedRevision: proposal.revision,
+      });
+
+      const completed = await store.applyExecutionSnapshot({
+        sessionId: 'session-1',
+        title: 'Approved plan',
+        overview: 'Keep this structure fixed.',
+        steps: [agentStep('one', 'First step', 'Complete the first step.', 'completed')],
+      });
+      assert.equal(completed.event.type, 'plan_execution_completed');
+      assert.equal(completed.state.executions[0]?.source, 'user_approved');
+
+      const next = await store.submitProposal({
+        sessionId: 'session-1',
+        turnId: 'turn-2',
+        title: 'Another approved plan',
+        steps: [{ id: 'two', title: 'Second step', description: 'Complete another step.' }],
+      });
+      const nextProposal = next.state.proposals.at(-1)!;
+      await store.approveProposal({
+        sessionId: 'session-1',
+        proposalId: nextProposal.proposalId,
+        expectedRevision: nextProposal.revision,
+      });
+      await assert.rejects(
+        store.applyExecutionSnapshot({
+          sessionId: 'session-1',
+          title: 'Changed title',
+          steps: [agentStep('two', 'Second step', 'Complete another step.', 'in_progress')],
+        }),
+        /approved plan structure cannot be modified/i,
+      );
+    });
+  });
+
+  test('resumes the same interrupted agent plan and can cancel it from the next turn', async () => {
+    await withStore(async (store) => {
+      const started = await store.applyExecutionSnapshot({
+        sessionId: 'session-1',
+        title: 'Long task',
+        steps: [
+          agentStep('inspect', 'Inspect code', 'Inspect relevant code.', 'completed'),
+          agentStep('change', 'Change code', 'Implement the change.', 'in_progress'),
+        ],
+      });
+      const executionId = started.state.activeExecutionId!;
+      await store.interruptActiveExecution('session-1', 'turn_aborted');
+
+      const resumed = await store.applyExecutionSnapshot({
+        sessionId: 'session-1',
+        title: 'Revised long task',
+        steps: [
+          agentStep('inspect', 'Inspect code', 'Inspect relevant code.', 'completed'),
+          agentStep('change', 'Change code safely', 'Implement the revised change.', 'in_progress'),
+        ],
+      });
+      assert.equal(resumed.event.type, 'plan_execution_resumed');
+      assert.equal(resumed.state.activeExecutionId, executionId);
+      assert.equal(resumed.state.executions[0]?.title, 'Revised long task');
+
+      const cancelled = await store.applyExecutionSnapshot({
+        sessionId: 'session-1',
+        title: 'Revised long task',
+        executionStatus: 'cancelled',
+        explanation: 'The latest user instruction no longer requires this work.',
+        steps: resumed.state.executions[0]!.steps,
+      });
+      assert.equal(cancelled.event.type, 'plan_execution_cancelled');
+      assert.equal(cancelled.state.executions[0]?.status, 'cancelled');
+      assert.equal(cancelled.state.activeExecutionId, undefined);
+    });
+  });
+
+  test('keeps terminal agent steps immutable and never creates two active executions', async () => {
+    await withStore(async (store) => {
+      const input = {
+        sessionId: 'session-1',
+        title: 'Concurrent plan',
+        steps: [
+          agentStep('one', 'First step', 'Complete the first step.', 'completed'),
+          agentStep('two', 'Second step', 'Complete the second step.', 'pending'),
+        ],
+      };
+      const [first, second] = await Promise.all([
+        store.applyExecutionSnapshot(input),
+        store.applyExecutionSnapshot(input),
+      ]);
+      assert.equal(first.state.executions.length, 1);
+      assert.equal(second.state.executions.length, 1);
+      assert.equal(first.state.activeExecutionId, second.state.activeExecutionId);
+
+      await assert.rejects(
+        store.applyExecutionSnapshot({
+          ...input,
+          steps: [
+            agentStep('one', 'Changed finished step', 'Rewrite history.', 'completed'),
+            agentStep('two', 'Second step', 'Complete the second step.', 'pending'),
+          ],
+        }),
+        /Terminal plan step one cannot be changed/,
+      );
+      await assert.rejects(
+        store.applyExecutionSnapshot({
+          ...input,
+          steps: [agentStep('two', 'Second step', 'Complete the second step.', 'pending')],
+        }),
+        /must be marked skipped, not deleted/,
+      );
+    });
+  });
 });
+
+function agentStep(
+  id: string,
+  title: string,
+  description: string,
+  status: 'pending' | 'in_progress' | 'completed' | 'skipped',
+) {
+  return { id, title, description, status };
+}
 
 async function withStore(
   run: (store: ReturnType<typeof createPlanStore>) => Promise<void>,

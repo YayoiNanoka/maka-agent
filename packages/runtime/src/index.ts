@@ -135,6 +135,8 @@ export {
 export type { PlanToolResult } from './plan-tools.js';
 export {
   selectCollaborationTools,
+  renderAgentModePlanningPrompt,
+  renderAgentPlanExecutionContext,
   renderPlanModePrompt,
   renderPlanExecutionPrompt,
   renderInterruptedPlanContext,
