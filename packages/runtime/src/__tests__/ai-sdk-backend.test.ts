@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { describe, test } from 'node:test';
-import type { ModelMessage } from 'ai';
+import type { ModelMessage } from '../model-protocol.js';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
 import { APICallError, type LanguageModelV4StreamPart } from '@ai-sdk/provider';
 import type {
@@ -10808,24 +10808,25 @@ describe('AiSdkBackend thinking persistence', () => {
         modelAdapter: { startStream: (input: FakeStreamInput) => Promise<unknown> };
       }
     ).modelAdapter.startStream = async (input: FakeStreamInput) => ({
-      stream: (async function* () {
+      // The adapter boundary now exposes Maka-owned `ModelStreamEvent`s, not
+      // raw SDK chunks. This fake adapter yields events directly so the test
+      // drives the backend through the new contract: `step-finish` for the
+      // step boundary, `thinking` / `thinking-signature` for step 2's signed
+      // reasoning, and NO trailing `step-finish` / `finish` (the stream ends
+      // abruptly).
+      events: (async function* () {
         // Step 1 (pure tool): execute mid-step, then close the step.
         await input.tools['Read']!.execute(
           { path: 'a.md' },
           { toolCallId: 'tool-1', abortSignal: input.abortSignal },
         );
-        yield { type: 'finish-step', finishReason: { unified: 'tool-calls', raw: 'tool_calls' } };
+        yield { kind: 'step-finish', finishReason: 'tool_calls' };
         // Step 2 (thinking-only): signed reasoning, then the stream ends with
-        // NO trailing finish-step and NO finish chunk.
-        yield { type: 'reasoning-delta', delta: 'final thoughts' };
-        yield {
-          type: 'reasoning-delta',
-          delta: '',
-          providerMetadata: { anthropic: { signature: 'sig-last' } },
-        };
+        // NO trailing step-finish and NO finish event.
+        yield { kind: 'thinking', text: 'final thoughts' };
+        yield { kind: 'thinking-signature', signature: 'sig-last' };
       })(),
       usage: Promise.resolve(undefined),
-      finalStep: Promise.resolve(undefined),
       finishReason: Promise.resolve('tool-calls'),
     });
 

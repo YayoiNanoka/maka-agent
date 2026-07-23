@@ -40,6 +40,8 @@ import type {
   TextCompleteEvent,
   ThinkingCompleteEvent,
   TokenUsageEvent,
+  TextDeltaEvent,
+  ThinkingDeltaEvent,
   StorageRef,
   AttachmentRef,
   QuoteRef,
@@ -83,7 +85,7 @@ import type {
   ToolInvocationRecord,
 } from '@maka/core/usage-stats/types';
 import type { ContextBudgetDiagnostic, PromptSegmentEstimate } from '@maka/core/usage-stats/types';
-import type { JSONValue, ModelMessage } from 'ai';
+import type { JSONValue, ModelMessage, ModelToolSet } from './model-protocol.js';
 import { z } from 'zod';
 
 import { PermissionEngine } from './permission-engine.js';
@@ -111,16 +113,14 @@ import type { RuntimeCommitSink } from './runtime-commit-sink.js';
 import type { SubagentExecutionRef } from './subagent-execution.js';
 import {
   ModelAdapter,
-  normalizeAiSdkUsage,
-  rawFinishReasonString,
   type ModelFactory,
   type ModelFactoryInput,
   type NormalizedAiSdkUsage,
+  type ModelStreamResult,
   type PrepareStepFunctionLike,
   type PrepareStepLike,
   type PrepareStepResultLike,
   type RepairableAiSdkToolCall,
-  type StreamTextResult,
 } from './model-adapter.js';
 import type {
   ActiveToolResultArchiveCandidate,
@@ -1040,11 +1040,11 @@ export class AiSdkBackend implements AgentBackend {
       this.toolRuntime.setGating(plan.gating);
     }
 
-    const aiSdkTools: Record<string, unknown> = {};
+    const modelTools: ModelToolSet = {};
     let currentStepToolExecutions = 0;
     for (const t of providerTools) {
       const execute = this.wrapToolExecute(t, turnId, queue);
-      aiSdkTools[t.name] = {
+      modelTools[t.name] = {
         description: t.description,
         inputSchema: t.parameters,
         execute: async (
@@ -1455,7 +1455,7 @@ export class AiSdkBackend implements AgentBackend {
         let attemptMessages: ModelMessage[] = messages;
         let overflowRetryUsed = false;
         let transportRetryUsed = false;
-        let result!: StreamTextResult;
+        let result: ModelStreamResult;
         for (;;) {
           // The step limit is a SEND-level cap: `runtimeSteps` (this send's
           // completed steps across attempts) is its single counter, so a retry
@@ -1469,7 +1469,7 @@ export class AiSdkBackend implements AgentBackend {
           result = await this.modelAdapter.startStream({
             model,
             messages: attemptMessages,
-            tools: aiSdkTools,
+            tools: modelTools,
             activeTools,
             repairToolCall: async ({
               toolCall,
@@ -1492,34 +1492,28 @@ export class AiSdkBackend implements AgentBackend {
             ...(remainingStepBudget !== undefined ? { maxSteps: remainingStepBudget } : {}),
           });
 
-          let streamErrorChunk: unknown;
+          let streamFailure: unknown;
           let sawStreamError = false;
           try {
-            for await (const chunk of result.stream) {
+            for await (const event of result.events) {
               if (this.aborted) break;
               watchdog.markActivity();
-              // A request-level error ends this stream; capture it and stop
-              // consuming (the synthesized trailer carries no real step) so the
-              // recovery decision runs on the outcome, not the trailer.
-              if (chunk.type === 'error') {
-                streamErrorChunk = chunk.error;
+              if (event.kind === 'error') {
+                // A request-level error ends this stream; capture it and stop
+                // consuming (the synthesized trailer carries no real step) so
+                // the recovery decision runs on the outcome, not the trailer.
+                streamFailure = event.failure;
                 sawStreamError = true;
                 break;
               }
-              // Step boundary: AI SDK 7 delimits steps with `start-step` /
-              // `finish-step`; `step-finish` remains accepted for replaying an
-              // older adapter fixture during the migration window.
-              // Missing the boundary would silently degrade back to one message per
-              // turn, so match both names. A duplicate boundary is harmless: the
-              // second flush no-ops (accumulators already cleared) and one extra id
-              // rotation just discards an unused id.
-              const isStepFinishChunk =
-                chunk.type === 'finish-step' || chunk.type === 'step-finish';
-              if (isStepFinishChunk) {
+              if (event.kind === 'step-finish') {
+                // Step boundary: AI SDK 7 delimits steps with `finish-step`
+                // (and `step-finish` for legacy replay fixtures); the adapter
+                // reduces both to this event. A duplicate boundary is harmless:
+                // the second flush no-ops (accumulators already cleared) and one
+                // extra id rotation just discards an unused id.
                 runtimeSteps += 1;
-                const stepUsage = normalizeAiSdkUsage(chunk.usage, {
-                  rawFinishReason: chunk.finishReason,
-                });
+                const stepUsage = event.usage;
                 if (!stepUsage) sawUnusableStepUsage = true;
                 // Fail closed: reset on every step boundary so a missing final
                 // step's usage does not leave a stale value from an earlier step.
@@ -1536,63 +1530,66 @@ export class AiSdkBackend implements AgentBackend {
                   });
                 }
               }
-              if (chunk.type === 'finish' || isStepFinishChunk) {
-                rawFinishReason = rawFinishReasonString(chunk.finishReason) ?? rawFinishReason;
+              if (event.kind === 'finish' || event.kind === 'step-finish') {
+                rawFinishReason = event.finishReason ?? rawFinishReason;
               }
-              this.modelAdapter.handleStreamChunk(
-                chunk,
-                turnId,
-                this.currentStepMessageId!,
-                queue,
-                {
-                  onText: (t) => {
-                    stepText += t;
-                  },
-                  onTextComplete: (t) => {
-                    stepText = t;
-                  },
-                  onThinking: (t) => {
-                    stepThinking += t;
-                  },
-                  onThinkingSignature: (sig) => {
-                    stepSignature = sig;
-                  },
-                },
-              );
-              // The step's text/thinking deltas are all in (the stream is
-              // drained in order), so flush this step's AssistantMessage and rotate
-              // to a fresh id for the next step. The step's tool calls (appended
-              // mid-step via execute()) already carry the pre-rotation id via
-              // `getCurrentStepId`, so replay can regroup them with this step's
-              // reasoning even though they land before this row in the ledger.
-              if (isStepFinishChunk) {
+              if (event.kind === 'text') {
+                stepText += event.text;
+                queue.push({
+                  type: 'text_delta',
+                  id: this.newId(),
+                  turnId,
+                  ts: this.now(),
+                  messageId: this.currentStepMessageId!,
+                  text: event.text,
+                } satisfies TextDeltaEvent);
+              } else if (event.kind === 'thinking') {
+                stepThinking += event.text;
+                queue.push({
+                  type: 'thinking_delta',
+                  id: this.newId(),
+                  turnId,
+                  ts: this.now(),
+                  messageId: this.currentStepMessageId!,
+                  text: event.text,
+                } satisfies ThinkingDeltaEvent);
+              } else if (event.kind === 'thinking-signature') {
+                stepSignature = event.signature;
+              } else if (event.kind === 'step-finish') {
+                // The step's text/thinking deltas are all in (the stream is
+                // drained in order), so flush this step's AssistantMessage and
+                // rotate to a fresh id for the next step. The step's tool calls
+                // (appended mid-step via execute()) already carry the pre-rotation
+                // id via `getCurrentStepId`, so replay can regroup them with this
+                // step's reasoning even though they land before this row.
                 await flushStep();
                 currentStepToolExecutions = 0;
                 this.currentStepMessageId = this.newId();
                 if (midTurnState) {
-                  // Durability clock: step N's thinking/text completion events are
-                  // enqueued by flushStep just above, so only after this boundary
-                  // can a seq-ack wait for step N mean anything. Wake waiters AFTER
-                  // the increment or they would re-check a stale count and sleep.
+                  // Durability clock: step N's thinking/text completion events
+                  // are enqueued by flushStep just above, so only after this
+                  // boundary can a seq-ack wait for step N mean anything. Wake
+                  // waiters AFTER the increment or they would re-check a stale
+                  // count and sleep.
                   midTurnState.flushedSteps += 1;
                   queue.wake();
                 }
               }
             }
           } catch (error) {
-            streamErrorChunk = error;
+            streamFailure = error;
             sawStreamError = true;
           }
 
           if (sawStreamError && !this.aborted) {
-            if (this.stopAfterStepRequested) throw streamErrorChunk;
+            if (this.stopAfterStepRequested) throw streamFailure;
             // A retry is a fresh provider request that would run at least one
             // more step; with the send-level budget already spent there is
             // nothing left to grant it, so the error is terminal.
             const stepBudgetRemains = this.maxSteps === undefined || runtimeSteps < this.maxSteps;
             const recovered = stepBudgetRemains
               ? await this.compaction.recoverFromOverflowError({
-                  error: streamErrorChunk,
+                  error: streamFailure,
                   retryAlreadyUsed: overflowRetryUsed,
                   midTurnState,
                   turnId,
@@ -1615,7 +1612,7 @@ export class AiSdkBackend implements AgentBackend {
               attemptObservedSteps = [];
               continue;
             }
-            const errorClass = this.modelAdapter.classifyError(streamErrorChunk);
+            const errorClass = this.modelAdapter.classifyError(streamFailure);
             if (
               errorClass === 'Network' &&
               !transportRetryUsed &&
@@ -1641,7 +1638,7 @@ export class AiSdkBackend implements AgentBackend {
             // Unrecoverable (not context-length, latch spent, no seam, or no
             // safe fold): surface the real provider error via the terminal
             // handler — never a fabricated success.
-            throw streamErrorChunk;
+            throw streamFailure;
           }
           break;
         }
@@ -1681,10 +1678,10 @@ export class AiSdkBackend implements AgentBackend {
 
         // With an explicit maxSteps, `finishReason === 'tool-calls'` means the
         // model wanted another tool step but the configured budget stopped it.
-        const finishReason = await result.finishReason.catch(() => 'stop');
+        const finishReason = (await result.finishReason.catch(() => 'stop')) ?? 'stop';
         const stepLimit = this.maxSteps;
         const stepLimitReached = stepLimit !== undefined && finishReason === 'tool-calls';
-        rawFinishReason = rawFinishReason ?? rawFinishReasonString(finishReason);
+        rawFinishReason = rawFinishReason ?? finishReason;
         if (stepLimitReached && runtimeSteps < stepLimit) {
           runtimeSteps = stepLimit;
         }
@@ -1700,7 +1697,7 @@ export class AiSdkBackend implements AgentBackend {
         // fails the whole record closed (#972) — a later attempt's valid
         // cumulative usage must not wash it back to "complete".
         try {
-          const attemptTotalUsage = normalizeAiSdkUsage(await result.usage, { rawFinishReason });
+          const attemptTotalUsage = await result.usage;
           tokenUsage =
             overflowRetryUsed || transportRetryUsed
               ? sawUnusableStepUsage
