@@ -46,6 +46,7 @@ export interface SessionMetadataImportEntry {
 export interface SessionMetadataImportResult {
   created: boolean[];
   sourcesAlreadyImported: number;
+  sourcesTombstoned: number;
 }
 
 export class SessionMetadataConflictError extends Error {
@@ -100,6 +101,11 @@ export class SqliteSessionMetadataStore {
     const normalized = normalizeSessionHeader(header);
     assertSafeSessionId(normalized.id);
     return this.transaction(() => {
+      if (this.hasTombstone(normalized.id)) {
+        throw new SessionMetadataConflictError(
+          `Session metadata id is tombstoned: ${normalized.id}`,
+        );
+      }
       if (this.readRecordSync(normalized.id)) {
         throw new SessionMetadataConflictError(`Session metadata already exists: ${normalized.id}`);
       }
@@ -113,6 +119,18 @@ export class SqliteSessionMetadataStore {
     const record = this.readRecordSync(sessionId);
     if (!record) throw new Error(`Session metadata not found: ${sessionId}`);
     return record;
+  }
+
+  async has(sessionId: string): Promise<boolean> {
+    this.assertOpen();
+    assertSafeSessionId(sessionId);
+    return this.readRecordSync(sessionId) !== undefined;
+  }
+
+  async isTombstoned(sessionId: string): Promise<boolean> {
+    this.assertOpen();
+    assertSafeSessionId(sessionId);
+    return this.hasTombstone(sessionId);
   }
 
   async list(filter: SessionListFilter = {}): Promise<SessionMetadataRecord[]> {
@@ -236,11 +254,19 @@ export class SqliteSessionMetadataStore {
   async remove(sessionId: string): Promise<boolean> {
     this.assertOpen();
     assertSafeSessionId(sessionId);
-    return this.transaction(
-      () =>
+    return this.transaction(() => {
+      const deleted =
         this.db.prepare('DELETE FROM session_metadata WHERE session_id = ?').run(sessionId)
-          .changes === 1,
-    );
+          .changes === 1;
+      this.db
+        .prepare(`
+          INSERT INTO session_metadata_tombstones(session_id, deleted_at)
+          VALUES (?, ?)
+          ON CONFLICT(session_id) DO NOTHING
+        `)
+        .run(sessionId, this.now());
+      return deleted;
+    });
   }
 
   async importEntries(
@@ -263,7 +289,12 @@ export class SqliteSessionMetadataStore {
     return this.transaction(() => {
       const created: boolean[] = [];
       let sourcesAlreadyImported = 0;
+      let sourcesTombstoned = 0;
       for (const entry of normalized) {
+        if (this.hasTombstone(entry.header.id)) {
+          sourcesTombstoned += 1;
+          continue;
+        }
         const source = this.db
           .prepare(`
             SELECT fingerprint
@@ -306,7 +337,7 @@ export class SqliteSessionMetadataStore {
           .run(entry.source.path, entry.source.fingerprint, entry.header.id, this.now());
         this.options.failpoint?.('after_session_import_marker_write');
       }
-      return { created, sourcesAlreadyImported };
+      return { created, sourcesAlreadyImported, sourcesTombstoned };
     });
   }
 
@@ -386,6 +417,14 @@ export class SqliteSessionMetadataStore {
       `)
       .get(sessionId) as SessionMetadataRow | undefined;
     return row ? decodeRecord(row) : undefined;
+  }
+
+  private hasTombstone(sessionId: string): boolean {
+    return (
+      this.db
+        .prepare('SELECT 1 AS found FROM session_metadata_tombstones WHERE session_id = ?')
+        .get(sessionId) !== undefined
+    );
   }
 
   private transaction<T>(operation: () => T): T {

@@ -891,6 +891,7 @@ export async function createMakaCliRuntimeContext(
       goalManager.dispose();
       await shellRuns.terminateAll();
       shellRunListeners.clear();
+      store.close?.();
       runtimePersistence.close();
     },
   };

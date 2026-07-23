@@ -16,6 +16,7 @@ export interface LegacySessionMetadataImportReport {
   headersImported: number;
   headersExisting: number;
   sourcesAlreadyImported: number;
+  sourcesTombstoned: number;
 }
 
 /**
@@ -30,31 +31,60 @@ export async function importLegacySessionMetadataTree(input: {
 }): Promise<LegacySessionMetadataImportReport> {
   const sessionsRoot = join(input.workspaceRoot, 'sessions');
   const entries: SessionMetadataImportEntry[] = [];
-  for (const directory of await sessionDirectoryNames(sessionsRoot)) {
+  const directories = await sessionDirectoryNames(sessionsRoot);
+  for (const directory of directories) {
     const sourcePath = join(sessionsRoot, directory, 'session.jsonl');
-    let value: unknown;
-    let headerLine: string;
     try {
-      headerLine = await readFirstJsonlRecord(sourcePath);
-      value = JSON.parse(headerLine) as unknown;
+      entries.push(await readLegacySessionMetadataEntry(sourcePath, directory));
     } catch (error) {
-      throw new Error(`Invalid legacy session header at ${sourcePath}`, { cause: error });
+      if (!isNotFound(error)) throw error;
+      const canonicalStateExists =
+        (await input.destination.has(directory)) ||
+        (await input.destination.isTombstoned(directory));
+      if (canonicalStateExists) continue;
+      throw error;
     }
-    const fingerprint = createHash('sha256').update(headerLine).digest('hex');
-    entries.push({
-      header: decodeSessionHeader(value, directory),
-      source: { path: sourcePath, fingerprint },
-    });
   }
   const result = await input.destination.importEntries(entries);
   const headersImported = result.created.filter(Boolean).length;
   return {
-    filesScanned: entries.length,
+    filesScanned: directories.length,
     headersRead: entries.length,
     headersImported,
     headersExisting: result.created.length - headersImported,
     sourcesAlreadyImported: result.sourcesAlreadyImported,
+    sourcesTombstoned: result.sourcesTombstoned,
   };
+}
+
+export async function readLegacySessionMetadataEntry(
+  sourcePath: string,
+  sessionId: string,
+): Promise<SessionMetadataImportEntry> {
+  let value: unknown;
+  let headerLine: string;
+  try {
+    headerLine = await readFirstJsonlRecord(sourcePath);
+    value = JSON.parse(headerLine) as unknown;
+    return {
+      header: decodeSessionHeader(value, sessionId),
+      source: {
+        path: sourcePath,
+        fingerprint: createHash('sha256').update(headerLine).digest('hex'),
+      },
+    };
+  } catch (error) {
+    throw new Error(`Invalid legacy session header at ${sourcePath}`, { cause: error });
+  }
+}
+
+function isNotFound(error: unknown): boolean {
+  let current = error;
+  while (current && typeof current === 'object') {
+    if ('code' in current && current.code === 'ENOENT') return true;
+    current = 'cause' in current ? current.cause : undefined;
+  }
+  return false;
 }
 
 async function sessionDirectoryNames(root: string): Promise<string[]> {
