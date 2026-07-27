@@ -18,18 +18,19 @@ describe('macOS executable dependency resolution', () => {
         [lexicalPcre, canonicalPcre],
         [canonicalPcre, canonicalPcre],
       ]),
-      dependencies: new Map([
+      loadCommands: new Map([
         [
           executable,
-          machoDependencies(executable, [
-            lexicalPcre,
-            '/usr/lib/libiconv.2.dylib',
-            '/usr/lib/libSystem.B.dylib',
-          ]),
+          machoLoadCommands({
+            dependencies: [lexicalPcre, '/usr/lib/libiconv.2.dylib', '/usr/lib/libSystem.B.dylib'],
+          }),
         ],
         [
           canonicalPcre,
-          machoDependencies(canonicalPcre, [lexicalPcre, '/usr/lib/libSystem.B.dylib']),
+          machoLoadCommands({
+            id: lexicalPcre,
+            dependencies: ['/usr/lib/libSystem.B.dylib'],
+          }),
         ],
       ]),
     });
@@ -62,19 +63,24 @@ describe('macOS executable dependency resolution', () => {
         [loaderLibrary, loaderLibrary],
         [executableLibrary, executableLibrary],
       ]),
-      dependencies: new Map([
-        [executable, machoDependencies(executable, ['@rpath/libsearch.dylib'])],
+      loadCommands: new Map([
+        [
+          executable,
+          machoLoadCommands({
+            dependencies: ['@rpath/libsearch.dylib'],
+            runpaths: ['@executable_path/../lib'],
+          }),
+        ],
         [
           library,
-          machoDependencies(library, [
-            '@loader_path/libloader.dylib',
-            '@executable_path/libexec.dylib',
-          ]),
+          machoLoadCommands({
+            id: '@rpath/libsearch.dylib',
+            dependencies: ['@loader_path/libloader.dylib', '@executable_path/libexec.dylib'],
+          }),
         ],
-        [loaderLibrary, machoDependencies(loaderLibrary, ['/usr/lib/libSystem.B.dylib'])],
-        [executableLibrary, machoDependencies(executableLibrary, [])],
+        [loaderLibrary, machoLoadCommands({ dependencies: ['/usr/lib/libSystem.B.dylib'] })],
+        [executableLibrary, machoLoadCommands()],
       ]),
-      loadCommands: new Map([[executable, machoRunpaths(['@executable_path/../lib'])]]),
     });
 
     const result = await resolveMacosExecutableDependencies(executable, fixture);
@@ -88,14 +94,47 @@ describe('macOS executable dependency resolution', () => {
     ]);
   });
 
+  test('ignores an unresolved rpath install ID on an absolute dependency', async () => {
+    const executable = '/apps/bin/rg';
+    const library = '/apps/lib/libfoo.dylib';
+    const fixture = dependencyFixture({
+      files: new Map([
+        [executable, executable],
+        [library, library],
+      ]),
+      loadCommands: new Map([
+        [executable, machoLoadCommands({ dependencies: [library] })],
+        [
+          library,
+          machoLoadCommands({
+            id: '@rpath/libfoo.dylib',
+            dependencies: ['/usr/lib/libSystem.B.dylib'],
+          }),
+        ],
+      ]),
+    });
+
+    const result = await resolveMacosExecutableDependencies(executable, fixture);
+
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.dependencyCount, 1);
+    assert.deepEqual(result.runtimeReadableRoots, ['/apps/lib']);
+  });
+
   test('fails closed when an rpath dependency cannot be resolved', async () => {
     const executable = '/apps/bin/rg';
     const fixture = dependencyFixture({
       files: new Map([[executable, executable]]),
-      dependencies: new Map([
-        [executable, machoDependencies(executable, ['@rpath/libmissing.dylib'])],
+      loadCommands: new Map([
+        [
+          executable,
+          machoLoadCommands({
+            dependencies: ['@rpath/libmissing.dylib'],
+            runpaths: ['/apps/lib'],
+          }),
+        ],
       ]),
-      loadCommands: new Map([[executable, machoRunpaths(['/apps/lib'])]]),
     });
 
     const result = await resolveMacosExecutableDependencies(executable, fixture);
@@ -117,10 +156,10 @@ describe('macOS executable dependency resolution', () => {
         [first, first],
         [second, second],
       ]),
-      dependencies: new Map([
-        [executable, machoDependencies(executable, [first])],
-        [first, machoDependencies(first, [second])],
-        [second, machoDependencies(second, [])],
+      loadCommands: new Map([
+        [executable, machoLoadCommands({ dependencies: [first] })],
+        [first, machoLoadCommands({ dependencies: [second] })],
+        [second, machoLoadCommands()],
       ]),
       maxDepth: 1,
     });
@@ -134,17 +173,13 @@ describe('macOS executable dependency resolution', () => {
 
 function dependencyFixture(input: {
   files: ReadonlyMap<string, string>;
-  dependencies: ReadonlyMap<string, string>;
-  loadCommands?: ReadonlyMap<string, string>;
+  loadCommands: ReadonlyMap<string, string>;
   maxDepth?: number;
 }) {
   return {
     resolveFile: async (path: string) => input.files.get(path),
     runOtool: async (request: MacosOtoolRequest) => {
-      const output =
-        request.mode === 'dependencies'
-          ? input.dependencies.get(request.imagePath)
-          : (input.loadCommands?.get(request.imagePath) ?? '');
+      const output = input.loadCommands.get(request.imagePath);
       if (output === undefined) throw new Error(`Missing otool fixture: ${request.imagePath}`);
       return output;
     },
@@ -152,22 +187,25 @@ function dependencyFixture(input: {
   };
 }
 
-function machoDependencies(image: string, dependencies: readonly string[]): string {
-  return [
-    `${image}:`,
-    ...dependencies.map(
-      (dependency) => `\t${dependency} (compatibility version 1.0.0, current version 1.0.0)`,
+function machoLoadCommands(
+  input: { id?: string; dependencies?: readonly string[]; runpaths?: readonly string[] } = {},
+): string {
+  const commands = [
+    ...(input.id ? [machoDylibCommand('LC_ID_DYLIB', input.id)] : []),
+    ...(input.dependencies ?? []).map((dependency) =>
+      machoDylibCommand('LC_LOAD_DYLIB', dependency),
     ),
-  ].join('\n');
-}
-
-function machoRunpaths(runpaths: readonly string[]): string {
-  return runpaths
-    .map(
-      (runpath, index) => `Load command ${index}
-          cmd LC_RPATH
+    ...(input.runpaths ?? []).map(
+      (runpath) => `          cmd LC_RPATH
       cmdsize 48
          path ${runpath} (offset 12)`,
-    )
-    .join('\n');
+    ),
+  ];
+  return commands.map((command, index) => `Load command ${index}\n${command}`).join('\n');
+}
+
+function machoDylibCommand(command: string, name: string): string {
+  return `          cmd ${command}
+      cmdsize 56
+         name ${name} (offset 24)`;
 }

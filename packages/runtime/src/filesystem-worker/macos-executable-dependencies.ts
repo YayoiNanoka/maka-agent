@@ -27,7 +27,6 @@ export type MacosExecutableDependencyResolution =
     };
 
 export interface MacosOtoolRequest {
-  readonly mode: 'dependencies' | 'load_commands';
   readonly imagePath: string;
   readonly timeoutMs: number;
 }
@@ -90,21 +89,19 @@ export async function resolveMacosExecutableDependencies(
       visited.add(image.path);
 
       const timeoutMs = remainingTimeout(deadline, now);
-      const [dependencyOutput, loadCommandOutput] = await Promise.all([
-        runOtool({ mode: 'dependencies', imagePath: image.path, timeoutMs }),
-        runOtool({ mode: 'load_commands', imagePath: image.path, timeoutMs }),
-      ]);
+      const loadCommandOutput = await runOtool({ imagePath: image.path, timeoutMs });
       remainingTimeout(deadline, now);
 
+      const loadCommands = parseMachOLoadCommands(loadCommandOutput);
       const ownRunpaths = resolveRunpaths(
-        parseMachORunpaths(loadCommandOutput),
+        loadCommands.runpaths,
         dirname(image.path),
         executableDirectory,
         image.inheritedRunpaths,
       );
       const runpaths = unique([...ownRunpaths, ...image.inheritedRunpaths]);
 
-      for (const installName of parseMachODependencies(dependencyOutput)) {
+      for (const installName of loadCommands.dependencies) {
         if (isSystemRuntimePath(installName)) continue;
         const candidates = expandInstallName(
           installName,
@@ -146,34 +143,54 @@ export async function resolveMacosExecutableDependencies(
   };
 }
 
-function parseMachODependencies(output: string): readonly string[] {
-  const dependencies: string[] = [];
-  const marker = ' (compatibility version ';
-  for (const line of output.split(/\r?\n/)) {
-    const value = line.trim();
-    const markerIndex = value.indexOf(marker);
-    if (markerIndex <= 0) continue;
-    dependencies.push(value.slice(0, markerIndex));
-  }
-  return unique(dependencies);
+// `otool -L` mixes LC_ID_DYLIB into dependency output; only load commands belong here.
+const MACHO_DYLIB_LOAD_COMMANDS = new Set([
+  'LC_LOAD_DYLIB',
+  'LC_LOAD_WEAK_DYLIB',
+  'LC_REEXPORT_DYLIB',
+  'LC_LAZY_LOAD_DYLIB',
+  'LC_LOAD_UPWARD_DYLIB',
+]);
+
+interface ParsedMachOLoadCommands {
+  readonly dependencies: readonly string[];
+  readonly runpaths: readonly string[];
 }
 
-function parseMachORunpaths(output: string): readonly string[] {
+function parseMachOLoadCommands(output: string): ParsedMachOLoadCommands {
+  const dependencies: string[] = [];
   const runpaths: string[] = [];
-  let readingRpath = false;
+  let command: string | undefined;
+
   for (const line of output.split(/\r?\n/)) {
     const value = line.trim();
     if (value.startsWith('cmd ')) {
-      readingRpath = value === 'cmd LC_RPATH';
+      command = value.slice('cmd '.length);
       continue;
     }
-    if (!readingRpath) continue;
-    const match = /^path\s+(.+?)\s+\(offset\s+\d+\)$/.exec(value);
-    if (!match?.[1]) continue;
-    runpaths.push(match[1]);
-    readingRpath = false;
+
+    if (command === 'LC_RPATH') {
+      const match = /^path\s+(.+?)\s+\(offset\s+\d+\)$/.exec(value);
+      if (match?.[1]) {
+        runpaths.push(match[1]);
+        command = undefined;
+      }
+      continue;
+    }
+
+    if (command && MACHO_DYLIB_LOAD_COMMANDS.has(command)) {
+      const match = /^name\s+(.+?)\s+\(offset\s+\d+\)$/.exec(value);
+      if (match?.[1]) {
+        dependencies.push(match[1]);
+        command = undefined;
+      }
+    }
   }
-  return unique(runpaths);
+
+  return {
+    dependencies: unique(dependencies),
+    runpaths: unique(runpaths),
+  };
 }
 
 function resolveRunpaths(
@@ -285,11 +302,10 @@ async function resolveExistingFile(path: string): Promise<string | undefined> {
 }
 
 async function runSystemOtool(request: MacosOtoolRequest): Promise<string> {
-  const flag = request.mode === 'dependencies' ? '-L' : '-l';
   return await new Promise<string>((resolvePromise, reject) => {
     execFile(
       OTOOL_EXECUTABLE,
-      [flag, request.imagePath],
+      ['-l', request.imagePath],
       {
         encoding: 'utf8',
         timeout: request.timeoutMs,
