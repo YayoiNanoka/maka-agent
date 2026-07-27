@@ -283,6 +283,10 @@ export class FilesystemWorkerClient {
         requestId,
         response.error.message,
         response.error.code === 'not_found' || response.error.code === 'edit_conflict',
+        {
+          backend: transformed.exec.sandboxType,
+          profileName: effectiveProfile.name ?? effectiveProfile.type,
+        },
       );
     }
     if (

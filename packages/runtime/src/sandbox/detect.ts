@@ -1,5 +1,5 @@
 const SANDBOX_DENIAL_PATTERN =
-  /operation not permitted|sandbox-exec|sandbox(?:ed)?[^\n]*den(?:y|ied)/i;
+  /operation not permitted|sandbox-exec|file system sandbox blocked|sandbox(?:ed)?[^\n]*den(?:y|ied)/i;
 
 export function isLikelySandboxDenial(input: {
   stdout: string;

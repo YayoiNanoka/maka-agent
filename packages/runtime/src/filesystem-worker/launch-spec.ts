@@ -6,6 +6,10 @@ import {
   resolveFilesystemWorkerBundle,
   type FilesystemWorkerResourceLocation,
 } from './resource-resolver.js';
+import {
+  resolveMacosExecutableDependencies,
+  type MacosExecutableDependencyResolution,
+} from './macos-executable-dependencies.js';
 
 export interface FilesystemWorkerLaunchSpec {
   program: string;
@@ -33,6 +37,10 @@ export interface CreateFilesystemWorkerLaunchSpecProviderInput {
   hostEnv?: NodeJS.ProcessEnv;
   rgCandidates?: readonly string[];
   tmpdir?: string;
+  /** @internal Test seam for deterministic Mach-O dependency inspection. */
+  inspectMacosExecutableDependencies?: (
+    executable: string,
+  ) => Promise<MacosExecutableDependencyResolution>;
 }
 
 export function createFilesystemWorkerLaunchSpecProvider(
@@ -84,18 +92,17 @@ async function resolveLaunchSpec(
     };
   }
   const dependencyRoots = await resolveRuntimeDependencyRoots(program);
-  const grepExecutable = await resolveRipgrepExecutable(
+  const platform = input.platform ?? process.platform;
+  const grep = await resolveRipgrepExecutable(
     input.rgCandidates ?? defaultRipgrepCandidates(input.hostEnv ?? process.env),
+    platform,
+    input.inspectMacosExecutableDependencies ?? resolveMacosExecutableDependencies,
   );
   const electronFrameworks =
-    input.runtime === 'electron' && (input.platform ?? process.platform) === 'darwin'
+    input.runtime === 'electron' && platform === 'darwin'
       ? await resolveReadableRoot(resolve(dirname(program), '..', 'Frameworks'))
       : undefined;
-  if (
-    input.runtime === 'electron' &&
-    (input.platform ?? process.platform) === 'darwin' &&
-    !electronFrameworks
-  ) {
+  if (input.runtime === 'electron' && platform === 'darwin' && !electronFrameworks) {
     return {
       ok: false,
       reason: 'runtime_executable_unavailable',
@@ -106,15 +113,20 @@ async function resolveLaunchSpec(
     ok: true,
     spec: {
       program,
-      args: [bundle.path, ...(grepExecutable ? ['--grep-executable', grepExecutable] : [])],
+      args: [bundle.path, ...(grep ? ['--grep-executable', grep.executable] : [])],
       env: buildFilesystemWorkerEnv(input.runtime, input.hostEnv, input.tmpdir),
-      runtimeReadableRoots: unique([bundle.path, runtimeRoot, ...dependencyRoots]),
+      runtimeReadableRoots: unique([
+        bundle.path,
+        runtimeRoot,
+        ...dependencyRoots,
+        ...(grep?.runtimeReadableRoots ?? []),
+      ]),
       executableRoots: unique([
         program,
         runtimeRoot,
         ...(electronFrameworks ? [electronFrameworks] : []),
         ...dependencyRoots,
-        ...(grepExecutable ? [grepExecutable] : []),
+        ...(grep ? [grep.executable, ...grep.executableRoots] : []),
       ]),
     },
   };
@@ -122,10 +134,33 @@ async function resolveLaunchSpec(
 
 async function resolveRipgrepExecutable(
   candidates: readonly string[],
-): Promise<string | undefined> {
+  platform: NodeJS.Platform,
+  inspectMacosExecutableDependencies: (
+    executable: string,
+  ) => Promise<MacosExecutableDependencyResolution>,
+): Promise<
+  | {
+      executable: string;
+      runtimeReadableRoots: readonly string[];
+      executableRoots: readonly string[];
+    }
+  | undefined
+> {
+  const inspected = new Set<string>();
   for (const candidate of candidates) {
     const executable = await resolveExecutable(candidate);
-    if (executable) return executable;
+    if (!executable || inspected.has(executable)) continue;
+    inspected.add(executable);
+    if (platform !== 'darwin') {
+      return { executable, runtimeReadableRoots: [], executableRoots: [] };
+    }
+    const dependencies = await inspectMacosExecutableDependencies(executable);
+    if (!dependencies.ok) continue;
+    return {
+      executable,
+      runtimeReadableRoots: dependencies.runtimeReadableRoots,
+      executableRoots: dependencies.executableRoots,
+    };
   }
   return undefined;
 }

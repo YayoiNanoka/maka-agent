@@ -22,6 +22,17 @@ describe('isLikelySandboxDenial regex branches', () => {
     );
   });
 
+  test('matches macOS dyld file system sandbox failures', () => {
+    assert.equal(
+      isLikelySandboxDenial({
+        stdout: '',
+        stderr: 'dyld: file system sandbox blocked mmap() of a dependent library',
+        sandboxed: true,
+      }),
+      true,
+    );
+  });
+
   test('matches "sandbox...denied" branch', () => {
     assert.equal(
       isLikelySandboxDenial({
