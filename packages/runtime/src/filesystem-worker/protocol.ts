@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { validateAdditionalPermissionProfile } from '@maka/core/additional-permissions';
 
-export const FILESYSTEM_WORKER_PROTOCOL_VERSION = 2 as const;
+export const FILESYSTEM_WORKER_PROTOCOL_VERSION = 3 as const;
 
 const path = z.string().min(1).max(4096);
 const cwd = z.string().min(1).max(4096);
@@ -158,6 +158,7 @@ export const FilesystemWorkerErrorCodeSchema = z.enum([
   'not_found',
   'edit_conflict',
   'grep_unavailable',
+  'sandbox_denied',
   'filesystem_denied',
   'filesystem_error',
 ]);

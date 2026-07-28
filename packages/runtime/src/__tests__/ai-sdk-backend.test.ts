@@ -66,6 +66,7 @@ import { HistoryCompactSummarizerError } from '../history-compact-summarizer.js'
 import type { AutoApprovalReviewContext } from '../approval-reviewer.js';
 import type { SandboxDiagnosticsSnapshot } from '../sandbox/diagnostics.js';
 import { SandboxCommandError } from '../sandbox/errors.js';
+import { FilesystemWorkerClientError } from '../filesystem-worker/client.js';
 import { RunTrace } from '../run-trace.js';
 import {
   bindRuntimeInteractionRun,
@@ -318,10 +319,13 @@ describe('AiSdkBackend model history', () => {
 
   test('records structured sandbox failure metadata on tool failure traces', async () => {
     const traces: RunTraceEvent[] = [];
+    const messages: ToolResultMessage[] = [];
     const backend = new AiSdkBackend({
       sessionId: 'session-1',
       header: header('bypass'),
-      appendMessage: async () => {},
+      appendMessage: async (message) => {
+        if (message.type === 'tool_result') messages.push(message);
+      },
       connection: connection(),
       apiKey: 'sk-test',
       modelId: 'mock-model-id',
@@ -375,6 +379,112 @@ describe('AiSdkBackend model history', () => {
       profileName: 'workspace-write',
     });
     assert.equal(JSON.stringify(failure).includes('/private/workspace/path'), false);
+    assert.equal(
+      messages[0]?.content.kind === 'text' ? messages[0].content.sandboxDenial : undefined,
+      undefined,
+    );
+  });
+
+  test('persists a sandbox denial signal for explicit filesystem worker sandbox denials', async () => {
+    const messages: ToolResultMessage[] = [];
+    const events: SessionEvent[] = [];
+    const backend = new AiSdkBackend({
+      sessionId: 'session-1',
+      header: header('bypass'),
+      appendMessage: async (message) => {
+        if (message.type === 'tool_result') messages.push(message);
+      },
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      permissionEngine: new PermissionEngine({ newId: idGenerator(), now: () => 1 }),
+      modelFactory: () => ({}),
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+    const tool: MakaTool = {
+      name: 'Grep',
+      description: 'search',
+      parameters: {},
+      permissionRequired: false,
+      impl: async () => {
+        throw new FilesystemWorkerClientError({
+          reason: 'sandbox_denied',
+          stage: 'operation',
+          backend: 'macos-seatbelt',
+          recoverable: false,
+          message: 'Filesystem access was denied.',
+        });
+      },
+    };
+    const execute = runtimeExecute(backend, tool, 'turn-1', {
+      push: (event) => events.push(event),
+    });
+
+    await execute(
+      { pattern: 'needle', path: '/workspace' },
+      { toolCallId: 'tool-1', abortSignal: new AbortController().signal },
+    );
+
+    const expected = { likely: true, backend: 'macos-seatbelt' } as const;
+    assert.deepEqual(
+      messages[0]?.content.kind === 'text' ? messages[0].content.sandboxDenial : undefined,
+      expected,
+    );
+    const event = events.find(
+      (candidate): candidate is Extract<SessionEvent, { type: 'tool_result' }> =>
+        candidate.type === 'tool_result',
+    );
+    assert.deepEqual(
+      event?.content.kind === 'text' ? event.content.sandboxDenial : undefined,
+      expected,
+    );
+  });
+
+  test('does not label ordinary filesystem permission errors as sandbox denials', async () => {
+    const messages: ToolResultMessage[] = [];
+    const backend = new AiSdkBackend({
+      sessionId: 'session-1',
+      header: header('bypass'),
+      appendMessage: async (message) => {
+        if (message.type === 'tool_result') messages.push(message);
+      },
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      permissionEngine: new PermissionEngine({ newId: idGenerator(), now: () => 1 }),
+      modelFactory: () => ({}),
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+    const tool: MakaTool = {
+      name: 'Read',
+      description: 'read',
+      parameters: {},
+      permissionRequired: false,
+      impl: async () => {
+        throw new FilesystemWorkerClientError({
+          reason: 'filesystem_denied',
+          stage: 'operation',
+          backend: 'macos-seatbelt',
+          recoverable: false,
+          message: 'Filesystem access was denied.',
+        });
+      },
+    };
+    const execute = runtimeExecute(backend, tool, 'turn-1', { push: () => {} });
+
+    await execute(
+      { path: '/workspace/private.txt' },
+      { toolCallId: 'tool-1', abortSignal: new AbortController().signal },
+    );
+
+    assert.equal(
+      messages[0]?.content.kind === 'text' ? messages[0].content.sandboxDenial : undefined,
+      undefined,
+    );
   });
 
   test('omits an empty system prompt from the provider request', async () => {

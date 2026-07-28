@@ -233,7 +233,7 @@ describe('filesystem worker operation-scoped Seatbelt profile', () => {
     );
   });
 
-  test('preserves sandbox context on worker operation failures', async () => {
+  test('preserves sandbox context without changing ordinary filesystem denial semantics', async () => {
     const workspace = await temporaryDirectory('maka-worker-client-denial-context-');
     const target = join(workspace, 'file.ts');
     await writeFile(target, 'const value = 1;', 'utf8');
@@ -251,6 +251,28 @@ describe('filesystem worker operation-scoped Seatbelt profile', () => {
         assert.equal(error.stage, 'operation');
         assert.equal(error.backend, 'macos-seatbelt');
         assert.equal(error.profileName, 'workspace-write');
+        return true;
+      },
+    );
+  });
+
+  test('preserves an explicit sandbox denial from the worker protocol', async () => {
+    const workspace = await temporaryDirectory('maka-worker-client-sandbox-denial-');
+    const target = join(workspace, 'file.ts');
+    await writeFile(target, 'const value = 1;', 'utf8');
+    const { client } = fakeClient({ operationErrorCode: 'sandbox_denied' });
+
+    await assert.rejects(
+      client.execute({
+        operation: grepOperation(target),
+        cwd: workspace,
+        mode: 'ask',
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof FilesystemWorkerClientError);
+        assert.equal(error.reason, 'sandbox_denied');
+        assert.equal(error.stage, 'operation');
+        assert.equal(error.backend, 'macos-seatbelt');
         return true;
       },
     );

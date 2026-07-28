@@ -112,7 +112,7 @@ describe('filesystem worker operations', () => {
       }),
     });
     assert.equal(sandboxDenied.ok, false);
-    if (!sandboxDenied.ok) assert.equal(sandboxDenied.error.code, 'filesystem_denied');
+    if (!sandboxDenied.ok) assert.equal(sandboxDenied.error.code, 'sandbox_denied');
   });
 
   test('reads a validated image through the approved path capability', async () => {

@@ -5,6 +5,7 @@ import {
 } from '@maka/core';
 import type {
   SessionEvent,
+  SandboxDenialSignal,
   ToolActivityKind,
   ToolOutputStream,
   ToolResultContent,
@@ -76,7 +77,7 @@ import {
 import { ChildAgentRunLimiter } from './child-agent-run-limiter.js';
 import type { AgentProfile } from './agent-catalog.js';
 import type { SubagentExecutionRef } from './subagent-execution.js';
-import { serializeSandboxError } from './sandbox/errors.js';
+import { sandboxErrorMetadata, serializeSandboxError } from './sandbox/errors.js';
 import {
   RuntimeInteractionAdmissionRejectedError,
   RuntimeInteractionClosedError,
@@ -665,10 +666,12 @@ export class ToolRuntime {
     turnId: string,
     text: string,
     queue: DurableSessionEventSink,
+    sandboxDenial?: SandboxDenialSignal,
   ): Promise<void> {
     const content: ToolResultContent = {
       kind: 'text',
       text: formatSyntheticToolErrorText(text),
+      ...(sandboxDenial ? { sandboxDenial } : {}),
     };
     const durableAttempt = this.durableToolAttempts.get(durableAttemptKey(turnId, toolUseId));
     const durableOutcome = await durableAttempt?.commitOutcome(content, true);
@@ -1589,11 +1592,13 @@ export class ToolRuntime {
         if (hasSandboxDenial(content)) {
           const denialKey = sandboxDenialKey(tool.name, this.input.header.cwd, executionArgs);
           this.recentSandboxDenials.add(denialKey);
-          this.recentSandboxDenials.add(
-            sandboxDenialKey('Bash', this.input.header.cwd, {
-              command: content.cmd,
-            }),
-          );
+          if (content.kind === 'terminal' || content.kind === 'shell_run') {
+            this.recentSandboxDenials.add(
+              sandboxDenialKey('Bash', this.input.header.cwd, {
+                command: content.cmd,
+              }),
+            );
+          }
           trace?.emit(
             'sandbox',
             'sandbox_denial_detected',
@@ -1774,7 +1779,13 @@ export class ToolRuntime {
         tool.categoryHint === 'computer_use'
           ? `Computer Use failed: ${classifyError(err)}`
           : formatSyntheticToolErrorText(err);
-      await this.writeSyntheticToolResult(toolUseId, turnId, msg, queue);
+      await this.writeSyntheticToolResult(
+        toolUseId,
+        turnId,
+        msg,
+        queue,
+        sandboxDenialSignalFromError(err),
+      );
       this.input.recordToolInvocation?.({
         sessionId: this.input.sessionId,
         turnId,
@@ -2674,11 +2685,21 @@ function buildTerminalFailureMessage(
 
 function hasSandboxDenial(
   content: ToolResultContent,
-): content is Extract<ToolResultContent, { kind: 'terminal' } | { kind: 'shell_run' }> {
-  return (
-    (content.kind === 'terminal' || content.kind === 'shell_run') &&
-    content.sandboxDenial?.likely === true
-  );
+): content is Extract<ToolResultContent, { kind: 'text' | 'terminal' | 'shell_run' }> {
+  return 'sandboxDenial' in content && content.sandboxDenial?.likely === true;
+}
+
+function sandboxDenialSignalFromError(error: unknown): SandboxDenialSignal | undefined {
+  const metadata = sandboxErrorMetadata(error);
+  if (!metadata) return undefined;
+  const backend =
+    metadata.backend === 'macos-seatbelt' || metadata.backend === 'linux'
+      ? metadata.backend
+      : undefined;
+  if (metadata.reason === 'sandbox_denial' || metadata.reason === 'sandbox_denied') {
+    return { likely: true, ...(backend ? { backend } : {}) };
+  }
+  return undefined;
 }
 
 function sandboxDenialKey(toolName: string, cwd: string, args: unknown): string {

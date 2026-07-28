@@ -241,7 +241,7 @@ export async function executeFilesystemOperation(
         const detail = result.stderrTail.trim();
         throw operationError(
           isLikelySandboxDenial({ stdout: result.stdout, stderr: detail, sandboxed: true })
-            ? 'filesystem_denied'
+            ? 'sandbox_denied'
             : 'filesystem_error',
           detail
             ? `Grep failed while searching files.\n${detail}`
