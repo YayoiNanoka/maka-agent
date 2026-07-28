@@ -660,16 +660,20 @@ function ToolErrorBanner(props: {
         ? <ShieldAlert size={16} aria-hidden="true" />
         : <AlertOctagon size={16} aria-hidden="true" />}
       <AlertTitle>{bannerCopy.title}</AlertTitle>
-      {(props.sandboxBlocked || errorText) && (
+      {props.sandboxBlocked ? (
         <AlertDescription className="flex flex-col gap-1 text-xs leading-normal whitespace-pre-wrap [word-break:break-word]">
-          {props.sandboxBlocked && <span>{copyText.sandboxBlocked.description}</span>}
+          <span>{copyText.sandboxBlocked.description}</span>
           {errorText && (
             <span className="[font-family:var(--font-mono)]">
               {summarizeErrorText(errorText)}
             </span>
           )}
         </AlertDescription>
-      )}
+      ) : errorText ? (
+        <AlertDescription className="[font-family:var(--font-mono)] text-xs leading-normal whitespace-pre-wrap [word-break:break-word]">
+          {summarizeErrorText(errorText)}
+        </AlertDescription>
+      ) : null}
       {errorText && (
         <AlertAction>
           <UiButton
