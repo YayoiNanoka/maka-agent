@@ -23,6 +23,7 @@ import {
   processingNeedsAttention,
   summarizeProcessing,
 } from './tool-activity/trow-summary.js';
+import { isSandboxDeniedTool } from './tool-activity/sandbox-denial.js';
 import { useUiLocale } from './locale-context.js';
 import { getConversationCopy } from './conversation-copy.js';
 
@@ -976,7 +977,21 @@ function ProcessingBlock(props: { entries: FoldedTimelineChild[] }) {
   if (running) everRunningRef.current = true;
   const settled = !running;
   const settling = settled && everRunningRef.current;
-  const hasError = entries.some((entry) => entry.kind === 'tools' && entry.items.some((item) => item.status === 'errored'));
+  const hasSandboxBlocked = entries.some(
+    (entry) => entry.kind === 'tools' && entry.items.some(isSandboxDeniedTool),
+  );
+  const hasError = entries.some(
+    (entry) =>
+      entry.kind === 'tools' &&
+      entry.items.some(
+        (item) => item.status === 'errored' && !isSandboxDeniedTool(item),
+      ),
+  );
+  const settledTone = hasError
+    ? 'text-[color:var(--destructive)]'
+    : hasSandboxBlocked
+      ? 'text-[color:var(--warning-text,var(--info-text))]'
+      : 'text-[color:var(--muted-foreground)]';
   const activityKind = processingActivityKind(entries);
   const summary = summarizeProcessing(entries, { live: running, locale });
   return (
@@ -994,12 +1009,12 @@ function ProcessingBlock(props: { entries: FoldedTimelineChild[] }) {
           kind={activityKind}
           size={16}
           aria-hidden="true"
-          className={cn('shrink-0', hasError ? 'text-[color:var(--destructive)]' : 'text-[color:var(--muted-foreground)]')}
+          className={cn('shrink-0', settledTone)}
         />
         {running ? (
           <TextShimmer active delayed className="min-w-0 truncate text-[length:var(--font-size-base)]">{summary}</TextShimmer>
         ) : (
-          <span className={cn('min-w-0 truncate text-[length:var(--font-size-base)]', hasError ? 'text-[color:var(--destructive)]' : 'text-[color:var(--muted-foreground)]', settling && SETTLE_FADE)}>{summary}</span>
+          <span className={cn('min-w-0 truncate text-[length:var(--font-size-base)]', settledTone, settling && SETTLE_FADE)}>{summary}</span>
         )}
         <ChevronRight
           size={14}

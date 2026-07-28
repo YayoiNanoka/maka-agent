@@ -7,7 +7,7 @@ import {
   type ShellOutput,
   type ToolResultContent,
 } from '@maka/core';
-import { AlertCircle, Ban, Check, Clock, GitBranch, Loader2, Plug } from '../icons.js';
+import { AlertCircle, Ban, Check, Clock, GitBranch, Loader2, Plug, ShieldAlert } from '../icons.js';
 import { previewVariants } from '../primitives/chat.js';
 import { redactSecrets } from '../redact.js';
 import { useUiLocale } from '../locale-context.js';
@@ -16,6 +16,7 @@ import { AgentSwarmPreview, ExploreAgentPreview, SubagentPreview } from './agent
 import { formatQuietJsonValue } from './builtin-preview.js';
 import { TOOL_LINE_CAP, capLines, formatUserVisibleToolText } from './preview-utils.js';
 import { getToolActivityCopy } from './copy.js';
+import { isSandboxDeniedToolResult } from './sandbox-denial.js';
 
 /**
  * Shared Codex-like tool output well — one surface for live and settled
@@ -75,6 +76,7 @@ export function ToolResultPreview(props: {
         status={content.status}
         failureMessage={content.failureMessage}
         output={isShellOutput(content.output) ? content.output : undefined}
+        sandboxBlocked={isSandboxDeniedToolResult(content)}
       />
     );
   }
@@ -241,8 +243,10 @@ function TerminalPreview(props: {
   status?: string;
   failureMessage?: string;
   output?: ShellOutput;
+  sandboxBlocked?: boolean;
 }) {
-  const copy = getToolActivityCopy(useUiLocale()).result;
+  const activityCopy = getToolActivityCopy(useUiLocale());
+  const copy = activityCopy.result;
   const cancelled = isCancelledStatus(props.status);
   const timedOut = props.status === 'timed_out';
   const succeeded = props.status === 'completed';
@@ -250,12 +254,15 @@ function TerminalPreview(props: {
   // arg into the chat without masking it.
   const safeCmd = redactSecrets(props.cmd);
   const attention = !succeeded || cancelled || timedOut;
+  const attentionBorder = props.sandboxBlocked
+    ? 'border-[oklch(from_var(--warning)_l_c_h_/_0.32)]'
+    : 'border-[oklch(from_var(--destructive)_l_c_h_/_0.28)]';
 
   return (
     <div
       data-slot="tool-output"
       data-kind="terminal"
-      className={cn(TOOL_OUTPUT_PANEL_CLASS, attention && 'border-[oklch(from_var(--destructive)_l_c_h_/_0.28)]')}
+      className={cn(TOOL_OUTPUT_PANEL_CLASS, attention && attentionBorder)}
     >
       {safeCmd.length > 0 && (
         <code className={TOOL_OUTPUT_COMMAND_CLASS}>{safeCmd}</code>
@@ -266,7 +273,7 @@ function TerminalPreview(props: {
         <p className={TOOL_OUTPUT_NOTE_CLASS}>{copy.terminalUnavailable}</p>
       )}
       {props.failureMessage && (
-        <p className={cn(TOOL_OUTPUT_NOTE_CLASS, 'text-[color:var(--destructive)]')}>
+        <p className={cn(TOOL_OUTPUT_NOTE_CLASS, props.sandboxBlocked ? 'text-[color:var(--warning-text,var(--info-text))]' : 'text-[color:var(--destructive)]')}>
           {redactSecrets(props.failureMessage)}
         </p>
       )}
@@ -280,7 +287,14 @@ function TerminalPreview(props: {
           {props.exitCode !== undefined ? `${copy.timedOut} · ${copy.exitCode(props.exitCode)}` : copy.timedOut}
         </p>
       )}
-      {!succeeded && !cancelled && !timedOut && (
+      {props.sandboxBlocked && !cancelled && !timedOut && (
+        <p className={cn(TOOL_OUTPUT_NOTE_CLASS, 'text-[color:var(--warning-text,var(--info-text))]')}>
+          {props.exitCode !== undefined
+            ? `${activityCopy.status.sandboxBlocked} · ${copy.exitCode(props.exitCode)}`
+            : activityCopy.status.sandboxBlocked}
+        </p>
+      )}
+      {!succeeded && !cancelled && !timedOut && !props.sandboxBlocked && (
         <p className={cn(TOOL_OUTPUT_NOTE_CLASS, 'text-[color:var(--destructive)]')}>
           {props.exitCode !== undefined ? `${copy.failed} · ${copy.exitCode(props.exitCode)}` : copy.failed}
         </p>
@@ -298,9 +312,13 @@ function ShellRunPreview(props: {
   const locale = useUiLocale();
   const copy = getToolActivityCopy(locale).result;
   const { result } = props;
+  const sandboxBlocked = isSandboxDeniedToolResult(result);
   const safeCmd = redactSecrets(result.cmd);
   const output = isShellOutput(result.output) ? result.output : undefined;
   const attention = result.status === 'failed' || result.status === 'orphaned' || (result.exitCode !== undefined && result.exitCode !== 0);
+  const attentionBorder = sandboxBlocked
+    ? 'border-[oklch(from_var(--warning)_l_c_h_/_0.32)]'
+    : 'border-[oklch(from_var(--destructive)_l_c_h_/_0.28)]';
 
   if (result.mode === 'pty') {
     return (
@@ -309,6 +327,7 @@ function ShellRunPreview(props: {
         output={output?.mode === 'pty' ? output : undefined}
         safeCmd={safeCmd}
         attention={attention}
+        sandboxBlocked={sandboxBlocked}
         source={props.source}
       />
     );
@@ -316,14 +335,18 @@ function ShellRunPreview(props: {
   const safeRef = redactSecrets(result.ref);
   const statusLabel = props.source === 'owned'
     ? copy.managedBySource
-    : props.source === 'unavailable' ? copy.sourceUnavailable : shellRunStatusLabel(result.status, locale);
+    : props.source === 'unavailable'
+      ? copy.sourceUnavailable
+      : sandboxBlocked
+        ? getToolActivityCopy(locale).status.sandboxBlocked
+        : shellRunStatusLabel(result.status, locale);
   const pipeOutput = output?.mode === 'pipes' ? output : undefined;
 
   return (
     <div
       data-slot="tool-output"
       data-kind="shell_run"
-      className={cn(TOOL_OUTPUT_PANEL_CLASS, attention && 'border-[oklch(from_var(--destructive)_l_c_h_/_0.28)]')}
+      className={cn(TOOL_OUTPUT_PANEL_CLASS, attention && attentionBorder)}
     >
       {safeCmd.length > 0 && (
         <code className={TOOL_OUTPUT_COMMAND_CLASS}>{safeCmd}</code>
@@ -334,7 +357,7 @@ function ShellRunPreview(props: {
         {safeRef ? ` · ${safeRef}` : ''}
       </p>
       {result.failureMessage && (
-        <p className={cn(TOOL_OUTPUT_NOTE_CLASS, 'text-[color:var(--destructive)]')}>
+        <p className={cn(TOOL_OUTPUT_NOTE_CLASS, sandboxBlocked ? 'text-[color:var(--warning-text,var(--info-text))]' : 'text-[color:var(--destructive)]')}>
           {redactSecrets(result.failureMessage)}
         </p>
       )}
@@ -355,6 +378,7 @@ function PtyShellSurface(props: {
   output?: Extract<ShellOutput, { mode: 'pty' }>;
   safeCmd: string;
   attention: boolean;
+  sandboxBlocked: boolean;
   source?: 'owned' | 'unavailable';
 }) {
   const copy = getToolActivityCopy(useUiLocale()).result;
@@ -366,7 +390,11 @@ function PtyShellSurface(props: {
       className={cn(
         TOOL_OUTPUT_PANEL_CLASS,
         'gap-0 overflow-hidden p-0',
-        props.attention && 'border-[oklch(from_var(--destructive)_l_c_h_/_0.28)]',
+        props.attention && (
+          props.sandboxBlocked
+            ? 'border-[oklch(from_var(--warning)_l_c_h_/_0.32)]'
+            : 'border-[oklch(from_var(--destructive)_l_c_h_/_0.28)]'
+        ),
       )}
     >
       <header className="flex min-w-0 items-center px-3 pt-2.5 pb-1">
@@ -391,13 +419,18 @@ function PtyShellSurface(props: {
           </p>
         )}
         {result.failureMessage && (
-          <p className={cn(TOOL_OUTPUT_NOTE_CLASS, 'text-[color:var(--destructive)]')}>
+          <p className={cn(TOOL_OUTPUT_NOTE_CLASS, props.sandboxBlocked ? 'text-[color:var(--warning-text,var(--info-text))]' : 'text-[color:var(--destructive)]')}>
             {redactSecrets(result.failureMessage)}
           </p>
         )}
       </div>
       <footer className="flex min-h-8 items-center justify-end gap-1.5 px-3 pt-1 pb-2.5 text-[length:var(--font-size-base)] text-[color:var(--muted-foreground)]">
-        <ShellRunStatus status={result.status} exitCode={result.exitCode} source={props.source} />
+        <ShellRunStatus
+          status={result.status}
+          exitCode={result.exitCode}
+          source={props.source}
+          sandboxBlocked={props.sandboxBlocked}
+        />
       </footer>
     </div>
   );
@@ -407,11 +440,16 @@ function ShellRunStatus(props: {
   status: Extract<ToolResultContent, { kind: 'shell_run' }>['status'];
   exitCode?: number;
   source?: 'owned' | 'unavailable';
+  sandboxBlocked?: boolean;
 }) {
-  const copy = getToolActivityCopy(useUiLocale()).result;
+  const activityCopy = getToolActivityCopy(useUiLocale());
+  const copy = activityCopy.result;
   if (props.source === 'owned') return <><GitBranch size={15} aria-hidden="true" />{copy.managedBySource}</>;
   if (props.source === 'unavailable') return <><GitBranch size={15} aria-hidden="true" />{copy.sourceUnavailable}</>;
   const suffix = props.exitCode !== undefined && props.exitCode !== 0 ? ` · ${copy.exitCode(props.exitCode)}` : '';
+  if (props.sandboxBlocked) {
+    return <><ShieldAlert size={15} aria-hidden="true" />{activityCopy.status.sandboxBlocked}{suffix}</>;
+  }
   switch (props.status) {
     case 'running':
       return <><Loader2 size={15} aria-hidden="true" className="animate-spin" />{copy.running}</>;

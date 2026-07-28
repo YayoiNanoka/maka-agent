@@ -371,6 +371,7 @@ const toolVariants = cva("", {
         + " " + WP_CARD_BORDER
         + " data-[status=running]:[border-color:oklch(from_var(--status-running)_l_c_h_/_0.4)]"
         + " data-[status=completed]:[border-color:var(--border)]"
+        + " data-[status=blocked]:[border-color:oklch(from_var(--warning)_l_c_h_/_0.4)] data-[status=blocked]:bg-[oklch(from_var(--warning)_l_c_h_/_0.04)]"
         + " data-[status=errored]:[border-color:oklch(from_var(--destructive)_l_c_h_/_0.4)] data-[status=errored]:bg-[oklch(from_var(--destructive)_l_c_h_/_0.04)]"
         + " data-[status=interrupted]:[border-color:var(--border)] data-[status=interrupted]:bg-[var(--foreground-3)] data-[status=interrupted]:opacity-[0.7]",
       // The Collapsible trigger/header: 8px · name · meta grid. The open-state
@@ -385,6 +386,7 @@ const toolVariants = cva("", {
         + " " + WP_DOT_BG
         + " data-[status=running]:bg-[var(--status-running)] data-[status=running]:[box-shadow:0_0_0_3px_oklch(from_var(--status-running)_l_c_h_/_0.15)] data-[status=running]:[animation:maka-tool-pulse_1.5s_ease-in-out_infinite]"
         + " data-[status=completed]:bg-[var(--success)]"
+        + " data-[status=blocked]:bg-[var(--warning)]"
         + " data-[status=errored]:bg-[var(--destructive)]"
         + " data-[status=interrupted]:bg-[var(--muted-foreground)]",
       // `.maka-tool-name` — the mono tool name, ellipsized.
