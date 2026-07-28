@@ -37,6 +37,7 @@ export type {
   ShellRunStateResult,
   ShellRunUpdateOwnership,
   ShellRunUpdate,
+  SandboxDenialSignal,
   SandboxDenialRecovery,
   AdditionalPermissionRequestEvent,
   SandboxEscalationRequestEvent,

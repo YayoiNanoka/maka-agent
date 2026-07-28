@@ -444,9 +444,12 @@ type ShellRunResultMetadata = {
   sandboxDenial?: SandboxDenialRecovery;
 };
 
-export interface SandboxDenialRecovery {
+export interface SandboxDenialSignal {
   likely: true;
   backend?: 'macos-seatbelt' | 'linux';
+}
+
+export interface SandboxDenialRecovery extends SandboxDenialSignal {
   recovery: 'require_escalated';
 }
 
@@ -470,7 +473,7 @@ type ShellRunToolResultContent =
       ));
 
 export type ToolResultContent =
-  | { kind: 'text'; text: string }
+  | { kind: 'text'; text: string; sandboxDenial?: SandboxDenialSignal }
   | { kind: 'json'; value: unknown }
   | { kind: 'file_diff'; paths: string[]; diff: string }
   | { kind: 'file_write'; path: string; bytes: number }

@@ -1,5 +1,6 @@
 import {
   decodeCanonicalShellToolResultContent,
+  isSandboxDenialSignal,
   normalizeShellToolResultContent,
 } from './shell-run-result.js';
 import { isPermissionMode } from './permission.js';
@@ -19,7 +20,7 @@ type ExploreResult = Result<'explore_agent'>;
 type AgentSwarmResult = Result<'agent_swarm'>;
 type RiveResult = Result<'rive_workflow'>;
 
-const TEXT_SHAPE = defineObjectShape<Result<'text'>>()(['kind', 'text'], []);
+const TEXT_SHAPE = defineObjectShape<Result<'text'>>()(['kind', 'text'], ['sandboxDenial']);
 const JSON_SHAPE = defineObjectShape<Result<'json'>>()(['kind', 'value'], []);
 const FILE_DIFF_SHAPE = defineObjectShape<Result<'file_diff'>>()(['kind', 'paths', 'diff'], []);
 const FILE_WRITE_SHAPE = defineObjectShape<Result<'file_write'>>()(['kind', 'path', 'bytes'], []);
@@ -219,7 +220,11 @@ function isNonShellToolResultContent(value: unknown): value is ToolResultContent
   if (!isRecord(value) || typeof value.kind !== 'string') return false;
   switch (value.kind) {
     case 'text':
-      return hasExactShape(value, TEXT_SHAPE) && typeof value.text === 'string';
+      return (
+        hasExactShape(value, TEXT_SHAPE) &&
+        typeof value.text === 'string' &&
+        (value.sandboxDenial === undefined || isSandboxDenialSignal(value.sandboxDenial))
+      );
     case 'json':
       return hasExactShape(value, JSON_SHAPE) && Object.hasOwn(value, 'value');
     case 'file_diff':

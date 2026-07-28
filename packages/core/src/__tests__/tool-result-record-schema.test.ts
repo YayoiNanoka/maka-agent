@@ -64,6 +64,44 @@ describe('legacy subagent tool result compatibility', () => {
   });
 });
 
+describe('sandbox denial tool result metadata', () => {
+  test('accepts a canonical text result carrying a sandbox denial signal', () => {
+    const result = {
+      kind: 'text',
+      text: 'Filesystem access was denied.',
+      sandboxDenial: {
+        likely: true,
+        backend: 'macos-seatbelt',
+      },
+    } as const;
+
+    assert.deepEqual(decodeCanonicalToolResultContent(result), result);
+    assert.deepEqual(
+      toolResultContent(decodeStoredMessageForRecovery(storedToolResult(result))),
+      result,
+    );
+  });
+
+  test('rejects malformed or widened sandbox denial signals', () => {
+    for (const sandboxDenial of [
+      { likely: false },
+      { likely: true, backend: 'none' },
+      { likely: true, backend: 'macos-seatbelt', recovery: 'require_escalated' },
+      { likely: true, unexpected: true },
+    ]) {
+      assert.throws(
+        () =>
+          decodeCanonicalToolResultContent({
+            kind: 'text',
+            text: 'denied',
+            sandboxDenial,
+          }),
+        /Invalid tool result content/,
+      );
+    }
+  });
+});
+
 function legacySubagentResult(): Record<string, unknown> {
   return {
     kind: 'subagent',
