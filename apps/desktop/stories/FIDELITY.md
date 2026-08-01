@@ -1,6 +1,6 @@
 # Storybook fidelity convention
 
-Applies to every `Product/*` story in `apps/desktop/stories` and `packages/ui/stories`. `Primitives/*` and `Design System/*` are exempt: they demonstrate a component's states, not a product surface, and there is no user path to a Button variant.
+Applies to every `Product/*` story in `apps/desktop/stories` and `packages/ui/stories`. `Primitives/*` and `Design System/*` are exempt: they demonstrate a component's states, not a product surface, and there is no user path to a StatTile emphasis.
 
 ## Every product story maps to a state a real user can reach
 
@@ -15,9 +15,13 @@ So each story carries a `// Real path:` comment directly above it, naming how a 
 export const Populated: Story = { … }
 ```
 
-The annotation is prose on purpose. Its value is that someone traced the path and wrote it down; a machine-checkable schema would be satisfied by a plausible-looking lie just as easily. `story-annotation-contract.test.ts` checks that the sentence exists — nothing more. **It cannot tell you the sentence is true.** Only a reviewer following the call chain can, and reviewing that sentence is the point of writing it.
+The annotation is prose on purpose. Its value is that someone traced the path and wrote it down; a machine-checkable schema would be satisfied by a plausible-looking lie just as easily. So the convention splits along what a machine can decide. `scripts/check-story-annotations.mjs` checks that the sentence *exists* and runs in CI. **It cannot tell you the sentence is true.** Only a reviewer following the call chain can, and reviewing that sentence is the point of writing it.
 
-What it does guarantee is that nothing slips past it unseen. It derives the files it scans from `.storybook/main.ts` rather than restating them, and it fails on any top-level export it cannot classify instead of skipping it. A contract that quietly ignores what it does not parse passes *because* it did not understand — which is the same failure as a story that quietly shows a screen the app does not render. So stories use `export const Name: Story = …` and nothing else; a new form is a deliberate widening of the contract, not a silent exemption.
+That split is not a formality. The original `story-annotation-contract.test.ts` was retired with the rest of the source-scanning suite in #1724 — correctly, since 149 tests asserting on source text charged every refactor a rewrite of its own guards. But existence is exactly the kind of non-cosmetic invariant #1724 kept its `scripts/check-*.mjs` commands for, and the interval without one showed why: `chat-surface.stories.tsx` reached thirteen stories with twelve annotations and no one noticed.
+
+What the check guarantees is that nothing slips past unseen. It fails on any top-level export it cannot classify instead of skipping it — a guard that quietly ignores what it does not parse passes *because* it did not understand, which is the same failure as a story quietly showing a screen the app does not render. So stories use `export const Name: Story = …` and nothing else; `export { … }` re-exports and `export function` forms are reported rather than waved through, and a new form is a deliberate widening of the check, not a silent exemption. It also compares its own scan roots against `.storybook/main.ts` in both directions, so a story tree cannot drift out of coverage by being dropped from one side or added to the other.
+
+It is still a source scanner, and a source scanner approximates the story set rather than knowing it — Storybook's index is the only authority for that, and it exists only after a build. The approximation is deliberate: this check is a convention guard that should fail in seconds inside `typecheck`, not a safety invariant. What it must not do is claim more reach than it has, which is why every gap above was closed by widening what it *fails* on rather than what it skips.
 
 Two of the first batch of annotations were wrong, and both were caught by reading rather than by running anything: one named a path through a builder that cannot produce the state (`CommandPaletteDisabledCommand`), and one named two hosts for a frame that is only one of them. Write the sentence narrow enough to be falsifiable — the host, the builder, the gate — because a sentence vague enough to always be true buys nothing.
 

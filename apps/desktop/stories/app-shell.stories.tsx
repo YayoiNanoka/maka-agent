@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import { useRef, useState, type ReactNode } from 'react';
 import type { ComponentProps } from 'react';
 import type { ProjectRecord, SessionSummary, StoredMessage } from '@maka/core';
-import { ChatView, Composer, SessionListPanel } from '@maka/ui';
+import { ChatSurfaceLayout, ChatView, Composer, SessionListPanel } from '@maka/ui';
 import type { ChatModelChoice, SessionViewMode } from '@maka/ui';
 import { AppShellTopbarActions, AppShellWorkspaceTopActions } from '../src/renderer/app-shell-chrome-actions';
 import { AppShell as AstryxAppShell } from '@astryxdesign/core/AppShell';
@@ -137,35 +137,6 @@ const conversation: StoredMessage[] = [
   assistant('msg-2', 'turn-1', 12, '现在最值得先固定的是几个高频但还没有 story 的页面：权限弹窗、顶层布局、首次启动引导。把它们的可见状态摆出来，reviewer 就能在 Storybook 里逐个看，不用手动把 app 驱动到这些路径。'),
   user('msg-3', 'turn-2', 6, '顶层布局怎么处理？它依赖很多 IPC。'),
   assistant('msg-4', 'turn-2', 4, '直接挂载 Astryx AppShell，并通过官方 topNav、sideNav 和 content 插槽组合真实侧栏、聊天区与标题栏。Story 只隔离 IPC，布局 authority 与产品保持一致。'),
-];
-
-const markdownCoreConversation: StoredMessage[] = [
-  user('msg-md-1', 'turn-md', 6, '把 Markdown 核心能力放在一条回答里，方便视觉检查。'),
-  assistant(
-    'msg-md-2',
-    'turn-md',
-    5,
-    [
-      '# Markdown core',
-      '',
-      '正文支持 **粗体**、*斜体*、`inlineCode()`，以及 [安全外链](https://github.com/maka-agent/maka-agent)。',
-      '',
-      '- [x] Astryx 解析与排版',
-      '- [ ] 明暗主题视觉检查',
-      '',
-      '| 能力 | 状态 |',
-      '| --- | --- |',
-      '| 安全链接 | 已接管 |',
-      '| 代码高亮 | 已接管 |',
-      '',
-      '```typescript',
-      'const renderer = "Astryx";',
-      'return renderer;',
-      '```',
-      '',
-      '> 非白名单协议保持不可点击，原始 HTML 保持为文本。',
-    ].join('\n'),
-  ),
 ];
 
 const baseChatProps: ChatViewProps = {
@@ -335,15 +306,20 @@ function ComposedShell(props: {
         >
           {props.detailChildren ?? (
             <div style={{ display: 'flex', minHeight: 0, width: '100%', flexDirection: 'column', flex: 1 }}>
-              <ChatView {...baseChatProps} activeSession={active} {...props.chat} />
-              <div style={{ padding: '0 24px 24px' }}>
-                <Composer
-                  {...baseComposerProps}
-                  activeSession={active}
-                  streaming={props.session?.streaming ?? false}
-                  {...props.composer}
-                />
-              </div>
+              <ChatSurfaceLayout
+                composer={
+                  <div style={{ padding: '0 16px 16px' }}>
+                    <Composer
+                      {...baseComposerProps}
+                      activeSession={active}
+                      streaming={props.session?.streaming ?? false}
+                      {...props.composer}
+                    />
+                  </div>
+                }
+              >
+                <ChatView {...baseChatProps} activeSession={active} {...props.chat} />
+              </ChatSurfaceLayout>
             </div>
           )}
         </div>
@@ -356,42 +332,6 @@ function ComposedShell(props: {
 // messages (sidebar expanded, composer ready).
 export const DefaultLayout: Story = {
   render: () => <ComposedShell />,
-};
-
-// Real path: switch the sidebar grouping to Projects. Covers compact
-// zero-session rows, an unavailable project, worktree glyph, and the
-// default-collapsed archived section in one stable review surface.
-export const ProjectCatalogSidebar: Story = {
-  render: () => <ComposedShell initialViewMode="project" />,
-};
-
-// Real path: open the project chip below the composer. The recent-project
-// region scrolls while Add Project and the separated No Project action stay
-// fixed at the bottom.
-export const ProjectCatalogPicker: Story = {
-  render: () => (
-    <ComposedShell
-      composer={{
-        workspacePicker: {
-          ...baseComposerProps.workspacePicker!,
-          defaultOpen: true,
-        },
-      }}
-    />
-  ),
-};
-
-// Real path: same as DefaultLayout after the user collapses the sidebar
-// (topbar toggle).
-export const CollapsedSidebar: Story = {
-  render: () => <ComposedShell sidebarCollapsed />,
-};
-
-// Real path: returning user opens any session → toggle the topbar sidebar
-// control. This interaction-only companion keeps real transition durations
-// without weakening deterministic screenshot states elsewhere.
-export const SidebarMotion: Story = {
-  render: () => <ComposedShell motionEnabled />,
 };
 
 // Real path: send a message → the turn is streaming (composer shows the
@@ -417,13 +357,6 @@ export const StreamingTurn: Story = {
   ),
 };
 
-// Real path: open an assistant answer containing rich Markdown. This keeps the
-// PR 7-owned typography, task-list, table, link, and highlighted-code states in
-// one stable light/dark review surface.
-export const MarkdownCore: Story = {
-  render: () => <ComposedShell chat={{ messages: markdownCoreConversation }} />,
-};
-
 // Real path: the agent calls a tool that needs approval → session enters
 // waiting_for_user, composer is disabled, the permission-mode picker is
 // locked with an explanatory reason.
@@ -437,18 +370,6 @@ export const WaitingForPermission: Story = {
       }}
     />
   ),
-};
-
-// Real path: enable Plan mode (＋ menu) → while the mode is on, the composer
-// shows a quiet Plan indicator next to the permission select (#1433).
-export const PlanModeActive: Story = {
-  render: () => <ComposedShell composer={{ planModeActive: true }} />,
-};
-
-// Real path: enable Swarm mode (＋ menu) → while the mode is on, the composer
-// shows the same direct-close indicator as Plan beside the permission select.
-export const SwarmModeActive: Story = {
-  render: () => <ComposedShell composer={{ swarmModeActive: true }} />,
 };
 
 // Real path: any user with onboarding finished → start a new chat, or open a

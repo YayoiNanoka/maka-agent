@@ -1,7 +1,7 @@
 import { type ReactNode } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import type { LlmConnection, OnboardingState, ProviderType, SettingsSection } from '@maka/core';
-import { ChatView } from '@maka/ui';
+import { ChatSurfaceLayout, ChatView } from '@maka/ui';
 import { OnboardingHero } from '../src/renderer/OnboardingHero';
 
 // Fidelity convention (#1433): every story below names the real app path
@@ -75,11 +75,13 @@ function DetailPane(props: { children: ReactNode }) {
       >
         <div className="maka-detail-with-artifacts">
           <div className="mainColumn" data-home-surface="true">
-            <ChatView
-              messages={[]}
-              onNew={() => undefined}
-              emptyOverride={<div className="maka-onboarding-surface">{props.children}</div>}
-            />
+            <ChatSurfaceLayout composer={null}>
+              <ChatView
+                messages={[]}
+                onNew={() => undefined}
+                emptyOverride={<div className="maka-onboarding-surface">{props.children}</div>}
+              />
+            </ChatSurfaceLayout>
           </div>
         </div>
       </div>
@@ -110,48 +112,3 @@ export const NeedsConnection: Story = {
   ),
 };
 
-// Real path: same hero, with at least one ready connection but no default picked — e.g.
-// after deleting the connection that used to be the default.
-export const NeedsDefaultConnection: Story = {
-  render: () => (
-    <DetailPane>
-      <OnboardingHero {...heroProps({ kind: 'needs_default_connection' })} />
-    </DetailPane>
-  ),
-};
-
-// Real path: same hero, when the default connection exists but its API key is missing or
-// was rejected.
-export const NeedsConnectionCredentials: Story = {
-  render: () => (
-    <DetailPane>
-      <OnboardingHero
-        {...heroProps({ kind: 'needs_connection_credentials', connectionSlug: 'zai-live' })}
-      />
-    </DetailPane>
-  ),
-};
-
-// Real path: same hero, when the default connection is usable but no default model has
-// been chosen.
-export const NeedsDefaultModel: Story = {
-  render: () => (
-    <DetailPane>
-      <OnboardingHero
-        {...heroProps({ kind: 'needs_default_model', connectionSlug: 'zai-live' })}
-      />
-    </DetailPane>
-  ),
-};
-
-// Real path: same hero, when connections exist but every one of them fails its health
-// probe — no per-connection fix applies, so the hero offers no single next step.
-export const BlockedAllUnhealthy: Story = {
-  render: () => (
-    <DetailPane>
-      <OnboardingHero
-        {...heroProps({ kind: 'blocked', reason: 'all_connections_unhealthy' })}
-      />
-    </DetailPane>
-  ),
-};

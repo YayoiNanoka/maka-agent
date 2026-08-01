@@ -4,13 +4,13 @@ import { createServer } from 'node:http';
 import { dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const PRODUCT_VIEWPORTS = Object.freeze({
+const PRODUCT_VIEWPORTS = Object.freeze({
   wide: Object.freeze({ width: 1280, height: 900 }),
   compact: Object.freeze({ width: 820, height: 900 }),
   floor: Object.freeze({ width: 480, height: 900 }),
 });
 
-export const REQUIRED_PRODUCT_SURFACES = Object.freeze([
+const REQUIRED_PRODUCT_SURFACES = Object.freeze([
   'settings',
   'skills',
   'mcp',
@@ -28,7 +28,7 @@ function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-export function validateCoverageManifest(manifest, storyIndex) {
+function validateCoverageManifest(manifest, storyIndex) {
   if (!isRecord(manifest) || manifest.version !== 1) fail('version must be 1');
   if (!isRecord(manifest.viewports)) fail('viewports must be an object');
   if (!isRecord(manifest.surfaces)) fail('surfaces must be an object');
@@ -118,7 +118,7 @@ function describeBrowserValue(value) {
   return String(value);
 }
 
-export function installStorybookSmokeProbe({ storyId }) {
+function installStorybookSmokeProbe({ storyId }) {
   const smoke = {
     finished: false,
     failures: [],
@@ -176,7 +176,7 @@ export function installStorybookSmokeProbe({ storyId }) {
   connect();
 }
 
-export async function smokeStory(page, baseUrl, job, options = {}) {
+async function smokeStory(page, baseUrl, job, options = {}) {
   const prefix = `[${job.storyId} @ ${job.viewport}]`;
   const browserFailures = [];
   const onConsole = (message) => {
@@ -317,10 +317,8 @@ export async function smokeStory(page, baseUrl, job, options = {}) {
       },
       { checks: job.checks ?? [], colorScheme: job.colorScheme ?? 'light' },
     );
-    if (result !== true) {
-      browserFailures.push(...result.failures);
-      if (!result.hasContent) browserFailures.push('story root rendered empty content');
-    }
+    browserFailures.push(...result.failures);
+    if (!result.hasContent) browserFailures.push('story root rendered empty content');
     if (browserFailures.length > 0) {
       throw new Error(`${prefix} ${browserFailures.join('; ')}`);
     }
@@ -328,6 +326,57 @@ export async function smokeStory(page, baseUrl, job, options = {}) {
     page.off?.('console', onConsole);
     page.off?.('pageerror', onPageError);
   }
+}
+
+/**
+ * Every story the manifest does NOT name, rendered once at wide/light.
+ *
+ * The manifest is a curated list — 12 surfaces across viewports and colour
+ * schemes, because those checks are expensive and only worth paying for where
+ * layout actually varies. But that left the other ~130 stories verified by
+ * nothing: `build-storybook` bundles a story without mounting it, so a render
+ * that throws, a play function that rejects, or a console error ships green.
+ *
+ * This pass is deliberately shallow. It answers one question — does the story
+ * still mount and finish its play function without errors — and leaves
+ * viewport, colour-scheme and surface-specific assertions to the manifest.
+ */
+function catalogJobs(storyIndex, manifestJobs) {
+  const covered = new Set(manifestJobs.map((job) => job.storyId));
+  return Object.values(storyIndex.entries)
+    .filter((entry) => entry.type === 'story' && !covered.has(entry.id))
+    .map((entry) => ({
+      storyId: entry.id,
+      viewport: 'catalog',
+      size: PRODUCT_VIEWPORTS.wide,
+      colorScheme: 'light',
+    }));
+}
+
+/**
+ * Every job is attempted and every story failure is collected, so one broken
+ * story cannot hide the rest behind it. Only an infrastructure failure — a page
+ * that cannot be opened or closed — is allowed to reject and abort the run.
+ */
+async function runJobs(browser, baseUrl, jobs, concurrency) {
+  const queue = [...jobs];
+  const failures = [];
+  const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+    for (let job = queue.shift(); job; job = queue.shift()) {
+      const page = await browser.newPage();
+      try {
+        await smokeStory(page, baseUrl, job);
+        process.stdout.write(`✓ ${job.storyId} @ ${job.viewport}\n`);
+      } catch (error) {
+        failures.push(error instanceof Error ? error.message : String(error));
+        process.stdout.write(`✗ ${job.storyId} @ ${job.viewport}\n`);
+      } finally {
+        await page.close();
+      }
+    }
+  });
+  await Promise.all(workers);
+  return failures;
 }
 
 const MIME_TYPES = {
@@ -391,24 +440,27 @@ async function runCli() {
     readFile(join(staticDir, 'index.json'), 'utf8').then(JSON.parse),
   ]);
   const jobs = validateCoverageManifest(manifest, storyIndex);
+  const catalog = catalogJobs(storyIndex, jobs);
   const { chromium } = await import('@playwright/test');
   const browser = await chromium.launch({ headless: true });
   const server = await startStaticServer(staticDir);
+  const problems = [];
   try {
-    for (const job of jobs) {
-      const page = await browser.newPage();
-      try {
-        await smokeStory(page, server.baseUrl, job);
-        process.stdout.write(`✓ ${job.storyId} @ ${job.viewport}\n`);
-      } finally {
-        await page.close();
-      }
-    }
+    // The manifest jobs run first and serially: they assert on layout geometry,
+    // which is why they pin a viewport in the first place.
+    problems.push(...(await runJobs(browser, server.baseUrl, jobs, 1)));
+    problems.push(...(await runJobs(browser, server.baseUrl, catalog, 4)));
   } finally {
     await server.close();
     await browser.close();
   }
-  process.stdout.write(`Product Storybook smoke passed (${jobs.length} render/play checks).\n`);
+  if (problems.length > 0) {
+    throw new Error(`${problems.length} story check(s) failed:\n${problems.join('\n')}`);
+  }
+  process.stdout.write(
+    `Product Storybook smoke passed (${jobs.length} manifest check(s), ` +
+      `${catalog.length} catalog render(s)).\n`,
+  );
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {

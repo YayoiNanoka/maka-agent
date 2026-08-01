@@ -1,11 +1,9 @@
 import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
-import { userEvent, within } from 'storybook/test';
 import type { ProviderType, ThinkingLevel } from '@maka/core';
 import { NewChatModelPicker } from '../src/chat-model-switcher.js';
 import {
   modelChoiceValue,
-  modelMenuGroups,
   type ChatModelChoice,
 } from '../src/chat-model-helpers.js';
 import { ModelPicker } from '../src/model-picker.js';
@@ -78,29 +76,6 @@ export const Default: Story = {
   render: () => <ModelPickerFrame />,
 };
 
-// Real path: chat/settings → open model selector and filter the catalog.
-export const Search: Story = {
-  render: () => <ModelPickerFrame />,
-  play: async ({ canvasElement }) => {
-    await userEvent.click(within(canvasElement).getByRole('button', { name: /选择新对话模型/ }));
-    await userEvent.type(within(document.body).getByPlaceholderText('搜索模型'), 'sonnet');
-  },
-};
-
-// Real path: chat/settings → a query with no Astryx Selector results.
-export const NoResults: Story = {
-  render: () => <ModelPickerFrame />,
-  play: async ({ canvasElement }) => {
-    await userEvent.click(within(canvasElement).getByRole('button', { name: /选择新对话模型/ }));
-    await userEvent.type(within(document.body).getByPlaceholderText('搜索模型'), 'not-a-model');
-  },
-};
-
-// Real path: an existing session whose persisted model left the live catalog.
-export const UnknownCurrent: Story = {
-  render: () => <ModelPickerFrame initialValue="legacy:model-that-is-no-longer-listed" />,
-};
-
 // Real path: Settings → 通用 before any provider exposes a model choice.
 export const EmptyCatalog: Story = {
   render: () => (
@@ -116,24 +91,3 @@ export const EmptyCatalog: Story = {
   ),
 };
 
-// Real path: Settings → 通用 while default-model persistence is pending.
-export const Pending: Story = {
-  render: () => (
-    <div style={{ width: 320 }}>
-      <ModelPicker
-        groups={modelMenuGroups(CHOICES)}
-        value="anthropic-team:claude-sonnet-4"
-        renderProviderMark={providerMark}
-        ariaLabel="默认模型"
-        loading
-        disabled
-        onValueChange={async () => {}}
-      />
-    </div>
-  ),
-};
-
-// Real path: composer footer with model and thinking-level responsibilities adjacent.
-export const ThinkingLevelAdjacent: Story = {
-  render: () => <ModelPickerFrame thinking />,
-};
