@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import type { DatabaseSync } from 'node:sqlite';
 
 export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 1;
@@ -5,6 +6,7 @@ export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 1;
 const SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS = 5_000;
 const SQLITE_INITIALIZATION_RETRY_DELAY_MS = 10;
 const initializationRetryGate = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+const require = createRequire(import.meta.url);
 
 export type SqliteLongTermMemoryMigrationFailpoint = 'after_schema_sql';
 
@@ -73,9 +75,6 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
     CREATE INDEX memory_items_by_active_hash
       ON memory_items(lifecycle_state, scope_type, scope_key, content_hash, item_id);
 
-    CREATE INDEX memory_items_by_kind
-      ON memory_items(kind, lifecycle_state, updated_at DESC, item_id);
-
     CREATE TABLE memory_item_keys (
       item_id TEXT NOT NULL,
       key_text TEXT NOT NULL CHECK (length(key_text) > 0),
@@ -118,58 +117,21 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
   ],
 ]);
 
-interface RequiredSchemaDefinition {
-  readonly type: 'table' | 'index';
+type SchemaObjectType = 'table' | 'index' | 'trigger' | 'view';
+
+interface SchemaDefinition {
+  readonly type: SchemaObjectType;
   readonly tableName: string;
   readonly normalizedSql: string;
 }
 
-const REQUIRED_SCHEMA_DEFINITIONS = extractRequiredSchemaDefinitions(MIGRATIONS.get(1)!);
+const expectedSchemaByVersion = new Map<number, ReadonlyMap<string, SchemaDefinition>>();
 
-const REQUIRED_TABLE_COLUMNS: ReadonlyMap<string, readonly string[]> = new Map([
-  [
-    'memory_items',
-    [
-      'item_id',
-      'version',
-      'content',
-      'kind',
-      'statement_type',
-      'temporal_type',
-      'scope_type',
-      'scope_key',
-      'event_started_at',
-      'event_ended_at',
-      'observed_at',
-      'lifecycle_state',
-      'origin',
-      'content_hash',
-      'created_at',
-      'updated_at',
-    ],
-  ],
-  ['memory_item_keys', ['item_id', 'key_text', 'normalized_key', 'key_type', 'key_origin']],
-  ['memory_item_sources', ['item_id', 'session_id', 'run_id', 'turn_id', 'event_id']],
-  [
-    'memory_write_operations',
-    ['operation_id', 'operation_type', 'request_hash', 'result_json', 'committed_at'],
-  ],
-]);
-
-const REQUIRED_INDEX_COLUMNS: ReadonlyMap<string, readonly string[]> = new Map([
-  [
-    'memory_items_by_scope_and_lifecycle',
-    ['scope_type', 'scope_key', 'lifecycle_state', 'updated_at', 'item_id'],
-  ],
-  [
-    'memory_items_by_active_hash',
-    ['lifecycle_state', 'scope_type', 'scope_key', 'content_hash', 'item_id'],
-  ],
-  ['memory_items_by_kind', ['kind', 'lifecycle_state', 'updated_at', 'item_id']],
-  ['memory_item_keys_by_normalized_key', ['normalized_key', 'item_id']],
-  ['memory_item_sources_by_event', ['event_id', 'item_id']],
-  ['memory_item_sources_by_turn', ['session_id', 'turn_id', 'item_id']],
-]);
+for (let version = 1; version <= SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION; version += 1) {
+  if (!MIGRATIONS.has(version)) {
+    throw new Error(`Missing long-term memory SQLite migration ${version}`);
+  }
+}
 
 export function configureSqliteLongTermMemoryDatabase(db: DatabaseSync): void {
   db.exec(`PRAGMA busy_timeout = ${SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS}`);
@@ -215,15 +177,21 @@ export function migrateSqliteLongTermMemoryDatabase(
 }
 
 export function validateSqliteLongTermMemorySchema(db: DatabaseSync): void {
-  for (const [table, expectedColumns] of REQUIRED_TABLE_COLUMNS) {
-    assertSchemaObject(db, 'table', table);
-    const rows = db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name?: unknown }>;
-    assertColumnList(`table ${table}`, rows, expectedColumns);
+  const version = readSqliteLongTermMemorySchemaVersion(db);
+  if (version < 1 || version > SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION) {
+    throw new Error(`Missing long-term memory SQLite schema definition ${version}`);
   }
-  for (const [index, expectedColumns] of REQUIRED_INDEX_COLUMNS) {
-    assertSchemaObject(db, 'index', index);
-    const rows = db.prepare(`PRAGMA index_info("${index}")`).all() as Array<{ name?: unknown }>;
-    assertColumnList(`index ${index}`, rows, expectedColumns);
+  const missing: Array<{ readonly type: SchemaObjectType; readonly name: string }> = [];
+  for (const [name, expected] of getExpectedSchema(version)) {
+    if (!assertSchemaObject(db, expected.type, name, expected)) {
+      missing.push({ type: expected.type, name });
+    }
+  }
+  const firstMissing = missing[0];
+  if (firstMissing) {
+    throw new Error(
+      `Incomplete long-term memory SQLite schema: missing ${firstMissing.type} ${firstMissing.name}`,
+    );
   }
 }
 
@@ -310,17 +278,18 @@ function newerSchemaError(version: number): Error {
   );
 }
 
-function assertSchemaObject(db: DatabaseSync, type: 'table' | 'index', name: string): void {
+function assertSchemaObject(
+  db: DatabaseSync,
+  type: SchemaObjectType,
+  name: string,
+  expected: SchemaDefinition,
+): boolean {
   const row = db
     .prepare('SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?')
     .get(name) as { type?: unknown; tbl_name?: unknown; sql?: unknown } | undefined;
-  if (row?.type !== type) {
-    throw new Error(`Incomplete long-term memory SQLite schema: missing ${type} ${name}`);
-  }
-  const expected = REQUIRED_SCHEMA_DEFINITIONS.get(name);
+  if (!row) return false;
   if (
-    !expected ||
-    expected.type !== type ||
+    row.type !== type ||
     row.tbl_name !== expected.tableName ||
     typeof row.sql !== 'string' ||
     normalizeSchemaSql(row.sql) !== expected.normalizedSql
@@ -329,51 +298,80 @@ function assertSchemaObject(db: DatabaseSync, type: 'table' | 'index', name: str
       `Incomplete long-term memory SQLite schema: invalid definition for ${type} ${name}`,
     );
   }
+  return true;
 }
 
-function assertColumnList(
-  subject: string,
-  rows: readonly { readonly name?: unknown }[],
-  expected: readonly string[],
-): void {
-  const actual = rows.map((row) => row.name);
-  if (actual.length !== expected.length || actual.some((name, index) => name !== expected[index])) {
-    throw new Error(`Incomplete long-term memory SQLite schema: invalid ${subject}`);
+function getExpectedSchema(version: number): ReadonlyMap<string, SchemaDefinition> {
+  const cached = expectedSchemaByVersion.get(version);
+  if (cached) return cached;
+
+  const Database = loadDatabaseSync();
+  const canonical = new Database(':memory:');
+  try {
+    for (let migrationVersion = 1; migrationVersion <= version; migrationVersion += 1) {
+      const sql = MIGRATIONS.get(migrationVersion);
+      if (!sql) throw new Error(`Missing long-term memory SQLite migration ${migrationVersion}`);
+      canonical.exec(sql);
+    }
+    const expected = readSchemaDefinitions(canonical);
+    expectedSchemaByVersion.set(version, expected);
+    return expected;
+  } finally {
+    canonical.close();
   }
 }
 
-function extractRequiredSchemaDefinitions(
-  sql: string,
-): ReadonlyMap<string, RequiredSchemaDefinition> {
-  const definitions = new Map<string, RequiredSchemaDefinition>();
-  for (const candidate of sql.split(';')) {
-    const statement = candidate.trim();
-    if (statement === '') continue;
-    const table = /^CREATE\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/iu.exec(statement);
-    const index =
-      /^CREATE\s+INDEX\s+([A-Za-z_][A-Za-z0-9_]*)\s+ON\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/iu.exec(
-        statement,
-      );
-    const definition: RequiredSchemaDefinition | undefined = table
-      ? { type: 'table', tableName: table[1]!, normalizedSql: normalizeSchemaSql(statement) }
-      : index
-        ? {
-            type: 'index',
-            tableName: index[2]!,
-            normalizedSql: normalizeSchemaSql(statement),
-          }
-        : undefined;
-    const name = table?.[1] ?? index?.[1];
-    if (!definition || !name || definitions.has(name)) {
+function readSchemaDefinitions(db: DatabaseSync): ReadonlyMap<string, SchemaDefinition> {
+  const rows = db
+    .prepare(
+      `SELECT type, name, tbl_name, sql
+       FROM sqlite_schema
+       WHERE type IN ('table', 'index', 'trigger', 'view')
+         AND name NOT LIKE 'sqlite_%'
+         AND sql IS NOT NULL
+       ORDER BY CASE type
+         WHEN 'table' THEN 0
+         WHEN 'index' THEN 1
+         WHEN 'trigger' THEN 2
+         ELSE 3
+       END, name ASC`,
+    )
+    .all() as Array<{
+    type?: unknown;
+    name?: unknown;
+    tbl_name?: unknown;
+    sql?: unknown;
+  }>;
+  const definitions = new Map<string, SchemaDefinition>();
+  for (const row of rows) {
+    if (
+      !isSchemaObjectType(row.type) ||
+      typeof row.name !== 'string' ||
+      typeof row.tbl_name !== 'string' ||
+      typeof row.sql !== 'string' ||
+      definitions.has(row.name)
+    ) {
       throw new Error('Invalid built-in long-term memory SQLite migration definition');
     }
-    definitions.set(name, definition);
+    definitions.set(row.name, {
+      type: row.type,
+      tableName: row.tbl_name,
+      normalizedSql: normalizeSchemaSql(row.sql),
+    });
   }
   return definitions;
 }
 
+function isSchemaObjectType(value: unknown): value is SchemaObjectType {
+  return value === 'table' || value === 'index' || value === 'trigger' || value === 'view';
+}
+
 function normalizeSchemaSql(sql: string): string {
   return sql.replace(/\s+/gu, ' ').trim();
+}
+
+function loadDatabaseSync(): typeof import('node:sqlite').DatabaseSync {
+  return (require('node:sqlite') as typeof import('node:sqlite')).DatabaseSync;
 }
 
 function rollback(db: DatabaseSync): void {

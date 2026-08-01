@@ -26,6 +26,20 @@ describe('long-term memory contract', () => {
     assert.equal(
       deriveMemoryTemporalStatus(
         { temporalType: 'point', eventStartedAt: 100, eventEndedAt: 200 },
+        100,
+      ),
+      'ongoing',
+    );
+    assert.equal(
+      deriveMemoryTemporalStatus(
+        { temporalType: 'point', eventStartedAt: 100, eventEndedAt: null },
+        100,
+      ),
+      'elapsed',
+    );
+    assert.equal(
+      deriveMemoryTemporalStatus(
+        { temporalType: 'point', eventStartedAt: 100, eventEndedAt: 200 },
         150,
       ),
       'ongoing',
@@ -86,5 +100,8 @@ describe('long-term memory contract', () => {
       value: 'concise answer',
     });
     assert.equal(normalizeLongTermMemoryContent('   ').ok, false);
+    assert.equal(normalizeLongTermMemoryContent(`lone\uD800surrogate`).ok, false);
+    assert.equal(normalizeLongTermMemoryContent('💾'.repeat(2_000)).ok, true);
+    assert.equal(normalizeLongTermMemoryContent('💾'.repeat(2_001)).ok, false);
   });
 });

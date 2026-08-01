@@ -24,7 +24,6 @@ import {
 } from '../root-authority.js';
 import { SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION } from '../sqlite-long-term-memory-schema.js';
 import {
-  buildSqliteMemoryKeySearchQuery,
   SqliteMemoryItemStore,
   type SqliteMemoryItemStoreFailpoint,
 } from '../sqlite-long-term-memory-store.js';
@@ -107,25 +106,22 @@ describe('SqliteMemoryItemStore', () => {
       const missingTables = new Database(missingTablesPath);
       missingTables.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
       missingTables.close();
-      assert.throws(
-        () => new SqliteMemoryItemStore(missingTablesPath),
-        /missing table memory_items/,
-      );
+      assert.throws(() => new SqliteMemoryItemStore(missingTablesPath), /missing table memory_/);
 
-      const missingConstraintsPath = join(root, 'missing-constraints.sqlite');
-      const missingConstraints = new Database(missingConstraintsPath);
-      missingConstraints.exec(`
+      const invalidColumnsPath = join(root, 'invalid-columns.sqlite');
+      const invalidColumns = new Database(invalidColumnsPath);
+      invalidColumns.exec(`
         CREATE TABLE memory_items (
           item_id TEXT, version INTEGER, content TEXT, kind TEXT, statement_type TEXT,
           temporal_type TEXT, scope_type TEXT, scope_key TEXT, event_started_at INTEGER,
           event_ended_at INTEGER, observed_at INTEGER, lifecycle_state TEXT, origin TEXT,
-          content_hash TEXT, created_at INTEGER, updated_at INTEGER
+          content_hash TEXT, created_at INTEGER
         );
         PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION};
       `);
-      missingConstraints.close();
+      invalidColumns.close();
       assert.throws(
-        () => new SqliteMemoryItemStore(missingConstraintsPath),
+        () => new SqliteMemoryItemStore(invalidColumnsPath),
         /invalid definition for table memory_items/,
       );
 
@@ -138,6 +134,27 @@ describe('SqliteMemoryItemStore', () => {
       assert.throws(
         () => new SqliteMemoryItemStore(missingIndexPath),
         /missing index memory_item_keys_by_normalized_key/,
+      );
+
+      const invalidConstraintsPath = join(root, 'invalid-constraints.sqlite');
+      const valid = new SqliteMemoryItemStore(invalidConstraintsPath);
+      valid.close();
+      const invalidConstraints = new Database(invalidConstraintsPath);
+      invalidConstraints.exec(`
+        ALTER TABLE memory_write_operations RENAME TO memory_write_operations_old;
+        CREATE TABLE memory_write_operations (
+          operation_id TEXT,
+          operation_type TEXT,
+          request_hash TEXT,
+          result_json TEXT,
+          committed_at INTEGER
+        );
+        DROP TABLE memory_write_operations_old;
+      `);
+      invalidConstraints.close();
+      assert.throws(
+        () => new SqliteMemoryItemStore(invalidConstraintsPath),
+        /invalid definition for table memory_write_operations/,
       );
     });
   });
@@ -247,7 +264,73 @@ describe('SqliteMemoryItemStore', () => {
     });
   });
 
-  test('replays operation receipts and returns semantic duplicates without merging sources', async () => {
+  test('ranks multi-term matches, deduplicates terms, and enforces result limits', async () => {
+    await withStore(async ({ store }) => {
+      const ranked = await store.applyMutations({
+        operationId: 'ranked-create',
+        mutations: [
+          {
+            type: 'create',
+            item: write({
+              content: 'Alpha and beta are both relevant.',
+              keys: [
+                { key: 'alpha', keyType: 'exact', keyOrigin: 'deterministic' },
+                { key: 'beta', keyType: 'exact', keyOrigin: 'deterministic' },
+              ],
+              sources: [source({ eventId: 'event-alpha-beta' })],
+            }),
+          },
+          {
+            type: 'create',
+            item: write({
+              content: 'Only alpha is relevant.',
+              keys: [{ key: 'alpha', keyType: 'exact', keyOrigin: 'deterministic' }],
+              sources: [source({ eventId: 'event-alpha' })],
+            }),
+          },
+          {
+            type: 'create',
+            item: write({
+              content: 'Only beta is relevant.',
+              keys: [{ key: 'beta', keyType: 'exact', keyOrigin: 'deterministic' }],
+              sources: [source({ eventId: 'event-beta' })],
+            }),
+          },
+        ],
+      });
+      const rankedIds = ranked.results.map((result) => result.itemId);
+      assert.deepEqual(await itemIds(store, ['beta', 'alpha', 'ALPHA']), rankedIds);
+      assert.deepEqual(
+        (await store.searchByKeys({ terms: ['alpha', 'beta'], match: 'exact', limit: 2 })).map(
+          (record) => record.item.itemId,
+        ),
+        rankedIds.slice(0, 2),
+      );
+
+      await store.applyMutations({
+        operationId: 'default-limit-create',
+        mutations: Array.from({ length: 21 }, (_, index) => ({
+          type: 'create' as const,
+          item: write({
+            content: `Bulk fact ${index}.`,
+            keys: [{ key: 'bulk', keyType: 'exact', keyOrigin: 'deterministic' }],
+            sources: [source({ eventId: `event-bulk-${index}` })],
+          }),
+        })),
+      });
+      assert.equal((await store.searchByKeys({ terms: ['bulk'], match: 'exact' })).length, 20);
+      await assert.rejects(
+        store.searchByKeys({ terms: ['bulk'], match: 'exact', limit: 0 }),
+        /between 1 and 100/,
+      );
+      await assert.rejects(
+        store.searchByKeys({ terms: ['bulk'], match: 'exact', limit: 101 }),
+        /between 1 and 100/,
+      );
+    });
+  });
+
+  test('replays operation receipts and reports the existing Item before evidence can be lost', async () => {
     await withStore(async ({ store }) => {
       const request = {
         operationId: 'idempotent-create',
@@ -265,22 +348,28 @@ describe('SqliteMemoryItemStore', () => {
         conflict('operation_reused'),
       );
 
-      const duplicate = await store.applyMutations({
-        operationId: 'semantic-duplicate',
-        mutations: [
-          {
-            type: 'create',
-            item: write({
-              origin: 'user_requested',
-              keys: [{ key: 'other', keyType: 'exact', keyOrigin: 'user' }],
-              sources: [source({ eventId: 'event-other' })],
-            }),
-          },
-        ],
-      });
-      assert.equal(duplicate.results[0]?.outcome, 'existing');
-      assert.equal(duplicate.results[0]?.itemId, created.results[0]?.itemId);
+      await assert.rejects(
+        store.applyMutations({
+          operationId: 'fact-duplicate',
+          mutations: [
+            {
+              type: 'create',
+              item: write({
+                origin: 'user_requested',
+                keys: [{ key: 'other', keyType: 'exact', keyOrigin: 'user' }],
+                sources: [source({ eventId: 'event-other' })],
+              }),
+            },
+          ],
+        }),
+        (error: unknown) =>
+          error instanceof MemoryItemStoreConflictError &&
+          error.reason === 'duplicate_active' &&
+          error.itemId === undefined &&
+          error.conflictingItemId === created.results[0]?.itemId,
+      );
       assert.deepEqual((await store.readItem(created.results[0]!.itemId))?.sources, [source()]);
+      assert.equal(await store.readOperation('fact-duplicate'), undefined);
     });
   });
 
@@ -315,6 +404,35 @@ describe('SqliteMemoryItemStore', () => {
         }),
         conflict('version_conflict'),
       );
+    });
+  });
+
+  test('reports the conflicting active Item when an update would duplicate it', async () => {
+    await withStore(async ({ store }) => {
+      const firstId = await createItem(store, 'active-first', write());
+      const secondId = await createItem(
+        store,
+        'active-second',
+        write({
+          content: 'A different current fact.',
+          keys: [{ key: 'different', keyType: 'exact', keyOrigin: 'deterministic' }],
+          sources: [source({ eventId: 'event-different' })],
+        }),
+      );
+
+      await assert.rejects(
+        store.applyMutations({
+          operationId: 'active-update-duplicate',
+          mutations: [{ type: 'update', itemId: secondId, expectedVersion: 1, item: write() }],
+        }),
+        (error: unknown) =>
+          error instanceof MemoryItemStoreConflictError &&
+          error.reason === 'duplicate_active' &&
+          error.itemId === secondId &&
+          error.conflictingItemId === firstId,
+      );
+      assert.equal((await store.readItem(secondId))?.item.content, 'A different current fact.');
+      assert.equal(await store.readOperation('active-update-duplicate'), undefined);
     });
   });
 
@@ -359,6 +477,57 @@ describe('SqliteMemoryItemStore', () => {
       } finally {
         first.close();
         second.close();
+      }
+    });
+  });
+
+  test('allows only one truly concurrent CAS update across SQLite connections', async () => {
+    await withTempRoot(async (root) => {
+      const databasePath = join(root, LONG_TERM_MEMORY_DATABASE_NAME);
+      const setup = new SqliteMemoryItemStore(databasePath, {
+        now: () => 1_000,
+        idFactory: () => 'concurrent-item',
+      });
+      await createItem(setup, 'concurrent-create', write());
+      setup.close();
+
+      const gate = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+      const moduleUrl = new URL('../sqlite-long-term-memory-store.js', import.meta.url).href;
+      const workers = [
+        startConcurrentUpdateWorker(
+          databasePath,
+          moduleUrl,
+          gate,
+          'concurrent-update-a',
+          write({ content: 'Concurrent writer A.' }),
+        ),
+        startConcurrentUpdateWorker(
+          databasePath,
+          moduleUrl,
+          gate,
+          'concurrent-update-b',
+          write({ content: 'Concurrent writer B.' }),
+        ),
+      ];
+      await Promise.all(workers.map((worker) => worker.ready));
+      const gateView = new Int32Array(gate);
+      Atomics.store(gateView, 0, 1);
+      Atomics.notify(gateView, 0, workers.length);
+      assert.deepEqual((await Promise.all(workers.map((worker) => worker.result))).sort(), [
+        'updated',
+        'version_conflict',
+      ]);
+
+      const reopened = new SqliteMemoryItemStore(databasePath, { now: () => 1_000 });
+      try {
+        const record = await reopened.readItem('concurrent-item');
+        assert.equal(record?.item.version, 2);
+        assert.ok(
+          record?.item.content === 'Concurrent writer A.' ||
+            record?.item.content === 'Concurrent writer B.',
+        );
+      } finally {
+        reopened.close();
       }
     });
   });
@@ -420,6 +589,179 @@ describe('SqliteMemoryItemStore', () => {
     });
   });
 
+  test('reports invalid lifecycle transitions and missing Items', async () => {
+    await withStore(async ({ store }) => {
+      const itemId = await createItem(store, 'lifecycle-errors-create', write());
+      await assert.rejects(
+        store.applyMutations({
+          operationId: 'restore-active',
+          mutations: [{ type: 'restore', itemId, expectedVersion: 1 }],
+        }),
+        conflict('invalid_lifecycle_transition'),
+      );
+      await store.applyMutations({
+        operationId: 'archive-once',
+        mutations: [{ type: 'archive', itemId, expectedVersion: 1 }],
+      });
+      await assert.rejects(
+        store.applyMutations({
+          operationId: 'archive-twice',
+          mutations: [{ type: 'archive', itemId, expectedVersion: 2 }],
+        }),
+        conflict('invalid_lifecycle_transition'),
+      );
+
+      for (const [operationId, mutation] of [
+        [
+          'missing-update',
+          { type: 'update', itemId: 'missing-item', expectedVersion: 1, item: write() },
+        ],
+        ['missing-archive', { type: 'archive', itemId: 'missing-item', expectedVersion: 1 }],
+        ['missing-restore', { type: 'restore', itemId: 'missing-item', expectedVersion: 1 }],
+      ] as const) {
+        await assert.rejects(
+          store.applyMutations({ operationId, mutations: [mutation] }),
+          conflict('item_not_found'),
+        );
+      }
+    });
+  });
+
+  test('validates temporal writes and commit-time observations', async () => {
+    await withStore(async ({ store }) => {
+      const created = await store.applyMutations({
+        operationId: 'temporal-create',
+        mutations: [
+          {
+            type: 'create',
+            item: write({
+              content: 'A point event.',
+              temporalType: 'point',
+              eventStartedAt: 900,
+              keys: [{ key: 'point', keyType: 'exact', keyOrigin: 'deterministic' }],
+              sources: [source({ eventId: 'event-point' })],
+            }),
+          },
+          {
+            type: 'create',
+            item: write({
+              content: 'An interval event.',
+              temporalType: 'interval',
+              eventStartedAt: 800,
+              eventEndedAt: 1_200,
+              keys: [{ key: 'interval', keyType: 'exact', keyOrigin: 'deterministic' }],
+              sources: [source({ eventId: 'event-interval' })],
+            }),
+          },
+          {
+            type: 'create',
+            item: write({
+              content: 'An open-ended event.',
+              temporalType: 'open_ended',
+              eventStartedAt: 700,
+              keys: [{ key: 'open', keyType: 'exact', keyOrigin: 'deterministic' }],
+              sources: [source({ eventId: 'event-open' })],
+            }),
+          },
+        ],
+      });
+      assert.deepEqual(
+        await Promise.all(
+          created.results.map(
+            async (result) => (await store.readItem(result.itemId))?.item.temporalType,
+          ),
+        ),
+        ['point', 'interval', 'open_ended'],
+      );
+
+      await assert.rejects(
+        store.applyMutations({
+          operationId: 'invalid-open-ended',
+          mutations: [
+            {
+              type: 'create',
+              item: write({
+                temporalType: 'open_ended',
+                eventStartedAt: 800,
+                eventEndedAt: 900,
+              }),
+            },
+          ],
+        }),
+        /requires only a start bound/,
+      );
+      await assert.rejects(
+        store.applyMutations({
+          operationId: 'future-observation',
+          mutations: [{ type: 'create', item: write({ observedAt: 1_001 }) }],
+        }),
+        /observedAt cannot be later than commit time/,
+      );
+    });
+  });
+
+  test('rejects malformed mutation input before persistence', async () => {
+    await withStore(async ({ store }) => {
+      await assert.rejects(
+        store.applyMutations({ operationId: 'empty-mutations', mutations: [] }),
+        /at least one mutation/,
+      );
+      await assert.rejects(
+        store.applyMutations({
+          operationId: 'too-many-mutations',
+          mutations: Array.from({ length: 33 }, () => ({
+            type: 'create' as const,
+            item: write(),
+          })),
+        }),
+        /at most 32 mutations/,
+      );
+      await assert.rejects(
+        store.applyMutations({
+          operationId: 'conflicting-provenance',
+          mutations: [
+            {
+              type: 'create',
+              item: write({
+                sources: [source(), source({ runId: 'run-2' })],
+              }),
+            },
+          ],
+        }),
+        /conflicting provenance/,
+      );
+      await assert.rejects(
+        store.applyMutations({
+          operationId: 'control-key',
+          mutations: [
+            {
+              type: 'create',
+              item: write({
+                keys: [{ key: 'bad\u0000key', keyType: 'exact', keyOrigin: 'deterministic' }],
+              }),
+            },
+          ],
+        }),
+        /control or zero-width/,
+      );
+      await assert.rejects(
+        store.applyMutations({
+          operationId: 'lone-surrogate',
+          mutations: [{ type: 'create', item: write({ content: `lone\uD800surrogate` }) }],
+        }),
+        /unpaired surrogate/,
+      );
+      await assert.rejects(
+        store.applyMutations({
+          operationId: 'e\u0301',
+          mutations: [{ type: 'create', item: write() }],
+        }),
+        /NFC-normalized/,
+      );
+      assert.equal(await store.readItem('item-1'), undefined);
+    });
+  });
+
   test('rolls back the full batch at every write boundary', async () => {
     for (const point of [
       'after_item_write',
@@ -477,6 +819,27 @@ describe('SqliteMemoryItemStore', () => {
     });
   });
 
+  test('does not expose a rolled-back Item id for duplicate facts within one batch', async () => {
+    await withStore(async ({ store }) => {
+      await assert.rejects(
+        store.applyMutations({
+          operationId: 'batch-duplicate-facts',
+          mutations: [
+            { type: 'create', item: write({ content: 'Same batch fact.' }) },
+            { type: 'create', item: write({ content: 'Same batch fact.' }) },
+          ],
+        }),
+        (error: unknown) =>
+          error instanceof MemoryItemStoreConflictError &&
+          error.reason === 'duplicate_within_batch' &&
+          error.itemId === undefined &&
+          error.conflictingItemId === undefined,
+      );
+      assert.equal(await store.readItem('item-1'), undefined);
+      assert.equal(await store.readOperation('batch-duplicate-facts'), undefined);
+    });
+  });
+
   test('keeps updated_at monotonic and replays after the injected clock moves backwards', async () => {
     await withTempRoot(async (root) => {
       const databasePath = join(root, LONG_TERM_MEMORY_DATABASE_NAME);
@@ -513,6 +876,34 @@ describe('SqliteMemoryItemStore', () => {
         assert.equal((await store.readItem('clock-item'))?.item.updatedAt, 1_100);
       } finally {
         store.close();
+      }
+    });
+  });
+
+  test('keeps committed Items and operation receipts after checkpoint and reopen', async () => {
+    await withTempRoot(async (root) => {
+      const databasePath = join(root, LONG_TERM_MEMORY_DATABASE_NAME);
+      const store = new SqliteMemoryItemStore(databasePath, {
+        now: () => 1_000,
+        idFactory: () => 'durable-item',
+      });
+      const receipt = await store.applyMutations({
+        operationId: 'durable-create',
+        mutations: [{ type: 'create', item: write() }],
+      });
+      store.close();
+
+      const Database = loadDatabaseSync();
+      const checkpoint = new Database(databasePath);
+      checkpoint.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      checkpoint.close();
+
+      const reopened = new SqliteMemoryItemStore(databasePath, { now: () => 1_000 });
+      try {
+        assert.equal((await reopened.readItem('durable-item'))?.item.content, write().content);
+        assert.deepEqual(await reopened.readOperation('durable-create'), receipt);
+      } finally {
+        reopened.close();
       }
     });
   });
@@ -589,57 +980,6 @@ describe('SqliteMemoryItemStore', () => {
     }
   });
 
-  test('bounds corrupt Item child reads before checking cardinality', async () => {
-    for (const childTable of ['memory_item_keys', 'memory_item_sources'] as const) {
-      await withTempRoot(async (root) => {
-        const databasePath = join(root, `${childTable}-oversize.sqlite`);
-        const store = new SqliteMemoryItemStore(databasePath, {
-          now: () => 1_000,
-          idFactory: () => 'oversize-child-item',
-        });
-        await createItem(store, `create-${childTable}`, write());
-        store.close();
-
-        const Database = loadDatabaseSync();
-        const database = new Database(databasePath);
-        database.exec('BEGIN');
-        try {
-          if (childTable === 'memory_item_keys') {
-            const insert = database.prepare(
-              `INSERT INTO memory_item_keys(
-                 item_id, key_text, normalized_key, key_type, key_origin
-               ) VALUES ('oversize-child-item', ?, ?, 'exact', 'deterministic')`,
-            );
-            for (let index = 0; index < 32; index += 1) {
-              insert.run(`extra-key-${index}`, `extra-key-${index}`);
-            }
-          } else {
-            const insert = database.prepare(
-              `INSERT INTO memory_item_sources(item_id, session_id, run_id, turn_id, event_id)
-               VALUES ('oversize-child-item', 'session-1', 'run-1', 'turn-1', ?)`,
-            );
-            for (let index = 0; index < 256; index += 1) {
-              insert.run(`extra-event-${index}`);
-            }
-          }
-          database.exec('COMMIT');
-        } catch (error) {
-          database.exec('ROLLBACK');
-          throw error;
-        } finally {
-          database.close();
-        }
-
-        const reopened = new SqliteMemoryItemStore(databasePath);
-        try {
-          await assert.rejects(reopened.readItem('oversize-child-item'), /cardinality/);
-        } finally {
-          reopened.close();
-        }
-      });
-    }
-  });
-
   test('rejects a corrupt idempotency receipt beyond the batch limit', async () => {
     await withStore(async ({ store, databasePath }) => {
       await store.applyMutations({
@@ -701,37 +1041,6 @@ describe('SqliteMemoryItemStore', () => {
         await assert.rejects(reopened.readOperation('huge-receipt'), /too large/);
       } finally {
         reopened.close();
-      }
-    });
-  });
-
-  test('uses the normalized-key index for production exact and prefix queries', async () => {
-    await withStore(async ({ store, databasePath }) => {
-      await createItem(store, 'query-plan', write());
-      store.close();
-      const Database = loadDatabaseSync();
-      const database = new Database(databasePath);
-      try {
-        for (const [match, terms] of [
-          ['exact', ['concise']],
-          ['prefix', ['con']],
-        ] as const) {
-          const query = buildSqliteMemoryKeySearchQuery({
-            terms,
-            match,
-            includeArchived: false,
-            limit: 20,
-          });
-          const plan = database
-            .prepare(`EXPLAIN QUERY PLAN ${query.sql}`)
-            .all(...query.parameters) as Array<{ detail?: unknown }>;
-          assert.match(
-            plan.map((row) => String(row.detail)).join('\n'),
-            /SEARCH memory_item_keys USING (?:COVERING )?INDEX memory_item_keys_by_normalized_key/,
-          );
-        }
-      } finally {
-        database.close();
       }
     });
   });
@@ -1033,6 +1342,122 @@ function startConcurrentMigrationWorker(
       fail(new Error(`Concurrent migration worker exited with code ${code}`));
     } else if (!resultSettled) {
       fail(new Error('Concurrent migration worker exited before returning a result'));
+    }
+  });
+
+  return { ready, result };
+}
+
+function startConcurrentUpdateWorker(
+  databasePath: string,
+  moduleUrl: string,
+  gate: SharedArrayBuffer,
+  operationId: string,
+  item: MemoryItemWrite,
+): {
+  readonly ready: Promise<void>;
+  readonly result: Promise<'updated' | 'version_conflict'>;
+} {
+  const worker = new Worker(
+    `
+      const { parentPort, workerData } = require('node:worker_threads');
+      import(workerData.moduleUrl)
+        .then(async ({ SqliteMemoryItemStore }) => {
+          const store = new SqliteMemoryItemStore(workerData.databasePath, { now: () => 1000 });
+          try {
+            const gate = new Int32Array(workerData.gate);
+            parentPort.postMessage({ type: 'ready' });
+            Atomics.wait(gate, 0, 0);
+            try {
+              await store.applyMutations({
+                operationId: workerData.operationId,
+                mutations: [{
+                  type: 'update',
+                  itemId: 'concurrent-item',
+                  expectedVersion: 1,
+                  item: workerData.item,
+                }],
+              });
+              parentPort.postMessage({ type: 'result', outcome: 'updated' });
+            } catch (error) {
+              if (error && error.reason === 'version_conflict') {
+                parentPort.postMessage({ type: 'result', outcome: 'version_conflict' });
+              } else {
+                throw error;
+              }
+            }
+          } finally {
+            store.close();
+          }
+          parentPort.close();
+        })
+        .catch((error) => {
+          parentPort.postMessage({
+            type: 'error',
+            message: error && error.stack ? error.stack : String(error),
+          });
+          parentPort.close();
+        });
+    `,
+    {
+      eval: true,
+      workerData: { databasePath, moduleUrl, gate, operationId, item },
+    },
+  );
+
+  let readyResolved = false;
+  let resultSettled = false;
+  let resolveReady!: () => void;
+  let rejectReady!: (error: Error) => void;
+  let resolveResult!: (outcome: 'updated' | 'version_conflict') => void;
+  let rejectResult!: (error: Error) => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const result = new Promise<'updated' | 'version_conflict'>((resolve, reject) => {
+    resolveResult = resolve;
+    rejectResult = reject;
+  });
+  const fail = (error: Error): void => {
+    if (!readyResolved) rejectReady(error);
+    if (!resultSettled) {
+      resultSettled = true;
+      rejectResult(error);
+    }
+  };
+
+  worker.on('message', (message: unknown) => {
+    if (!message || typeof message !== 'object') {
+      fail(new Error('Concurrent update worker returned an invalid message'));
+      return;
+    }
+    const payload = message as { type?: unknown; outcome?: unknown; message?: unknown };
+    if (payload.type === 'ready') {
+      readyResolved = true;
+      resolveReady();
+      return;
+    }
+    if (
+      payload.type === 'result' &&
+      (payload.outcome === 'updated' || payload.outcome === 'version_conflict')
+    ) {
+      resultSettled = true;
+      resolveResult(payload.outcome);
+      return;
+    }
+    if (payload.type === 'error') {
+      fail(new Error(String(payload.message)));
+      return;
+    }
+    fail(new Error('Concurrent update worker returned an invalid message'));
+  });
+  worker.on('error', (error) => fail(error instanceof Error ? error : new Error(String(error))));
+  worker.on('exit', (code) => {
+    if (code !== 0) {
+      fail(new Error(`Concurrent update worker exited with code ${code}`));
+    } else if (!resultSettled) {
+      fail(new Error('Concurrent update worker exited before returning a result'));
     }
   });
 

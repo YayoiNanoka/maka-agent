@@ -56,7 +56,8 @@ export type SqliteMemoryItemStoreFailpoint =
   | 'after_item_write'
   | 'after_keys_write'
   | 'after_sources_write'
-  | 'before_operation_write';
+  | 'before_operation_write'
+  | 'after_commit';
 
 export interface SqliteMemoryItemStoreOptions {
   readonly now?: () => number;
@@ -210,8 +211,11 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       validateObservedAtForCommit(mutations, committedAt);
 
       const results: MemoryMutationResult[] = [];
+      const transientItemIds = new Set<string>();
       for (let index = 0; index < mutations.length; index += 1) {
-        results.push(this.#applyMutation(mutations[index]!, index, committedAt));
+        const result = this.#applyMutation(mutations[index]!, index, committedAt, transientItemIds);
+        results.push(result);
+        if (result.outcome !== 'noop') transientItemIds.add(result.itemId);
       }
 
       this.#options.failpoint?.('before_operation_write');
@@ -223,6 +227,7 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
         )
         .run(operationId, operationType, requestHash, JSON.stringify(results), committedAt);
       this.#database.exec('COMMIT');
+      this.#options.failpoint?.('after_commit');
       return { operationId, operationType, replayed: false, committedAt, results };
     } catch (error) {
       rollback(this.#database);
@@ -296,16 +301,29 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
     mutation: NormalizedMutation,
     mutationIndex: number,
     committedAt: number,
+    transientItemIds: ReadonlySet<string>,
   ): MemoryMutationResult {
     switch (mutation.type) {
       case 'create':
-        return this.#createItem(mutation.item, mutationIndex, committedAt);
+        return this.#createItem(mutation.item, mutationIndex, committedAt, transientItemIds);
       case 'update':
-        return this.#updateItem(mutation, mutationIndex, committedAt);
+        return this.#updateItem(mutation, mutationIndex, committedAt, transientItemIds);
       case 'archive':
-        return this.#changeLifecycle(mutation, mutationIndex, committedAt, 'archived');
+        return this.#changeLifecycle(
+          mutation,
+          mutationIndex,
+          committedAt,
+          'archived',
+          transientItemIds,
+        );
       case 'restore':
-        return this.#changeLifecycle(mutation, mutationIndex, committedAt, 'active');
+        return this.#changeLifecycle(
+          mutation,
+          mutationIndex,
+          committedAt,
+          'active',
+          transientItemIds,
+        );
     }
   }
 
@@ -313,9 +331,12 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
     write: NormalizedMemoryWrite,
     mutationIndex: number,
     committedAt: number,
+    transientItemIds: ReadonlySet<string>,
   ): MemoryMutationResult {
-    const duplicate = this.#findActiveSemanticDuplicate(write);
-    if (duplicate) return mutationResult(mutationIndex, 'create', duplicate, 'existing');
+    const duplicate = this.#findActiveFactDuplicate(write);
+    if (duplicate) {
+      this.#throwDuplicateConflict(duplicate, transientItemIds, undefined, 'Creating this Item');
+    }
 
     const itemId = normalizeIdentifier(
       (this.#options.idFactory ?? randomUUID)(),
@@ -357,15 +378,17 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
     mutation: Extract<NormalizedMutation, { type: 'update' }>,
     mutationIndex: number,
     committedAt: number,
+    transientItemIds: ReadonlySet<string>,
   ): MemoryMutationResult {
     const current = this.#requireVersion(mutation.itemId, mutation.expectedVersion);
     const currentRecord = this.#requireItemRecord(mutation.itemId);
-    const duplicate = this.#findActiveSemanticDuplicate(mutation.item, mutation.itemId);
+    const duplicate = this.#findActiveFactDuplicate(mutation.item, mutation.itemId);
     if (duplicate) {
-      throw new MemoryItemStoreConflictError(
-        'duplicate_active',
-        `Updating Memory Item ${mutation.itemId} would duplicate active Item ${duplicate.itemId}`,
+      this.#throwDuplicateConflict(
+        duplicate,
+        transientItemIds,
         mutation.itemId,
+        `Updating Memory Item ${mutation.itemId}`,
       );
     }
     if (recordMatchesWrite(currentRecord, mutation.item)) {
@@ -417,6 +440,7 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
     mutationIndex: number,
     committedAt: number,
     target: MemoryItem['lifecycleState'],
+    transientItemIds: ReadonlySet<string>,
   ): MemoryMutationResult {
     const current = this.#requireVersion(mutation.itemId, mutation.expectedVersion);
     const expected = target === 'archived' ? 'active' : 'archived';
@@ -428,15 +452,16 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       );
     }
     if (target === 'active') {
-      const duplicate = this.#findActiveSemanticDuplicate(
+      const duplicate = this.#findActiveFactDuplicate(
         writeFromRecord(this.#requireItemRecord(mutation.itemId)),
         mutation.itemId,
       );
       if (duplicate) {
-        throw new MemoryItemStoreConflictError(
-          'duplicate_active',
-          `Restoring Memory Item ${mutation.itemId} would duplicate active Item ${duplicate.itemId}`,
+        this.#throwDuplicateConflict(
+          duplicate,
+          transientItemIds,
           mutation.itemId,
+          `Restoring Memory Item ${mutation.itemId}`,
         );
       }
     }
@@ -478,7 +503,12 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
     return record.item;
   }
 
-  #findActiveSemanticDuplicate(
+  /**
+   * Enforce one active row per exact normalized fact identity.
+   * Evidence and retrieval-key merging remain caller policy: this guard only
+   * reports the conflicting Item so a trusted extraction layer can CAS-update it.
+   */
+  #findActiveFactDuplicate(
     write: NormalizedMemoryWrite,
     excludedItemId?: string,
   ): MemoryItem | undefined {
@@ -500,11 +530,32 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       const itemId = requiredIdentifierString(row.item_id, 'item_id');
       const record = this.#readItemRecord(itemId);
       if (!record) throw new Error(`Memory Item ${itemId} disappeared during duplicate check`);
-      if (itemId !== excludedItemId && semanticItemMatchesWrite(record.item, write)) {
+      if (itemId !== excludedItemId && factIdentityMatchesWrite(record.item, write)) {
         return record.item;
       }
     }
     return undefined;
+  }
+
+  #throwDuplicateConflict(
+    duplicate: MemoryItem,
+    transientItemIds: ReadonlySet<string>,
+    itemId: string | undefined,
+    action: string,
+  ): never {
+    if (transientItemIds.has(duplicate.itemId)) {
+      throw new MemoryItemStoreConflictError(
+        'duplicate_within_batch',
+        `${action} would duplicate a fact changed earlier in the same batch; split or normalize the batch before retrying`,
+        itemId,
+      );
+    }
+    throw new MemoryItemStoreConflictError(
+      'duplicate_active',
+      `${action} would duplicate active Item ${duplicate.itemId}; merge current keys and sources with the new evidence before updating it`,
+      itemId,
+      duplicate.itemId,
+    );
   }
 
   #replaceKeys(itemId: string, keys: readonly MemoryItemKey[]): void {
@@ -918,7 +969,7 @@ function writeFromRecord(record: MemoryItemRecord): NormalizedMemoryWrite {
   };
 }
 
-function semanticItemMatchesWrite(item: MemoryItem, write: NormalizedMemoryWrite): boolean {
+function factIdentityMatchesWrite(item: MemoryItem, write: NormalizedMemoryWrite): boolean {
   return (
     item.content === write.content &&
     item.kind === write.kind &&
@@ -1082,7 +1133,7 @@ function decodeMutationResult(value: unknown, expectedIndex: number): MemoryMuta
     throw invalidColumn('mutationType');
   }
   if (!isMemoryLifecycleState(lifecycleState)) throw invalidColumn('lifecycleState');
-  if (!['created', 'updated', 'archived', 'restored', 'existing', 'noop'].includes(outcome)) {
+  if (!['created', 'updated', 'archived', 'restored', 'noop'].includes(outcome)) {
     throw invalidColumn('outcome');
   }
   return {
@@ -1098,7 +1149,7 @@ function decodeMutationResult(value: unknown, expectedIndex: number): MemoryMuta
 function validateMutationResultOutcome(result: MemoryMutationResult): void {
   const valid =
     (result.mutationType === 'create' &&
-      (result.outcome === 'created' || result.outcome === 'existing') &&
+      result.outcome === 'created' &&
       result.lifecycleState === 'active') ||
     (result.mutationType === 'update' &&
       (result.outcome === 'updated' || result.outcome === 'noop')) ||

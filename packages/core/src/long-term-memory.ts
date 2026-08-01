@@ -53,6 +53,7 @@ const LONG_TERM_MEMORY_ZERO_WIDTH_CHARS = new RegExp(
   `[${String.fromCharCode(0x200b)}-${String.fromCharCode(0x200d)}${String.fromCharCode(0xfeff)}]`,
   'g',
 );
+const LONG_TERM_MEMORY_SURROGATE_CHARS = /\p{Cs}/u;
 
 export interface MemoryItem {
   readonly itemId: string;
@@ -145,13 +146,7 @@ export interface ApplyMemoryMutationsRequest {
   readonly mutations: readonly MemoryItemMutation[];
 }
 
-export type MemoryMutationOutcome =
-  | 'created'
-  | 'updated'
-  | 'archived'
-  | 'restored'
-  | 'existing'
-  | 'noop';
+export type MemoryMutationOutcome = 'created' | 'updated' | 'archived' | 'restored' | 'noop';
 
 export interface MemoryMutationResult {
   readonly mutationIndex: number;
@@ -177,6 +172,7 @@ export interface MemoryItemRecord {
 }
 
 export interface SearchMemoryItemsByKeyRequest {
+  /** Match any distinct term and rank Items by the number of matched terms. */
   readonly terms: readonly string[];
   readonly match: 'exact' | 'prefix';
   /** Omit to search global Items only; provide to include global plus this workspace. */
@@ -196,6 +192,7 @@ export type MemoryItemStoreConflictReason =
   | 'operation_reused'
   | 'version_conflict'
   | 'duplicate_active'
+  | 'duplicate_within_batch'
   | 'item_not_found'
   | 'invalid_lifecycle_transition';
 
@@ -206,6 +203,7 @@ export class MemoryItemStoreConflictError extends Error {
     readonly reason: MemoryItemStoreConflictReason,
     message: string,
     readonly itemId?: string,
+    readonly conflictingItemId?: string,
   ) {
     super(message);
   }
@@ -218,6 +216,12 @@ export function normalizeLongTermMemoryContent(
   | { readonly ok: false; readonly message: string } {
   if (typeof input !== 'string') {
     return { ok: false, message: 'Long-term Memory Item content must be a string' };
+  }
+  if (LONG_TERM_MEMORY_SURROGATE_CHARS.test(input)) {
+    return {
+      ok: false,
+      message: 'Long-term Memory Item content cannot contain unpaired surrogate code points',
+    };
   }
   const value = input
     .normalize('NFC')
