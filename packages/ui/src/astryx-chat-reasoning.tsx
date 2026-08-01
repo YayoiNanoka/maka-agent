@@ -11,6 +11,9 @@
  * invalid dependency tree. DOM, state, keyboard behavior, icons, and compiled
  * StyleX atoms below are the official component; only the build-time StyleX
  * call has already been compiled, matching the published package output.
+ *
+ * Product dialect lives in chat-message.css (cursor default, hover wash,
+ * chevron size). This file keeps the ejected lab DOM/behavior.
  */
 import { useCallback, useState, type HTMLAttributes, type ReactNode } from 'react';
 import { mergeProps, themeProps } from '@astryxdesign/core/utils';
@@ -35,9 +38,17 @@ function ThinkingIcon() {
   );
 }
 
+/** Match Astryx Icon `size="xsm"` (0.75rem) used by ChatToolCalls chevrons. */
 function ChevronDownIcon() {
   return (
-    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      fill="none"
+      aria-hidden="true"
+      style={{ width: '0.75rem', height: '0.75rem' }}
+    >
       <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
@@ -121,8 +132,9 @@ export function ChatReasoning(props: ChatReasoningProps) {
         <span
           className={
             isExpanded
-              ? 'x3nfvp2 x6s0dn4 xl56j7k x2lah0s x6jxa94 x1v9usgg xnbbluu x1ob6yzd x19jd1h0'
-              : 'x3nfvp2 x6s0dn4 xl56j7k x2lah0s x6jxa94 x1v9usgg xnbbluu x1ob6yzd'
+              // xvc5jky = margin-inline-start:auto (ChatToolCalls callDetailChevron)
+              ? 'x3nfvp2 x6s0dn4 xl56j7k x2lah0s x6jxa94 x1v9usgg xnbbluu x1ob6yzd x19jd1h0 xvc5jky'
+              : 'x3nfvp2 x6s0dn4 xl56j7k x2lah0s x6jxa94 x1v9usgg xnbbluu x1ob6yzd xvc5jky'
           }
         >
           <ChevronDownIcon />

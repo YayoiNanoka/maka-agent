@@ -38,6 +38,7 @@ import type { RuntimeHostComposition, RuntimeHostCompositionContext } from './ho
 import { HostInteractionCoordinator } from './interaction-coordinator.js';
 import { HostMemoryCoordinator } from './memory-coordinator.js';
 import { type HostMessageRootPort, HostMessageCoordinator } from './message-coordinator.js';
+import { HostOAuthExecutionAuthority } from './oauth-execution-authority.js';
 import type { DomainOperationHandlerMap } from './operation-dispatcher.js';
 import { RootAdmissionOwner } from './root-admission-owner.js';
 import { RootTurnCoordinator } from './root-turn-coordinator.js';
@@ -69,6 +70,7 @@ export async function createExecutionRuntimeHostComposition(
     const runtimePolicyStores = await openInteractiveRuntimePolicyStoresForWrite(
       context.owner.lease,
     );
+    const oauthCredentials = new HostOAuthExecutionAuthority(runtimePolicyStores);
     const memoryStore = await openInteractiveMemoryBundleStoreForWrite(context.owner.lease);
     longTermMemoryStore = await openInteractiveLongTermMemoryStoreForWrite(context.owner.lease);
     taskLedgerStore = await openInteractiveTaskLedgerStoreForWrite(context.owner.lease);
@@ -213,6 +215,8 @@ export async function createExecutionRuntimeHostComposition(
       createHostAiSdkBackend({
         context: backendContext,
         runtimePolicy: runtimePolicyStores,
+        oauthCredentials,
+        claudeDeviceId: context.owner.capability.rootId,
         skills,
         memory: requireMemory(memory),
         taskLedger,
