@@ -14,6 +14,7 @@
     "./interaction-store": "./dist/interaction-store.js",
     "./legacy-execution-test-support": "./dist/legacy-execution-test-support.js",
     "./memory-bundle-store": "./dist/memory-bundle-store.js",
+    "./long-term-memory-store": "./dist/long-term-memory-store.js",
     "./root-authority": "./dist/root-authority.js",
     "./runtime-policy-stores": "./dist/runtime-policy-stores.js",
     "./shell-run-authority": "./dist/shell-run-authority.js",

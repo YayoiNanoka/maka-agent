@@ -19,6 +19,8 @@ const rawStorageWriterFactories = [
   'createRuntimeEventStore',
   'createSessionStore',
   'openHeadlessArtifactStoreForWrite',
+  'openHeadlessLongTermMemoryStoreForWrite',
+  'openInteractiveLongTermMemoryStoreForWrite',
 ] as const;
 const compilerApi = new API({ cwd: process.cwd() });
 const projectConfig = join(process.cwd(), 'tsconfig.json');
@@ -87,6 +89,19 @@ function forbiddenWriterSymbols(importer: string, reference: ModuleReference): s
     if (reference.importedNames === null) return ['writer opener'];
     return reference.importedNames.filter((name) => /^open[A-Za-z0-9]*ForWrite$/.test(name));
   }
+  if (reference.specifier === '@maka/storage/long-term-memory-store') {
+    if (reference.importedNames === null) {
+      return [
+        'openHeadlessLongTermMemoryStoreForWrite',
+        'openInteractiveLongTermMemoryStoreForWrite',
+      ];
+    }
+    return reference.importedNames.filter(
+      (name) =>
+        name === 'openHeadlessLongTermMemoryStoreForWrite' ||
+        name === 'openInteractiveLongTermMemoryStoreForWrite',
+    );
+  }
   if (
     reference.specifier.startsWith('.') &&
     sourcePathForSpecifier(importer, reference.specifier) === taskRunStoreModule &&
@@ -97,6 +112,16 @@ function forbiddenWriterSymbols(importer: string, reference: ModuleReference): s
   }
   return [];
 }
+
+test('the boundary recognizes long-term memory writer subpaths', () => {
+  assert.deepEqual(
+    forbiddenWriterSymbols(storageCompositionModule, {
+      specifier: '@maka/storage/long-term-memory-store',
+      importedNames: ['openHeadlessLongTermMemoryStoreForWrite'],
+    }),
+    ['openHeadlessLongTermMemoryStoreForWrite'],
+  );
+});
 
 async function listProductionTypeScriptFiles(root: string): Promise<string[]> {
   const files: string[] = [];

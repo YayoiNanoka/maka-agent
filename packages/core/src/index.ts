@@ -1162,6 +1162,9 @@ export {
   validateMemoryWriteRequest,
 } from './memory.js';
 
+// long-term-memory.ts — atomic SQLite-backed memory contracts; no storage/runtime/UI.
+export * from './long-term-memory.js';
+
 // local-memory.ts — transparent user-visible MEMORY.md MVP.
 export type {
   LocalMemoryEntryStatus,
