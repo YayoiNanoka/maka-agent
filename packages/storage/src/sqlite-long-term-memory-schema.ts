@@ -115,9 +115,86 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
   ],
 ]);
 
+interface MinimumTableShape {
+  readonly name: string;
+  readonly requiredColumns: readonly string[];
+}
+
+interface MinimumIndexShape {
+  readonly name: string;
+  readonly tableName: string;
+  readonly requiredColumnPrefix: readonly string[];
+}
+
+interface MinimumSchemaShape {
+  readonly tables: readonly MinimumTableShape[];
+  readonly indexes: readonly MinimumIndexShape[];
+}
+
+// Each entry describes the complete minimum shape required by that schema version. Extra
+// columns and indexes are allowed so additive migrations do not fail exact-DDL validation.
+const MINIMUM_SCHEMA_SHAPES: ReadonlyMap<number, MinimumSchemaShape> = new Map([
+  [
+    1,
+    {
+      tables: [
+        {
+          name: 'memory_items',
+          requiredColumns: [
+            'item_id',
+            'version',
+            'content',
+            'kind',
+            'statement_type',
+            'temporal_type',
+            'scope_type',
+            'scope_key',
+            'event_started_at',
+            'event_ended_at',
+            'observed_at',
+            'lifecycle_state',
+            'origin',
+            'content_hash',
+            'created_at',
+            'updated_at',
+          ],
+        },
+        {
+          name: 'memory_item_keys',
+          requiredColumns: ['item_id', 'key_text', 'normalized_key', 'key_type', 'key_origin'],
+        },
+        {
+          name: 'memory_item_sources',
+          requiredColumns: ['item_id', 'session_id', 'run_id', 'turn_id', 'event_id'],
+        },
+        {
+          name: 'memory_write_operations',
+          requiredColumns: [
+            'operation_id',
+            'operation_type',
+            'request_hash',
+            'result_json',
+            'committed_at',
+          ],
+        },
+      ],
+      indexes: [
+        {
+          name: 'memory_item_keys_by_normalized_key',
+          tableName: 'memory_item_keys',
+          requiredColumnPrefix: ['normalized_key', 'item_id'],
+        },
+      ],
+    },
+  ],
+]);
+
 for (let version = 1; version <= SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION; version += 1) {
   if (!MIGRATIONS.has(version)) {
     throw new Error(`Missing long-term memory SQLite migration ${version}`);
+  }
+  if (!MINIMUM_SCHEMA_SHAPES.has(version)) {
+    throw new Error(`Missing long-term memory SQLite minimum schema shape ${version}`);
   }
 }
 
@@ -136,7 +213,10 @@ export function migrateSqliteLongTermMemoryDatabase(
   if (observedVersion > SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION) {
     throw newerSchemaError(observedVersion);
   }
-  if (observedVersion === SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION) return;
+  if (observedVersion === SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION) {
+    validateMinimumSchemaShape(db, observedVersion);
+    return;
+  }
 
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -153,6 +233,7 @@ export function migrateSqliteLongTermMemoryDatabase(
       options.failpoint?.('after_schema_sql');
       db.exec(`PRAGMA user_version = ${version}`);
     }
+    validateMinimumSchemaShape(db, SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION);
     db.exec('COMMIT');
   } catch (error) {
     rollback(db);
@@ -241,6 +322,71 @@ function newerSchemaError(version: number): Error {
   return new Error(
     `Long-term memory SQLite schema ${version} is newer than supported version ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`,
   );
+}
+
+function validateMinimumSchemaShape(db: DatabaseSync, version: number): void {
+  const shape = MINIMUM_SCHEMA_SHAPES.get(version);
+  if (!shape) {
+    throw new Error(`Missing long-term memory SQLite minimum schema shape ${version}`);
+  }
+
+  const readSchemaObject = db.prepare('SELECT type, tbl_name FROM sqlite_schema WHERE name = ?');
+  for (const table of shape.tables) {
+    const object = readSchemaObject.get(table.name) as
+      | { type?: unknown; tbl_name?: unknown }
+      | undefined;
+    if (object?.type !== 'table' || object.tbl_name !== table.name) {
+      throw incompleteSchemaError(`missing required table ${table.name}`);
+    }
+
+    const columns = new Set(
+      (
+        db.prepare(`PRAGMA table_info(${quoteSqliteIdentifier(table.name)})`).all() as Array<{
+          name?: unknown;
+        }>
+      )
+        .map((row) => row.name)
+        .filter((name): name is string => typeof name === 'string'),
+    );
+    for (const column of table.requiredColumns) {
+      if (!columns.has(column)) {
+        throw incompleteSchemaError(`table ${table.name} is missing required column ${column}`);
+      }
+    }
+  }
+
+  for (const index of shape.indexes) {
+    const object = readSchemaObject.get(index.name) as
+      | { type?: unknown; tbl_name?: unknown }
+      | undefined;
+    if (object?.type !== 'index' || object.tbl_name !== index.tableName) {
+      throw incompleteSchemaError(`missing required index ${index.name}`);
+    }
+
+    const columns = (
+      db.prepare(`PRAGMA index_info(${quoteSqliteIdentifier(index.name)})`).all() as Array<{
+        seqno?: unknown;
+        name?: unknown;
+      }>
+    )
+      .filter(
+        (row): row is { seqno: number; name: string } =>
+          typeof row.seqno === 'number' && typeof row.name === 'string',
+      )
+      .sort((left, right) => left.seqno - right.seqno)
+      .map((row) => row.name);
+    if (index.requiredColumnPrefix.some((column, position) => columns[position] !== column)) {
+      throw incompleteSchemaError(`required index ${index.name} has incompatible columns`);
+    }
+  }
+}
+
+function quoteSqliteIdentifier(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+function incompleteSchemaError(detail: string): Error {
+  return new Error(`Incomplete long-term memory SQLite schema: ${detail}`);
 }
 
 function rollback(db: DatabaseSync): void {

@@ -98,6 +98,50 @@ describe('SqliteMemoryItemStore', () => {
     });
   });
 
+  test('rejects current-version databases with missing required tables or columns', async () => {
+    await withTempRoot(async (root) => {
+      const Database = loadDatabaseSync();
+      const missingTablePath = join(root, 'missing-table.sqlite');
+      const missingTable = new Database(missingTablePath);
+      missingTable.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
+      missingTable.close();
+      assert.throws(
+        () => new SqliteMemoryItemStore(missingTablePath),
+        /missing required table memory_items/,
+      );
+
+      const missingColumnPath = join(root, 'missing-column.sqlite');
+      const missingColumn = new Database(missingColumnPath);
+      missingColumn.exec(`
+        CREATE TABLE memory_items (item_id TEXT PRIMARY KEY);
+        PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION};
+      `);
+      missingColumn.close();
+      assert.throws(
+        () => new SqliteMemoryItemStore(missingColumnPath),
+        /memory_items is missing required column version/,
+      );
+    });
+  });
+
+  test('rejects a current-version database with a missing query-required index', async () => {
+    await withTempRoot(async (root) => {
+      const databasePath = join(root, 'missing-index.sqlite');
+      const store = new SqliteMemoryItemStore(databasePath);
+      store.close();
+
+      const Database = loadDatabaseSync();
+      const database = new Database(databasePath);
+      database.exec('DROP INDEX memory_item_keys_by_normalized_key');
+      database.close();
+
+      assert.throws(
+        () => new SqliteMemoryItemStore(databasePath),
+        /missing required index memory_item_keys_by_normalized_key/,
+      );
+    });
+  });
+
   test('serializes truly concurrent first-open migrations', async () => {
     await withTempRoot(async (root) => {
       const databasePath = join(root, 'concurrent.sqlite');
@@ -471,7 +515,7 @@ describe('SqliteMemoryItemStore', () => {
     });
   });
 
-  test('rejects an archived update or restore that collides with an active Item', async () => {
+  test('allows an archived no-op but rejects archived changes or restore that collide', async () => {
     await withStore(async ({ store }) => {
       const archivedId = await createItem(store, 'archived-create', write());
       await store.applyMutations({
@@ -481,10 +525,26 @@ describe('SqliteMemoryItemStore', () => {
       const activeId = await createItem(store, 'active-replacement', write());
       assert.notEqual(activeId, archivedId);
 
+      const noop = await store.applyMutations({
+        operationId: 'archived-noop',
+        mutations: [{ type: 'update', itemId: archivedId, expectedVersion: 2, item: write() }],
+      });
+      assert.equal(noop.results[0]?.outcome, 'noop');
+      assert.equal(noop.results[0]?.version, 2);
+      assert.equal(noop.results[0]?.lifecycleState, 'archived');
+      assert.ok(await store.readOperation('archived-noop'));
+
       await assert.rejects(
         store.applyMutations({
           operationId: 'archived-update-collision',
-          mutations: [{ type: 'update', itemId: archivedId, expectedVersion: 2, item: write() }],
+          mutations: [
+            {
+              type: 'update',
+              itemId: archivedId,
+              expectedVersion: 2,
+              item: write({ sources: [source({ eventId: 'event-new-evidence' })] }),
+            },
+          ],
         }),
         conflict('duplicate_active'),
       );

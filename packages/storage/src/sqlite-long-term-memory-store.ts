@@ -383,6 +383,9 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
   ): MemoryMutationResult {
     const current = this.#requireVersion(mutation.itemId, mutation.expectedVersion);
     const currentRecord = this.#requireItemRecord(mutation.itemId);
+    if (recordMatchesWrite(currentRecord, mutation.item)) {
+      return mutationResult(mutationIndex, 'update', current, 'noop');
+    }
     const duplicate = this.#findActiveFactDuplicate(mutation.item, mutation.itemId);
     if (duplicate) {
       this.#throwDuplicateConflict(
@@ -391,9 +394,6 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
         mutation.itemId,
         `Updating Memory Item ${mutation.itemId}`,
       );
-    }
-    if (recordMatchesWrite(currentRecord, mutation.item)) {
-      return mutationResult(mutationIndex, 'update', current, 'noop');
     }
 
     const updatedAt = Math.max(committedAt, current.updatedAt);
