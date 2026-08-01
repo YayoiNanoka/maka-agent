@@ -19,7 +19,6 @@ const rawStorageWriterFactories = [
   'createRuntimeEventStore',
   'createSessionStore',
   'openHeadlessArtifactStoreForWrite',
-  'openHeadlessLongTermMemoryStoreForWrite',
   'openInteractiveLongTermMemoryStoreForWrite',
 ] as const;
 const compilerApi = new API({ cwd: process.cwd() });
@@ -90,16 +89,9 @@ function forbiddenWriterSymbols(importer: string, reference: ModuleReference): s
     return reference.importedNames.filter((name) => /^open[A-Za-z0-9]*ForWrite$/.test(name));
   }
   if (reference.specifier === '@maka/storage/long-term-memory-store') {
-    if (reference.importedNames === null) {
-      return [
-        'openHeadlessLongTermMemoryStoreForWrite',
-        'openInteractiveLongTermMemoryStoreForWrite',
-      ];
-    }
+    if (reference.importedNames === null) return ['openInteractiveLongTermMemoryStoreForWrite'];
     return reference.importedNames.filter(
-      (name) =>
-        name === 'openHeadlessLongTermMemoryStoreForWrite' ||
-        name === 'openInteractiveLongTermMemoryStoreForWrite',
+      (name) => name === 'openInteractiveLongTermMemoryStoreForWrite',
     );
   }
   if (
@@ -113,13 +105,13 @@ function forbiddenWriterSymbols(importer: string, reference: ModuleReference): s
   return [];
 }
 
-test('the boundary recognizes long-term memory writer subpaths', () => {
+test('the boundary recognizes the Interactive long-term memory writer subpath', () => {
   assert.deepEqual(
     forbiddenWriterSymbols(storageCompositionModule, {
       specifier: '@maka/storage/long-term-memory-store',
-      importedNames: ['openHeadlessLongTermMemoryStoreForWrite'],
+      importedNames: ['openInteractiveLongTermMemoryStoreForWrite'],
     }),
-    ['openHeadlessLongTermMemoryStoreForWrite'],
+    ['openInteractiveLongTermMemoryStoreForWrite'],
   );
 });
 

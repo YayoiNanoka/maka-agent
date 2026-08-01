@@ -20,6 +20,7 @@ import {
   isMemoryStatementType,
   isMemoryTemporalType,
   normalizeLongTermMemoryContent,
+  validateMemoryTemporalBounds,
   type ApplyMemoryMutationsRequest,
   type MemoryItem,
   type MemoryItemKey,
@@ -769,7 +770,11 @@ function normalizeWrite(input: MemoryItemWrite): NormalizedMemoryWrite {
   const scopeKey = normalizeScopeKey(input.scopeType, input.scopeKey);
   const eventStartedAt = normalizeOptionalTimestamp(input.eventStartedAt, 'eventStartedAt');
   const eventEndedAt = normalizeOptionalTimestamp(input.eventEndedAt, 'eventEndedAt');
-  validateTemporalBounds(input.temporalType, eventStartedAt, eventEndedAt);
+  validateMemoryTemporalBounds({
+    temporalType: input.temporalType,
+    eventStartedAt,
+    eventEndedAt,
+  });
   const observedAt = normalizeTimestamp(input.observedAt, 'observedAt');
   return {
     content: content.value,
@@ -916,31 +921,6 @@ function normalizeOptionalTimestamp(value: unknown, name: string): number | null
   return normalizeTimestamp(value, name);
 }
 
-function validateTemporalBounds(
-  temporalType: MemoryItem['temporalType'],
-  startedAt: number | null,
-  endedAt: number | null,
-): void {
-  if (temporalType === 'undated' && (startedAt !== null || endedAt !== null)) {
-    throw new Error('Undated Memory Item cannot have event bounds');
-  }
-  if (
-    temporalType === 'point' &&
-    (startedAt === null || (endedAt !== null && endedAt <= startedAt))
-  ) {
-    throw new Error('Point Memory Item requires a start and an optional later end bound');
-  }
-  if (
-    temporalType === 'interval' &&
-    (startedAt === null || endedAt === null || endedAt <= startedAt)
-  ) {
-    throw new Error('Interval Memory Item requires increasing start and end bounds');
-  }
-  if (temporalType === 'open_ended' && (startedAt === null || endedAt !== null)) {
-    throw new Error('Open-ended Memory Item requires only a start bound');
-  }
-}
-
 function keyPriority(key: MemoryItemKey): number {
   const origin = { user: 3, deterministic: 2, llm: 1 } as const;
   const type = { code: 5, exact: 4, entity: 3, concept: 2, alias: 1 } as const;
@@ -1029,7 +1009,7 @@ function decodeItem(row: MemoryItemRow): MemoryItem {
   ) {
     throw invalidColumn('scope_key');
   }
-  validateTemporalBounds(temporalType, eventStartedAt, eventEndedAt);
+  validateMemoryTemporalBounds({ temporalType, eventStartedAt, eventEndedAt });
   if (createdAt > updatedAt || observedAt > updatedAt) throw invalidColumn('timestamps');
   if (hashText(content) !== contentHash) throw invalidColumn('content_hash');
   return {
@@ -1257,16 +1237,16 @@ function compareText(left: string, right: string): number {
 }
 
 function preparePrivateDatabaseFiles(path: string): void {
-  secureFile(path, true);
-  for (const sidecar of databaseSidecars(path)) secureFile(sidecar, false);
+  secureFile(path, true, false);
+  for (const sidecar of databaseSidecars(path)) secureFile(sidecar, false, true);
 }
 
 function secureExistingDatabaseFiles(path: string): void {
-  secureFile(path, false);
-  for (const sidecar of databaseSidecars(path)) secureFile(sidecar, false);
+  secureFile(path, false, false);
+  for (const sidecar of databaseSidecars(path)) secureFile(sidecar, false, true);
 }
 
-function secureFile(path: string, create: boolean): void {
+function secureFile(path: string, create: boolean, allowUnlinked: boolean): void {
   try {
     if (lstatSync(path).isSymbolicLink()) {
       throw new Error(`Long-term memory SQLite path must not be a symbolic link: ${path}`);
@@ -1286,6 +1266,7 @@ function secureFile(path: string, create: boolean): void {
     if (!status.isFile()) {
       throw new Error(`Long-term memory SQLite path is not a regular file: ${path}`);
     }
+    if (status.nlink === 0 && allowUnlinked) return;
     if (status.nlink !== 1) {
       throw new Error(`Long-term memory SQLite path must not be hard-linked: ${path}`);
     }

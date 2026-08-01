@@ -18,8 +18,8 @@ import {
 } from '@maka/storage/artifact-stores';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
 import {
+  type InteractiveLongTermMemoryWriter,
   openInteractiveLongTermMemoryStoreForWrite,
-  type LongTermMemoryStoreWriter,
 } from '@maka/storage/long-term-memory-store';
 import { openInteractiveMemoryBundleStoreForWrite } from '@maka/storage/memory-bundle-store';
 import { runWithStorageRootLease } from '@maka/storage/root-authority';
@@ -65,7 +65,7 @@ export async function createExecutionRuntimeHostComposition(
   let usageStores: Awaited<ReturnType<typeof openInteractiveUsageStoresForWrite>> | undefined;
   let artifactStore: Awaited<ReturnType<typeof openInteractiveArtifactStoreForWrite>> | undefined;
   let shellRunStore: Awaited<ReturnType<typeof openInteractiveShellRunStoreForWrite>> | undefined;
-  let longTermMemoryStore: LongTermMemoryStoreWriter<'interactive'> | undefined;
+  let longTermMemoryStore: InteractiveLongTermMemoryWriter | undefined;
   try {
     const runtimePolicyStores = await openInteractiveRuntimePolicyStoresForWrite(
       context.owner.lease,

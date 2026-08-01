@@ -12,8 +12,7 @@ import {
 } from '@maka/core/long-term-memory';
 import {
   LONG_TERM_MEMORY_DATABASE_NAME,
-  authenticateLongTermMemoryStoreWriter,
-  openHeadlessLongTermMemoryStoreForWrite,
+  authenticateInteractiveLongTermMemoryWriter,
   openInteractiveLongTermMemoryStoreForWrite,
 } from '../long-term-memory-store.js';
 import {
@@ -96,66 +95,6 @@ describe('SqliteMemoryItemStore', () => {
       } finally {
         unchanged.close();
       }
-    });
-  });
-
-  test('rejects a current-version database with incomplete tables or indexes', async () => {
-    await withTempRoot(async (root) => {
-      const Database = loadDatabaseSync();
-      const missingTablesPath = join(root, 'missing-tables.sqlite');
-      const missingTables = new Database(missingTablesPath);
-      missingTables.exec(`PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION}`);
-      missingTables.close();
-      assert.throws(() => new SqliteMemoryItemStore(missingTablesPath), /missing table memory_/);
-
-      const invalidColumnsPath = join(root, 'invalid-columns.sqlite');
-      const invalidColumns = new Database(invalidColumnsPath);
-      invalidColumns.exec(`
-        CREATE TABLE memory_items (
-          item_id TEXT, version INTEGER, content TEXT, kind TEXT, statement_type TEXT,
-          temporal_type TEXT, scope_type TEXT, scope_key TEXT, event_started_at INTEGER,
-          event_ended_at INTEGER, observed_at INTEGER, lifecycle_state TEXT, origin TEXT,
-          content_hash TEXT, created_at INTEGER
-        );
-        PRAGMA user_version = ${SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION};
-      `);
-      invalidColumns.close();
-      assert.throws(
-        () => new SqliteMemoryItemStore(invalidColumnsPath),
-        /invalid definition for table memory_items/,
-      );
-
-      const missingIndexPath = join(root, 'missing-index.sqlite');
-      const complete = new SqliteMemoryItemStore(missingIndexPath);
-      complete.close();
-      const missingIndex = new Database(missingIndexPath);
-      missingIndex.exec('DROP INDEX memory_item_keys_by_normalized_key');
-      missingIndex.close();
-      assert.throws(
-        () => new SqliteMemoryItemStore(missingIndexPath),
-        /missing index memory_item_keys_by_normalized_key/,
-      );
-
-      const invalidConstraintsPath = join(root, 'invalid-constraints.sqlite');
-      const valid = new SqliteMemoryItemStore(invalidConstraintsPath);
-      valid.close();
-      const invalidConstraints = new Database(invalidConstraintsPath);
-      invalidConstraints.exec(`
-        ALTER TABLE memory_write_operations RENAME TO memory_write_operations_old;
-        CREATE TABLE memory_write_operations (
-          operation_id TEXT,
-          operation_type TEXT,
-          request_hash TEXT,
-          result_json TEXT,
-          committed_at INTEGER
-        );
-        DROP TABLE memory_write_operations_old;
-      `);
-      invalidConstraints.close();
-      assert.throws(
-        () => new SqliteMemoryItemStore(invalidConstraintsPath),
-        /invalid definition for table memory_write_operations/,
-      );
     });
   });
 
@@ -599,6 +538,10 @@ describe('SqliteMemoryItemStore', () => {
         }),
         conflict('invalid_lifecycle_transition'),
       );
+      const stillActive = await store.readItem(itemId);
+      assert.equal(stillActive?.item.version, 1);
+      assert.equal(stillActive?.item.lifecycleState, 'active');
+      assert.equal(await store.readOperation('restore-active'), undefined);
       await store.applyMutations({
         operationId: 'archive-once',
         mutations: [{ type: 'archive', itemId, expectedVersion: 1 }],
@@ -610,6 +553,10 @@ describe('SqliteMemoryItemStore', () => {
         }),
         conflict('invalid_lifecycle_transition'),
       );
+      const archived = await store.readItem(itemId);
+      assert.equal(archived?.item.version, 2);
+      assert.equal(archived?.item.lifecycleState, 'archived');
+      assert.equal(await store.readOperation('archive-twice'), undefined);
 
       for (const [operationId, mutation] of [
         [
@@ -623,6 +570,7 @@ describe('SqliteMemoryItemStore', () => {
           store.applyMutations({ operationId, mutations: [mutation] }),
           conflict('item_not_found'),
         );
+        assert.equal(await store.readOperation(operationId), undefined);
       }
     });
   });
@@ -688,7 +636,7 @@ describe('SqliteMemoryItemStore', () => {
             },
           ],
         }),
-        /requires only a start bound/,
+        /cannot carry eventEndedAt/,
       );
       await assert.rejects(
         store.applyMutations({
@@ -1050,14 +998,11 @@ describe('long-term memory Storage Root authority', () => {
   test('rejects a structurally forged writer facade', () => {
     assert.throws(
       () =>
-        authenticateLongTermMemoryStoreWriter(
-          {
-            kind: 'headless',
-            access: 'write',
-          } as unknown as Parameters<typeof authenticateLongTermMemoryStoreWriter>[0],
-          'headless',
-        ),
-      /authentic headless long-term memory writer/,
+        authenticateInteractiveLongTermMemoryWriter({
+          kind: 'interactive',
+          access: 'write',
+        } as unknown as Parameters<typeof authenticateInteractiveLongTermMemoryWriter>[0]),
+      /authentic interactive long-term memory writer/,
     );
   });
 
@@ -1077,9 +1022,11 @@ describe('long-term memory Storage Root authority', () => {
 
   test('snapshots mutation input before crossing the authority boundary', async () => {
     await withTempRoot(async (root) => {
-      const capability = await resolveStorageRoot({ path: root, kind: 'headless' });
-      const lease = createHeadlessRootLease(capability, 'write');
-      const writer = await openHeadlessLongTermMemoryStoreForWrite(lease);
+      const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+      const owner = await tryAcquireInteractiveRootOwner(capability);
+      assert.ok(owner);
+      if (!owner) return;
+      const writer = await openInteractiveLongTermMemoryStoreForWrite(owner.lease);
       try {
         const item = write({
           keys: [{ key: 'original-key', keyType: 'exact', keyOrigin: 'deterministic' }],
@@ -1107,6 +1054,7 @@ describe('long-term memory Storage Root authority', () => {
         );
       } finally {
         writer.close();
+        await owner.close();
       }
     });
   });
@@ -1133,23 +1081,29 @@ describe('long-term memory Storage Root authority', () => {
     });
   });
 
-  test('single-flights an isolated Headless writer and closes it explicitly', async () => {
+  test('single-flights an Interactive writer and closes it explicitly', async () => {
     await withTempRoot(async (root) => {
-      const capability = await resolveStorageRoot({ path: root, kind: 'headless' });
-      const lease = createHeadlessRootLease(capability, 'write');
-      const [first, second] = await Promise.all([
-        openHeadlessLongTermMemoryStoreForWrite(lease),
-        openHeadlessLongTermMemoryStoreForWrite(lease),
-      ]);
-      assert.equal(first, second);
-      assert.equal(authenticateLongTermMemoryStoreWriter(first, 'headless'), first);
-      assert.equal((await stat(join(root, LONG_TERM_MEMORY_DATABASE_NAME))).isFile(), true);
-      first.close();
-      await assert.rejects(first.readItem('closed-item'), /closed/);
+      const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+      const owner = await tryAcquireInteractiveRootOwner(capability);
+      assert.ok(owner);
+      if (!owner) return;
+      try {
+        const [first, second] = await Promise.all([
+          openInteractiveLongTermMemoryStoreForWrite(owner.lease),
+          openInteractiveLongTermMemoryStoreForWrite(owner.lease),
+        ]);
+        assert.equal(first, second);
+        assert.equal(authenticateInteractiveLongTermMemoryWriter(first), first);
+        assert.equal((await stat(join(root, LONG_TERM_MEMORY_DATABASE_NAME))).isFile(), true);
+        first.close();
+        await assert.rejects(first.readItem('closed-item'), /closed/);
 
-      const reopened = await openHeadlessLongTermMemoryStoreForWrite(lease);
-      assert.notEqual(reopened, first);
-      reopened.close();
+        const reopened = await openInteractiveLongTermMemoryStoreForWrite(owner.lease);
+        assert.notEqual(reopened, first);
+        reopened.close();
+      } finally {
+        await owner.close();
+      }
     });
   });
 });

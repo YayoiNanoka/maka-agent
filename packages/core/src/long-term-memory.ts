@@ -41,8 +41,6 @@ export const MEMORY_MUTATION_TYPES = ['create', 'update', 'archive', 'restore'] 
 export type MemoryMutationType = (typeof MEMORY_MUTATION_TYPES)[number];
 export type MemoryWriteOperationType = MemoryMutationType | 'batch';
 
-export type MemoryTemporalStatus = 'timeless' | 'upcoming' | 'ongoing' | 'elapsed';
-
 export const LONG_TERM_MEMORY_CONTENT_MAX_CODE_POINTS = 2_000;
 
 const LONG_TERM_MEMORY_CONTROL_CHARS = new RegExp(
@@ -240,17 +238,10 @@ export function normalizeLongTermMemoryContent(
   return { ok: true, value };
 }
 
-/**
- * Derive relative time at read time without mutating the stored fact.
- * `elapsed` for a plan or prediction means only that its target time passed.
- */
-export function deriveMemoryTemporalStatus(
+/** Validate the stored event bounds without deriving a relative status. */
+export function validateMemoryTemporalBounds(
   item: Pick<MemoryItem, 'temporalType' | 'eventStartedAt' | 'eventEndedAt'>,
-  now: number,
-): MemoryTemporalStatus {
-  if (!Number.isSafeInteger(now) || now < 0) {
-    throw new Error('Memory temporal status requires a non-negative UTC millisecond timestamp');
-  }
+): void {
   if (!isMemoryTemporalType(item.temporalType)) {
     throw new Error('Memory Item has invalid temporalType');
   }
@@ -258,7 +249,7 @@ export function deriveMemoryTemporalStatus(
     if (item.eventStartedAt !== null || item.eventEndedAt !== null) {
       throw new Error('Undated Memory Item cannot carry event bounds');
     }
-    return 'timeless';
+    return;
   }
   const start = item.eventStartedAt;
   if (!isTimestamp(start)) throw new Error('Dated Memory Item has invalid eventStartedAt');
@@ -272,10 +263,6 @@ export function deriveMemoryTemporalStatus(
   if (item.temporalType === 'open_ended' && end !== null) {
     throw new Error('Open-ended Memory Item cannot carry eventEndedAt');
   }
-  if (now < start) return 'upcoming';
-  if (item.temporalType === 'open_ended') return 'ongoing';
-  if (end !== null && now < end) return 'ongoing';
-  return 'elapsed';
 }
 
 export function isMemoryItemKind(value: unknown): value is MemoryItemKind {
