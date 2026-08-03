@@ -1672,6 +1672,7 @@ export class RootTurnCoordinator {
               runId: active.runId,
               userMessageId: active.userMessageId ?? undefined,
               durability: 'required',
+              rootExecution: active.descriptor,
               onRunStarted: async (startedRunId) => {
                 if (startedRunId !== active.runId) {
                   throw new Error('Runtime started a different Run than the admitted identity');
@@ -2059,6 +2060,7 @@ function assertRunMatchesExecution(
     case 'automation':
     case 'goal':
     case 'agent_graph_supervisor_wake':
+    case 'memory_extraction_child':
       if (agentRunMatchesHostedRootExecution(run, execution)) return;
       break;
     case 'linked_child_initial':
@@ -2092,7 +2094,12 @@ function assertTrustedAgentIdentity(
   execution: Exclude<
     RootTurnAdmission['execution'],
     {
-      kind: 'external_message' | 'automation' | 'goal' | 'agent_graph_supervisor_wake';
+      kind:
+        | 'external_message'
+        | 'automation'
+        | 'goal'
+        | 'agent_graph_supervisor_wake'
+        | 'memory_extraction_child';
     }
   >,
 ): void {
@@ -2132,6 +2139,12 @@ function recoveryExecutionContract(
         pendingWithoutRun: 'host_recovery_closure',
       };
     case 'agent_graph_supervisor_wake':
+      return {
+        allowsQueueSources: false,
+        requiresUserMessage: true,
+        pendingWithoutRun: 'host_recovery_closure',
+      };
+    case 'memory_extraction_child':
       return {
         allowsQueueSources: false,
         requiresUserMessage: true,
@@ -2195,6 +2208,12 @@ function rootExecutionMessageOrigin(execution: RootExecutionDescriptor) {
         kind: 'agent_graph' as const,
         graphId: execution.graphId,
         wakeId: execution.wakeId,
+        attemptId: execution.attemptId,
+      };
+    case 'memory_extraction_child':
+      return {
+        kind: 'memory_extraction' as const,
+        operationId: execution.operationId,
         attemptId: execution.attemptId,
       };
     default:

@@ -179,6 +179,7 @@ import {
   buildHistorySearchSource,
   buildPromptSegmentEstimates,
   estimateRuntimeEventsTokens,
+  estimateTokens,
   mergeContextBudgetDiagnostic,
   mergeContextBudgetDiagnosticPatches,
   mergeRuntimeEventsInOriginalOrder,
@@ -340,6 +341,8 @@ export interface AiSdkBackendInput extends AiSdkCompactionCapabilities {
   providerOptions?: Record<string, unknown>;
   /** Optional fire-and-forget telemetry hook. Tool implementations remain unaware. */
   recordToolInvocation?: ToolTelemetryRecorder;
+  /** Independent request-occupancy threshold. Defaults to 0.5. */
+  memoryExtractionThresholdRatio?: number;
   /** Optional Phase 2 SQLite T1/T2 boundary for real tool execution. */
   runtimeCommitSink?: RuntimeCommitSink;
   /** Durable session-lifetime cumulative usage checkpoint after each completed provider step. */
@@ -541,6 +544,7 @@ export class AiSdkBackend implements AgentBackend {
    */
   private injectedSteeringMessages: ModelMessage[] = [];
   private currentRunId: string | null = null;
+  private currentExecution: BackendSendInput['execution'] | null = null;
   private currentOrchestration: EffectiveOrchestration | undefined;
   private imageRequestBudget: { used: number; decisions: Map<string, boolean> } | null = null;
   /** Side-channel for ToolRuntime settlement to push events into the iterator. */
@@ -550,6 +554,10 @@ export class AiSdkBackend implements AgentBackend {
   private currentRunTrace: RunTrace | null = null;
   private currentUserIntent: string | undefined;
   private priorRequestShape: RequestShapeDiagnostic | undefined;
+  private memoryExtractionEpoch = 'history:initial';
+  private memoryExtractionThresholdTriggeredEpoch: string | undefined;
+  private memoryExtractionLastOccupancyRatio = 0;
+  private memoryExtractionObservedCheckpointId: string | undefined;
   private readonly compaction: AiSdkCompaction;
   private cumulativeUsageCheckpoint: NormalizedAiSdkUsage | undefined;
   constructor(input: AiSdkBackendInput) {
@@ -569,7 +577,10 @@ export class AiSdkBackend implements AgentBackend {
       now: this.now,
     });
     this.compaction = new AiSdkCompaction({
-      input,
+      input:
+        input.header.internalOwner?.kind === 'memory_extraction'
+          ? withoutAutomaticMemoryExtractionScheduler(input)
+          : input,
       sessionId: this.sessionId,
       now: this.now,
       modelAdapter: this.modelAdapter,
@@ -588,6 +599,7 @@ export class AiSdkBackend implements AgentBackend {
     this.toolRuntime = new ToolRuntime({
       sessionId: input.sessionId,
       header: input.header,
+      getCurrentExecution: () => this.currentExecution ?? undefined,
       connection: input.connection,
       modelId: input.modelId,
       appendMessage: input.appendMessage,
@@ -621,6 +633,16 @@ export class AiSdkBackend implements AgentBackend {
   // --------------------------------------------------------------------------
 
   async compactHistory(input: BackendCompactHistoryInput): Promise<BackendCompactHistoryResult> {
+    this.scheduleAutomaticMemoryExtractionNow(
+      {
+        turnId: input.turnId,
+        runId: input.runId,
+        text: '',
+        context: [],
+      },
+      'compaction',
+      `manual:${input.runId}:${input.turnId}`,
+    );
     return this.compaction.compactHistory(input, this.priorRequestShape?.requestShapeHash);
   }
 
@@ -634,6 +656,7 @@ export class AiSdkBackend implements AgentBackend {
     this.currentTurnId = turnId;
     this.currentInvocationId = input.invocationId ?? input.runId ?? null;
     this.currentRunId = input.runId ?? null;
+    this.currentExecution = input.execution ?? null;
     this.currentOrchestration =
       input.orchestration ??
       resolveEffectiveOrchestration(this.input.header.orchestrationMode, undefined);
@@ -875,6 +898,9 @@ export class AiSdkBackend implements AgentBackend {
 
     // --- Build messages from RuntimeEvent history and its compatibility projection. ---
     const priorReplay = await this.buildPriorMessages(input);
+    this.observeMemoryExtractionCheckpoint(
+      priorReplay.latestHistoryCompactCheckpoint?.checkpointId,
+    );
     if (input.continuation && priorReplay.messages.length === 0) {
       const replay = priorReplayFailureTrace(priorReplay);
       const error = new ContinuationReplayEmptyError(replay.gate, replay.diagnosticCodes);
@@ -1255,6 +1281,7 @@ export class AiSdkBackend implements AgentBackend {
               })
             : undefined;
           const projectedMessages = shaped?.messages ?? requestMessages;
+          this.observeMemoryExtractionCheckpoint(midTurnState?.previousCheckpoint?.checkpointId);
           const finalChildSummaryStep =
             this.input.header.collaborationMode === 'agent' &&
             this.maxSteps !== undefined &&
@@ -1267,6 +1294,16 @@ export class AiSdkBackend implements AgentBackend {
           const requestSystemPrompt = finalChildSummaryStep
             ? joinPromptFragments([systemPrompt, CHILD_STEP_BUDGET_FINALIZATION_PROMPT])
             : systemPrompt;
+          this.scheduleMemoryExtractionThresholdIfCrossed({
+            input,
+            queue,
+            estimatedTokens: estimateTokens(
+              (requestSystemPrompt?.length ?? 0) +
+                JSON.stringify(projectedMessages).length +
+                toolSchemaCharsForDiagnostics(providerTools, activeToolsForRequest),
+              this.input.contextBudget?.charsPerToken ?? 4,
+            ),
+          });
           providerRequestTracker?.setStep(runtimeSteps);
           let attemptMessages = projectedMessages;
           let providerAttempt = 1;
@@ -2229,9 +2266,11 @@ export class AiSdkBackend implements AgentBackend {
         (block) => !loadedBlockIds.has(block.blockId),
       );
       if (draftBlocks.length > 0) {
+        this.scheduleAutomaticMemoryExtractionNow(input, 'compaction', this.memoryExtractionEpoch);
         if (this.input.summarizeHistoryCompact && this.input.recordHistoryCompactCheckpoint) {
           const writePatch = await this.compaction.writeHistoryCompactCheckpoint({
             turnId: input.turnId,
+            ...(input.runId ? { runId: input.runId } : {}),
             contextBudget,
             priorRuntimeContext,
             draftBlock: draftBlocks[0]!,
@@ -3009,6 +3048,112 @@ export class AiSdkBackend implements AgentBackend {
     return await this.input.shellRunContextSummary?.();
   }
 
+  private observeMemoryExtractionCheckpoint(checkpointId: string | undefined): void {
+    if (!checkpointId || checkpointId === this.memoryExtractionObservedCheckpointId) return;
+    this.memoryExtractionObservedCheckpointId = checkpointId;
+    this.memoryExtractionEpoch = `history:${checkpointId}`;
+    this.memoryExtractionThresholdTriggeredEpoch = undefined;
+    this.memoryExtractionLastOccupancyRatio = 0;
+  }
+
+  private scheduleMemoryExtractionThresholdIfCrossed(input: {
+    input: BackendSendInput;
+    queue: AsyncEventQueue<SessionEvent>;
+    estimatedTokens: number;
+  }): void {
+    const contextWindow = resolveSelectedModelContextWindow(
+      this.input.connection,
+      this.input.modelId,
+    );
+    if (!contextWindow || contextWindow <= 0) return;
+    const configured = this.input.memoryExtractionThresholdRatio ?? 0.5;
+    const threshold =
+      Number.isFinite(configured) && configured > 0 && configured < 1 ? configured : 0.5;
+    const ratio = Math.max(0, input.estimatedTokens) / contextWindow;
+    const crossed = this.memoryExtractionLastOccupancyRatio < threshold && ratio >= threshold;
+    this.memoryExtractionLastOccupancyRatio = ratio;
+    if (!crossed || this.memoryExtractionThresholdTriggeredEpoch === this.memoryExtractionEpoch) {
+      return;
+    }
+    this.memoryExtractionThresholdTriggeredEpoch = this.memoryExtractionEpoch;
+    this.scheduleAutomaticMemoryExtraction(
+      input.input,
+      input.queue,
+      'context_threshold',
+      this.memoryExtractionEpoch,
+      () => {
+        // A scheduling outage must not affect the main request. It may retry
+        // while still above the threshold, but never emits an Agent-visible error.
+        if (this.memoryExtractionThresholdTriggeredEpoch === this.memoryExtractionEpoch) {
+          this.memoryExtractionThresholdTriggeredEpoch = undefined;
+          this.memoryExtractionLastOccupancyRatio = 0;
+        }
+      },
+    );
+  }
+
+  private scheduleAutomaticMemoryExtraction(
+    input: BackendSendInput,
+    queue: AsyncEventQueue<SessionEvent>,
+    triggerKind: 'context_threshold' | 'compaction',
+    triggerEpoch: string,
+    onFailure?: () => void,
+  ): void {
+    const schedule = this.input.scheduleAutomaticMemoryExtraction;
+    if (
+      !schedule ||
+      !input.runId ||
+      this.input.header.internalOwner?.kind === 'memory_extraction' ||
+      input.execution?.kind === 'memory_extraction_child'
+    ) {
+      return;
+    }
+    // Do not hold up the provider request. The detached task first waits for
+    // everything already emitted to cross the RuntimeEvent durability ack,
+    // then the Host freezes the latest safe, closed Tool pair prefix.
+    void queue
+      .waitUntilConsumedThroughCurrent()
+      .then(() =>
+        schedule({
+          sessionId: this.sessionId,
+          runId: input.runId!,
+          turnId: input.turnId,
+          triggerKind,
+          triggerEpoch,
+        }),
+      )
+      .catch(() => onFailure?.());
+  }
+
+  private scheduleAutomaticMemoryExtractionNow(
+    input: BackendSendInput,
+    triggerKind: 'context_threshold' | 'compaction',
+    triggerEpoch: string,
+  ): void {
+    const schedule = this.input.scheduleAutomaticMemoryExtraction;
+    if (
+      !schedule ||
+      !input.runId ||
+      this.input.header.internalOwner?.kind === 'memory_extraction' ||
+      input.execution?.kind === 'memory_extraction_child'
+    ) {
+      return;
+    }
+    try {
+      void Promise.resolve(
+        schedule({
+          sessionId: this.sessionId,
+          runId: input.runId,
+          turnId: input.turnId,
+          triggerKind,
+          triggerEpoch,
+        }),
+      ).catch(() => undefined);
+    } catch {
+      // Automatic extraction is fail-open for the foreground request.
+    }
+  }
+
   private async *drain(queue: AsyncEventQueue<SessionEvent>): AsyncIterable<SessionEvent> {
     try {
       for await (const ev of queue) {
@@ -3034,6 +3179,7 @@ export class AiSdkBackend implements AgentBackend {
     this.currentTurnId = null;
     this.currentInvocationId = null;
     this.currentRunId = null;
+    this.currentExecution = null;
     this.currentOrchestration = undefined;
     this.currentRunTrace = null;
     this.currentUserIntent = undefined;
@@ -3140,6 +3286,11 @@ export class AiSdkBackend implements AgentBackend {
       throw error;
     }
   }
+}
+
+function withoutAutomaticMemoryExtractionScheduler(input: AiSdkBackendInput): AiSdkBackendInput {
+  const { scheduleAutomaticMemoryExtraction: _schedule, ...rest } = input;
+  return rest;
 }
 
 /**

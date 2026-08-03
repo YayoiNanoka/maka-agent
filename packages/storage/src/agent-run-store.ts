@@ -41,6 +41,7 @@ import {
 } from './bounded-evidence.js';
 import {
   DurableStoreWriteError,
+  buildImmutableRuntimePrefix,
   decodeAgentGraphIntentClaim,
   decodeMessageContent,
   encodeCanonicalRuntimeEvent,
@@ -58,6 +59,7 @@ import {
   type AgentRunStore,
   type AttachmentRef,
   type MessageContent,
+  type ImmutableRuntimePrefixV1,
   type RootExecutionDescriptor,
   type RuntimeEvent,
   type RuntimeEventStore,
@@ -185,6 +187,11 @@ export interface DurableRuntimeEventStore extends RuntimeEventStore {
     batches: readonly ConversationCopyRuntimeEventBatch[],
   ): Promise<void>;
   readImmutableRuntimeEvents(sessionId: string, runId: string): Promise<RuntimeEvent[]>;
+  readImmutableRuntimePrefix(input: {
+    sessionId: string;
+    runId: string;
+    upToEventSeq?: number;
+  }): Promise<ImmutableRuntimePrefixV1>;
   readImmutableSteeringMessageProof(
     sessionId: string,
     messageId: string,
@@ -2319,6 +2326,38 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
     );
   }
 
+  async readImmutableRuntimePrefix(input: {
+    sessionId: string;
+    runId: string;
+    upToEventSeq?: number;
+  }): Promise<ImmutableRuntimePrefixV1> {
+    assertSafeId(input.sessionId, 'Invalid session id');
+    assertSafeId(input.runId, 'Invalid run id');
+    if (
+      input.upToEventSeq !== undefined &&
+      (!Number.isSafeInteger(input.upToEventSeq) || input.upToEventSeq <= 0)
+    ) {
+      throw new Error('Invalid immutable RuntimeEvent prefix high-water');
+    }
+    const events = await this.readImmutableRuntimeEvents(input.sessionId, input.runId);
+    const highWater = input.upToEventSeq ?? events.length;
+    if (highWater === 0) throw new Error('immutable RuntimeEvent prefix is empty');
+    if (events.length < highWater) {
+      throw new Error(`immutable RuntimeEvent prefix high-water ${highWater} is unavailable`);
+    }
+    const selected = events.slice(0, highWater);
+    const first = selected[0]!;
+    return buildImmutableRuntimePrefix(
+      {
+        sessionId: first.sessionId,
+        invocationId: first.invocationId,
+        runId: first.runId,
+        turnId: first.turnId,
+      },
+      selected.map((event, index) => ({ eventSeq: index + 1, event })),
+    );
+  }
+
   async readImmutableSteeringMessageProof(
     sessionId: string,
     messageId: string,
@@ -3294,6 +3333,22 @@ function normalizeRootExecutionDescriptor(value: unknown): RootExecutionDescript
       claim,
       agentId: value.agentId,
       agentName: value.agentName,
+    });
+  }
+  if (value.kind === 'memory_extraction_child') {
+    if (
+      !hasExactKeys(value, ['kind', 'operationId', 'attemptId']) ||
+      typeof value.operationId !== 'string' ||
+      !isSafeId(value.operationId) ||
+      typeof value.attemptId !== 'string' ||
+      !isSafeId(value.attemptId)
+    ) {
+      throw new Error('Invalid root execution descriptor');
+    }
+    return Object.freeze({
+      kind: value.kind,
+      operationId: value.operationId,
+      attemptId: value.attemptId,
     });
   }
   if (

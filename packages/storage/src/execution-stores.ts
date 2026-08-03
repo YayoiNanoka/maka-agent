@@ -66,6 +66,7 @@ const executionStoresWritersOpeningByLease = new WeakMap<object, Promise<void>>(
 export { normalizeRootTurnAdmissionPayload } from './agent-run-store.js';
 export {
   isSessionNotFoundError,
+  SessionNotFoundError,
   SessionReadMarkerMessageNotFoundError,
 } from './session-store.js';
 export {
@@ -439,6 +440,8 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
         run(() => runtimeEventStore.readRuntimeEventsBounded(sessionId, runId, budget)),
       readImmutableRuntimeEvents: (sessionId, runId) =>
         run(() => runtimeEventStore.readImmutableRuntimeEvents(sessionId, runId)),
+      readImmutableRuntimePrefix: (input) =>
+        run(() => runtimeEventStore.readImmutableRuntimePrefix(input)),
       readSessionRuntimeEvents: (sessionId) =>
         run(() => runtimeEventStore.readSessionRuntimeEvents(sessionId)),
       readImmutableSteeringMessageProof: (sessionId, messageId) =>

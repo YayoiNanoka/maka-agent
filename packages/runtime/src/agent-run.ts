@@ -1085,6 +1085,12 @@ export class AgentRun {
             agentGraphWakeAttemptId: this.input.userInput.origin.attemptId,
           }
         : {}),
+      ...(this.input.userInput.origin?.kind === 'memory_extraction'
+        ? {
+            memoryExtractionOperationId: this.input.userInput.origin.operationId,
+            memoryExtractionAttemptId: this.input.userInput.origin.attemptId,
+          }
+        : {}),
     };
     const header =
       continuation && this.input.claimedRunHeader ? this.input.claimedRunHeader : computedHeader;
@@ -1131,6 +1137,10 @@ export class AgentRun {
   }
 
   private async buildPriorRuntimeContext(): Promise<PriorRuntimeContext | undefined> {
+    // Each Memory Extraction Attempt is reconstructed from the parent evidence
+    // authority. Never replay another Attempt's Assistant/Tool loop from the
+    // durable internal Session into a retry.
+    if (this.input.header.internalOwner?.kind === 'memory_extraction') return undefined;
     return await buildPriorRuntimeContextProjection({
       sessionId: this.sessionId,
       currentRunId: this.runId,

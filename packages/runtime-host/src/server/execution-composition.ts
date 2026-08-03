@@ -5,6 +5,9 @@ import {
   AgentGraphSupervisorWakeCoordinator,
   agentGraphIdForRootSession,
   BackendRegistry,
+  createMemoryExtractionChildToolSet,
+  buildMemoryExtractionScheduleTools,
+  buildUnboundMemoryExtractionChildTools,
   createBuiltinSandboxManager,
   createFilesystemWorkerLaunchSpecProvider,
   FakeBackend,
@@ -55,6 +58,13 @@ import { HostGoalCoordinator } from './goal-coordinator.js';
 import type { RuntimeHostComposition, RuntimeHostCompositionContext } from './host-kernel.js';
 import { HostInteractionCoordinator } from './interaction-coordinator.js';
 import { HostMemoryCoordinator } from './memory-coordinator.js';
+import { HostMemoryExtractionScheduler } from './memory-extraction-scheduler.js';
+import {
+  HostMemoryExtractionAttemptRunner,
+  HostMemoryExtractionAttemptToolBindings,
+} from './memory-extraction-attempt-runner.js';
+import { HostMemoryExtractionAttemptPorts } from './memory-extraction-tool-ports.js';
+import { HostMemoryExtractionWorker } from './memory-extraction-worker.js';
 import { type HostMessageRootPort, HostMessageCoordinator } from './message-coordinator.js';
 import { HostOAuthExecutionAuthority } from './oauth-execution-authority.js';
 import { HostOAuthCoordinator } from './oauth-coordinator.js';
@@ -92,6 +102,7 @@ export async function createExecutionRuntimeHostComposition(
     | Awaited<ReturnType<typeof openInteractiveAutomationAuthorityForWrite>>
     | undefined;
   let graphClient: HostAgentGraphCoordinator | undefined;
+  let memoryExtractionWorker: HostMemoryExtractionWorker | undefined;
   try {
     const runtimePolicyStores = await openInteractiveRuntimePolicyStoresForWrite(
       context.owner.lease,
@@ -170,11 +181,66 @@ export async function createExecutionRuntimeHostComposition(
       ...(sandboxManager ? { sandboxManager } : {}),
       ...(filesystemWorker ? { filesystemWorker } : {}),
     };
-    const hostTools = [createHostWebSearchTool({ policy: runtimePolicyStores.operations })];
+    const memoryExtractionToolBindings = new HostMemoryExtractionAttemptToolBindings({
+      prepare: async (input, hooks) => {
+        if (input.signal.aborted) throw input.signal.reason;
+        await stores.sessionStore.readHeaderSnapshot(input.operation.sessionId);
+        const ports = new HostMemoryExtractionAttemptPorts({
+          operationId: input.operation.operationId,
+          attemptId: input.attempt.attemptId,
+          internalSessionId: input.operation.internalSessionId,
+          runId: input.attempt.runId,
+          workspaceKey: context.owner.capability.canonicalPath,
+          operations: longTermMemoryStore!,
+          runtimeEvents: stores.runtimeEventStore,
+          commitWithParentAdmission: (parentSessionId, commit) =>
+            sessionAdmission.run(parentSessionId, async () => {
+              await stores.sessionStore.readHeaderSnapshot(parentSessionId);
+              return await commit();
+            }),
+          now: Date.now,
+        });
+        const initial = await ports.prepareInitialEvidence();
+        const toolSet = createMemoryExtractionChildToolSet(
+          {
+            operationId: input.operation.operationId,
+            attemptId: input.attempt.attemptId,
+            internalSessionId: input.operation.internalSessionId,
+            runId: input.attempt.runId,
+            initialSourceRefs: initial.sources.map((source) => source.sourceRef),
+            onTerminalFailure: () => hooks?.onTerminalFailure(),
+          },
+          ports,
+        );
+        return {
+          tools: toolSet.tools,
+          terminalFailure: toolSet.terminalFailure,
+          initialContext: JSON.stringify(initial),
+        };
+      },
+    });
+    const memoryExtractionScheduler = new HostMemoryExtractionScheduler({
+      policy: runtimePolicyStores.runtimePolicy,
+      operations: longTermMemoryStore,
+      runtimeEvents: stores.runtimeEventStore,
+      agentRuns: stores.agentRunStore,
+      activation: runtimePolicyActivation,
+      admission: sessionAdmission,
+      sessions: stores.sessionStore,
+      onOperationReady: (operationId) => memoryExtractionWorker?.notify(operationId),
+    });
+    const webSearchTool = createHostWebSearchTool({ policy: runtimePolicyStores.operations });
+    const hostTools = [
+      webSearchTool,
+      ...buildMemoryExtractionScheduleTools(memoryExtractionScheduler),
+      ...buildUnboundMemoryExtractionChildTools(),
+    ];
     const childAgentTools = createHostChildAgentToolComposition({
       taskLedger,
       builtinTools,
-      hostTools,
+      // Ordinary foreground child agents do not own the parent Session's
+      // extraction authority. Dedicated Memory children use a separate ACL.
+      hostTools: [webSearchTool],
       worktreePatchWriteBackAvailable: true,
     });
     const openedGraphControlStore = createAgentGraphControlStore(
@@ -250,6 +316,7 @@ export async function createExecutionRuntimeHostComposition(
     const beginDrain = () => {
       if (draining) return;
       draining = true;
+      memoryExtractionWorker?.beginDrain();
       goal?.beginDrain();
       rootCoordinator?.beginDrain();
       runtimeResources?.beginDrain();
@@ -312,6 +379,13 @@ export async function createExecutionRuntimeHostComposition(
         hostTools,
         resolveRootTools: (sessionId) =>
           requireGraphCoordinator(graphCoordinator).toolsForSession(sessionId),
+        resolveInternalTools: (header) => memoryExtractionToolBindings.resolveForSession(header),
+        scheduleAutomaticMemoryExtraction: async (request) => {
+          const result = await memoryExtractionScheduler.scheduleAutomatic(request);
+          if (result.status === 'rejected') {
+            throw new Error(`Automatic Memory Extraction rejected: ${result.reason}`);
+          }
+        },
         parentAgentTools: childAgentTools.parentTools,
         childAgents: bindHostChildAgentBackend(
           requireSessionManager(manager),
@@ -445,6 +519,29 @@ export async function createExecutionRuntimeHostComposition(
       (admission) => requireAutomationCoordinator(automations).assertRecoveryAdmission(admission),
     );
     const coordinator = rootCoordinator;
+    const memoryExtractionAttemptRunner = new HostMemoryExtractionAttemptRunner({
+      sessions: stores.sessionStore,
+      runtime: manager,
+      root: {
+        executeRoot: (input) => coordinator.executeRoot(input),
+        stopRoot: (identity, input) => coordinator.stopRoot(identity, input),
+      },
+      toolBindings: memoryExtractionToolBindings,
+    });
+    memoryExtractionWorker = new HostMemoryExtractionWorker({
+      store: longTermMemoryStore,
+      runner: memoryExtractionAttemptRunner,
+      acquireResidency: context.acquireResidency,
+      requestDrain: context.requestDrain,
+      reconcileSweepDebts: () => memoryExtractionScheduler.reconcileSweepDebts(),
+      runPolicyAuthorized: (_operation, execute) =>
+        runtimePolicyActivation.runReadActivation(async () => {
+          const policy = (await runtimePolicyStores.runtimePolicy.getSnapshot()).policy;
+          if (policy.privacy.incognitoActive || !policy.memory.enabled) return false;
+          await execute();
+          return true;
+        }),
+    });
     graphSupervisorWake = new AgentGraphSupervisorWakeCoordinator({
       activityRegistry: graphWakeActivities,
       wakeStore: openedGraphControlStore,
@@ -573,6 +670,9 @@ export async function createExecutionRuntimeHostComposition(
       continuity: continuityCoordinator,
       artifacts: openedArtifactStore,
       taskLedger: taskLedgerStore,
+      memoryExtractions: {
+        retireSessions: (sessionIds) => memoryExtractionWorker!.retireSessions(sessionIds),
+      },
       purgeOperationalState: (sessionId) => stores.purgeConversationOperationalState(sessionId),
       purgeAgentGraphState: async (sessionId) => {
         await openedGraphControlStore.purgeAgentGraphControlState(
@@ -645,6 +745,8 @@ export async function createExecutionRuntimeHostComposition(
         await requireGraphSupervisorWake(graphSupervisorWake).recover();
         await requireGraphCoordinator(graphCoordinator).recover();
         await requireAutomationCoordinator(automations).recover();
+        await memoryExtractionWorker!.recover();
+        memoryExtractionWorker!.start();
         requireAutomationCoordinator(automations).start();
       })();
       return recoveryTask;
@@ -658,8 +760,20 @@ export async function createExecutionRuntimeHostComposition(
         } catch (error) {
           errors.push(error);
         }
+        // Retirement cleanup may still need the Memory Worker and memory.sqlite
+        // to terminalize Operations before source evidence is purged.
+        try {
+          await sessionRetirement.close();
+        } catch (error) {
+          errors.push(error);
+        }
         try {
           await goal?.close();
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
+          await memoryExtractionWorker?.close();
         } catch (error) {
           errors.push(error);
         }
@@ -754,11 +868,6 @@ export async function createExecutionRuntimeHostComposition(
           errors.push(error);
         }
         try {
-          await sessionRetirement.close();
-        } catch (error) {
-          errors.push(error);
-        }
-        try {
           openedGraphControlStore.close();
         } catch (error) {
           errors.push(error);
@@ -837,6 +946,12 @@ export async function createExecutionRuntimeHostComposition(
     }
     try {
       shellRunStore?.close();
+    } catch (closeError) {
+      errors.push(closeError);
+    }
+    try {
+      memoryExtractionWorker?.beginDrain();
+      await memoryExtractionWorker?.close();
     } catch (closeError) {
       errors.push(closeError);
     }

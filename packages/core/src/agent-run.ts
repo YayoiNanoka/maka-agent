@@ -80,6 +80,11 @@ export type RootExecutionDescriptor =
       claim: AgentGraphIntentClaim;
       agentId: string;
       agentName: string;
+    }
+  | {
+      kind: 'memory_extraction_child';
+      operationId: string;
+      attemptId: string;
     };
 
 const AGENT_RUN_CONTINUATION_SOURCE_V1_SHAPE = defineObjectShape<AgentRunContinuationSourceV1>()(
@@ -148,6 +153,10 @@ export interface AgentRunHeader {
   agentGraphWakeId?: string;
   /** Durable delivery attempt for this host-authored supervisor turn. */
   agentGraphWakeAttemptId?: string;
+  /** Durable extraction operation owning this internal Memory Run. */
+  memoryExtractionOperationId?: string;
+  /** Durable lease attempt that admitted this internal Memory Run. */
+  memoryExtractionAttemptId?: string;
   failureClass?: string;
   failureMessage?: string;
   abortSource?: string;
@@ -156,7 +165,7 @@ export interface AgentRunHeader {
 
 type HostedRootExecutionDescriptor = Extract<
   RootExecutionDescriptor,
-  { kind: 'automation' | 'goal' | 'agent_graph_supervisor_wake' }
+  { kind: 'automation' | 'goal' | 'agent_graph_supervisor_wake' | 'memory_extraction_child' }
 >;
 
 export function agentRunMatchesHostedRootExecution(
@@ -209,6 +218,15 @@ function hostedRootAuthorityMatches(
         run.agentSwarmAuthorization === 'none' &&
         run.automationId === undefined &&
         run.goalId === undefined
+      );
+    case 'memory_extraction_child':
+      return (
+        run.memoryExtractionOperationId === execution.operationId &&
+        run.memoryExtractionAttemptId === execution.attemptId &&
+        run.automationId === undefined &&
+        run.goalId === undefined &&
+        run.agentGraphWakeId === undefined &&
+        run.agentGraphWakeAttemptId === undefined
       );
   }
 }
@@ -323,6 +341,8 @@ const AGENT_RUN_HEADER_SHAPE = defineObjectShape<AgentRunHeader>()(
     'goalId',
     'agentGraphWakeId',
     'agentGraphWakeAttemptId',
+    'memoryExtractionOperationId',
+    'memoryExtractionAttemptId',
     'failureClass',
     'failureMessage',
     'abortSource',
@@ -382,6 +402,8 @@ export function decodeAgentRunHeader(value: unknown): AgentRunHeader {
       value.goalId,
       value.agentGraphWakeId,
       value.agentGraphWakeAttemptId,
+      value.memoryExtractionOperationId,
+      value.memoryExtractionAttemptId,
       value.failureClass,
       value.failureMessage,
       value.abortSource,

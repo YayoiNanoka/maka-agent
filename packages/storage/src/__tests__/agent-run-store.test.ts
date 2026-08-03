@@ -694,6 +694,17 @@ describe('AgentRunStore', () => {
         runtimeEvents.map((event) => event.role),
         ['user', 'model'],
       );
+      const immutablePrefix = await runtimeEventStore.readImmutableRuntimePrefix({
+        sessionId: 'session-1',
+        runId: 'run-1',
+        upToEventSeq: 1,
+      });
+      assert.equal(immutablePrefix.position.lastEventSeq, 1);
+      assert.equal(immutablePrefix.position.lastEventId, 'runtime-1');
+      assert.deepEqual(
+        immutablePrefix.events.map((event) => event.id),
+        ['runtime-1'],
+      );
       assert.deepEqual(
         (await runStore.readEvents('session-1', 'run-1')).map((event) => event.id),
         ['operational-event'],

@@ -1236,7 +1236,13 @@ export class AiSdkCompaction {
     const priorContentEvents = (input.runtimeContext ?? [])
       .filter((event) => event.turnId !== input.turnId)
       .filter(isHistoryCompactContentEvent);
-    return new MidTurnCapacityCompactState(headAnchor, priorContentEvents, contextWindow);
+    return new MidTurnCapacityCompactState(
+      headAnchor,
+      priorContentEvents,
+      contextWindow,
+      input.runId,
+      input.turnId,
+    );
   }
 
   /**
@@ -1540,6 +1546,24 @@ export class AiSdkCompaction {
       };
     }
     const orderedEvents = [...state.priorContentEvents, ...currentTurnEvents];
+
+    if (state.runId) {
+      try {
+        void Promise.resolve(
+          this.input.scheduleAutomaticMemoryExtraction?.({
+            sessionId: this.sessionId,
+            runId: state.runId,
+            turnId: state.turnId,
+            triggerKind: 'compaction',
+            triggerEpoch: state.previousCheckpoint
+              ? `history:${state.previousCheckpoint.checkpointId}`
+              : 'history:initial',
+          }),
+        ).catch(() => undefined);
+      } catch {
+        // Memory scheduling is fail-open for history compaction.
+      }
+    }
 
     const plan = await planMidTurnCapacityCompaction({
       sessionId: this.sessionId,
@@ -2155,6 +2179,8 @@ export class MidTurnCapacityCompactState {
     readonly headAnchor: RuntimeEvent,
     readonly priorContentEvents: readonly RuntimeEvent[],
     readonly contextWindow: number,
+    readonly runId: string | undefined = undefined,
+    readonly turnId: string = headAnchor.turnId,
   ) {}
 }
 

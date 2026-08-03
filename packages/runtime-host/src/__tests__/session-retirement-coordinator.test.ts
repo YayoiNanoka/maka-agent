@@ -532,6 +532,44 @@ describe('Host Session retirement coordinator', () => {
     });
   });
 
+  test('cancels Memory extraction after tombstoning and before every RuntimeEvent/transcript purge', async () => {
+    await withHarness(async (harness) => {
+      harness.failArtifactCleanup = true;
+      const target = await harness.store.readHeaderRecordSnapshot(harness.rootId);
+
+      assert.deepEqual(
+        await harness.coordinator.handlers['session.remove'](
+          { sessionId: harness.rootId, expectedRevision: target.revision },
+          CONNECTION_CONTEXT,
+        ),
+        { ok: true, result: { kind: 'removed', sessionId: harness.rootId } },
+      );
+      await waitFor(
+        () =>
+          harness.familyIds.every(
+            (sessionId) => harness.actions.transcriptPurgeAttempts.get(sessionId) === 1,
+          ),
+        'initial retirement cleanup did not purge every family RuntimeEvent/transcript',
+      );
+      for (const sessionId of harness.familyIds) {
+        assert.equal(harness.actions.memoryExtractionCancellations.get(sessionId), 2);
+        assert.equal(harness.actions.transcriptPurgeCancellationCounts.get(sessionId), 2);
+      }
+
+      harness.failArtifactCleanup = false;
+      await harness.coordinator.recover();
+      await waitFor(
+        async () => (await harness.store.listPendingSessionRetirementCleanupIds()).length === 0,
+        'pending retirement cleanup did not converge after recovery',
+      );
+      for (const sessionId of harness.familyIds) {
+        assert.equal(harness.actions.memoryExtractionCancellations.get(sessionId), 4);
+        assert.equal(harness.actions.transcriptPurgeAttempts.get(sessionId), 2);
+        assert.equal(harness.actions.transcriptPurgeCancellationCounts.get(sessionId), 4);
+      }
+    });
+  });
+
   test('returns after the tombstone commit and joins active cleanup on close', async () => {
     await withHarness(async (harness) => {
       let enterCleanup!: () => void;
@@ -655,6 +693,9 @@ interface RetirementActions {
   readonly retiredWorktrees: string[];
   readonly finalizedWorkspacePatches: string[];
   readonly retiredGraphWakes: string[];
+  readonly memoryExtractionCancellations: Map<string, number>;
+  readonly transcriptPurgeAttempts: Map<string, number>;
+  readonly transcriptPurgeCancellationCounts: Map<string, number>;
   goalCommits: number;
   goalRollbacks: number;
   automationCommits: number;
@@ -693,6 +734,9 @@ async function withHarness(
       retiredWorktrees: [],
       finalizedWorkspacePatches: [],
       retiredGraphWakes: [],
+      memoryExtractionCancellations: new Map(),
+      transcriptPurgeAttempts: new Map(),
+      transcriptPurgeCancellationCounts: new Map(),
       goalCommits: 0,
       goalRollbacks: 0,
       automationCommits: 0,
@@ -745,8 +789,21 @@ async function withHarness(
           store.reconcileOrphanedAgentGraphRetirements(),
         listPendingSessionRetirementCleanupIds: (sessionId) =>
           store.listPendingSessionRetirementCleanupIds(sessionId),
-        purgeRemovedSessionTranscript: (sessionId) =>
-          store.purgeRemovedSessionTranscript(sessionId),
+        purgeRemovedSessionTranscript: async (sessionId) => {
+          const cancellationCount = actions.memoryExtractionCancellations.get(sessionId) ?? 0;
+          const previousPurgeCancellationCount =
+            actions.transcriptPurgeCancellationCounts.get(sessionId) ?? 0;
+          assert.ok(
+            cancellationCount > previousPurgeCancellationCount,
+            `Session ${sessionId} RuntimeEvent/transcript purge requires a fresh Memory cancellation`,
+          );
+          actions.transcriptPurgeAttempts.set(
+            sessionId,
+            (actions.transcriptPurgeAttempts.get(sessionId) ?? 0) + 1,
+          );
+          actions.transcriptPurgeCancellationCounts.set(sessionId, cancellationCount);
+          await store.purgeRemovedSessionTranscript(sessionId);
+        },
         completeSessionRetirementCleanup: (sessionId) =>
           store.completeSessionRetirementCleanup(sessionId),
         setSessionsLifecycleVersioned: (sessions, state) =>
@@ -840,6 +897,21 @@ async function withHarness(
       taskLedger: {
         purgeConversationTaskLedger: async (sessionId) => {
           actions.purgedTasks.push(sessionId);
+        },
+      },
+      memoryExtractions: {
+        retireSessions: async (sessionIds) => {
+          for (const sessionId of sessionIds) {
+            assert.deepEqual(
+              await store.probeSessionRemoval(sessionId),
+              { kind: 'removed' },
+              `Session ${sessionId} must commit its tombstone before Memory cancellation`,
+            );
+            actions.memoryExtractionCancellations.set(
+              sessionId,
+              (actions.memoryExtractionCancellations.get(sessionId) ?? 0) + 1,
+            );
+          }
         },
       },
       purgeOperationalState: async (sessionId) => {

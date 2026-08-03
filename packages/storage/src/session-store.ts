@@ -43,6 +43,7 @@ import {
   isPermissionMode,
   isSessionBlockedReason,
   isSessionConversationCopy,
+  isInternalSessionOwner,
   isSubagentSessionParent,
   isSubagentSessionRuntime,
   isSubagentSessionSpawn,
@@ -328,6 +329,7 @@ class SqliteSessionStore implements SessionAuthorityStore {
   ): Promise<SessionHeader> {
     await this.ensureReady();
     assertNoConversationCopyMetadata(input);
+    assertNoInternalOwnerMetadata(input);
     if (input.subagentSpawn) {
       throw new Error('Subagent spawn metadata requires createSubagent()');
     }
@@ -369,6 +371,9 @@ class SqliteSessionStore implements SessionAuthorityStore {
       request.requestFingerprint,
     );
     if (probe.kind === 'existing') {
+      if (!stableInternalOwnerMatches(probe.record.header, request.input)) {
+        return { kind: 'conflict', reason: 'identity_mismatch' };
+      }
       return { kind: 'existing', record: projectHeaderSnapshot(probe.record) };
     }
     if (probe.kind === 'conflict') return probe;
@@ -379,6 +384,12 @@ class SqliteSessionStore implements SessionAuthorityStore {
       request.requestFingerprint,
       initialBoundary,
     );
+    if (
+      result.kind === 'existing' &&
+      !stableInternalOwnerMatches(result.record.header, request.input)
+    ) {
+      return { kind: 'conflict', reason: 'identity_mismatch' };
+    }
     return result.kind === 'created' || result.kind === 'existing'
       ? { kind: result.kind, record: projectHeaderSnapshot(result.record) }
       : result;
@@ -506,7 +517,9 @@ class SqliteSessionStore implements SessionAuthorityStore {
   async list(filter?: SessionListFilter): Promise<SessionSummary[]> {
     await this.ensureReady();
     const records = (await this.metadata.list(filter)).filter(
-      (record) => record.header.conversationCopy?.state !== 'preparing',
+      (record) =>
+        record.header.conversationCopy?.state !== 'preparing' &&
+        record.header.internalOwner === undefined,
     );
     const withPreviews: Array<{
       record: SessionMetadataRecord;
@@ -601,6 +614,7 @@ class SqliteSessionStore implements SessionAuthorityStore {
   async readCatalogRecord(sessionId: string): Promise<SessionCatalogRecord> {
     await this.ensureCatalogProjectionReadable();
     const record = await this.metadata.readCatalogRecord(sessionId);
+    if (record.header.internalOwner !== undefined) throw new SessionNotFoundError(sessionId);
     return {
       ...projectHeaderSnapshot(record),
       summary: toCatalogSummary(record.header, record.lastMessagePreview),
@@ -966,6 +980,7 @@ class FileSessionStore implements SessionStore {
 
   async create(input: CreateSessionInput): Promise<SessionHeader> {
     assertNoConversationCopyMetadata(input);
+    assertNoInternalOwnerMetadata(input);
     if (input.subagentSpawn) {
       throw new Error('Child-session idempotency requires the SQLite metadata control plane');
     }
@@ -1047,6 +1062,7 @@ class FileSessionStore implements SessionStore {
       ...(input.subagentSpawn ? { subagentSpawn: input.subagentSpawn } : {}),
       ...(input.subagentWorkspace ? { subagentWorkspace: input.subagentWorkspace } : {}),
       ...(conversationCopy ? { conversationCopy } : {}),
+      ...(input.internalOwner ? { internalOwner: input.internalOwner } : {}),
       ...(input.revisionRootSessionId
         ? { revisionRootSessionId: input.revisionRootSessionId }
         : {}),
@@ -1169,6 +1185,7 @@ class FileSessionStore implements SessionStore {
       if (!isSafeSessionId(entry.name)) continue;
       try {
         const header = await this.readHeaderOnly(entry.name);
+        if (header.internalOwner !== undefined) continue;
         if (filter?.isArchived !== undefined && header.isArchived !== filter.isArchived) continue;
         if (filter?.isFlagged !== undefined && header.isFlagged !== filter.isFlagged) continue;
         if (filter?.labelSlug && !header.labels.includes(filter.labelSlug)) continue;
@@ -1345,6 +1362,9 @@ class FileSessionStore implements SessionStore {
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'subagentWorkspace')) {
       throw new Error('Subagent session workspace binding is immutable');
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'internalOwner')) {
+      throw new Error('Internal Session ownership is immutable');
     }
     let nextHeader: SessionHeader | undefined;
     await this.withQueue(sessionId, async () => {
@@ -1866,6 +1886,7 @@ export function normalizeSessionHeader(
     (header.parentSessionId === undefined || typeof header.parentSessionId === 'string') &&
     (header.branchOfTurnId === undefined || typeof header.branchOfTurnId === 'string') &&
     isValidConversationCopyLineage(header) &&
+    isValidInternalSessionOwnership(header) &&
     isValidRevisionLineage(header) &&
     isValidSubagentSessionLineage(header) &&
     (header.lastReadMessageId === undefined || typeof header.lastReadMessageId === 'string') &&
@@ -1916,6 +1937,9 @@ function assertValidSessionLineage(header: SessionHeader): void {
   if (!isValidConversationCopyLineage(header)) {
     throw new Error('Invalid Session conversation-copy lineage');
   }
+  if (!isValidInternalSessionOwnership(header)) {
+    throw new Error('Invalid internal Session ownership');
+  }
   if (!isValidRevisionLineage(header)) {
     throw new Error('Invalid session revision lineage');
   }
@@ -1931,7 +1955,8 @@ function isValidConversationCopyLineage(header: SessionHeader): boolean {
     !isSessionConversationCopy(copy) ||
     !isSafeSessionId(copy.sourceSessionId) ||
     copy.sourceSessionId === header.id ||
-    header.subagentParent !== undefined
+    header.subagentParent !== undefined ||
+    header.internalOwner !== undefined
   ) {
     return false;
   }
@@ -1949,6 +1974,25 @@ function isValidConversationCopyLineage(header: SessionHeader): boolean {
   return (
     header.revisionParentSessionId === copy.sourceSessionId &&
     header.revisionOfTurnId === copy.sourceTurnId
+  );
+}
+
+function isValidInternalSessionOwnership(header: SessionHeader): boolean {
+  if (header.internalOwner === undefined) return true;
+  return (
+    isInternalSessionOwner(header.internalOwner) &&
+    header.parentSessionId === undefined &&
+    header.branchOfTurnId === undefined &&
+    header.subagentParent === undefined &&
+    header.subagentRuntime === undefined &&
+    header.subagentSpawn === undefined &&
+    header.subagentWorkspace === undefined &&
+    header.conversationCopy === undefined &&
+    header.revisionRootSessionId === undefined &&
+    header.revisionParentSessionId === undefined &&
+    header.revisionOfTurnId === undefined &&
+    header.revisionIndex === undefined &&
+    header.revisionState === undefined
   );
 }
 
@@ -2010,6 +2054,23 @@ function assertNoConversationCopyMetadata(input: CreateSessionInput): void {
   if (Object.prototype.hasOwnProperty.call(input, 'conversationCopy')) {
     throw new Error('Conversation copy metadata requires createStableSession()');
   }
+}
+
+function assertNoInternalOwnerMetadata(input: CreateSessionInput): void {
+  if (input.internalOwner !== undefined) {
+    throw new Error('Internal Session ownership requires createStableSession()');
+  }
+}
+
+function stableInternalOwnerMatches(
+  header: SessionHeader,
+  input: StableSessionCreateInput,
+): boolean {
+  return (
+    header.internalOwner?.kind === input.internalOwner?.kind &&
+    header.internalOwner?.operationId === input.internalOwner?.operationId &&
+    header.internalOwner?.parentSessionId === input.internalOwner?.parentSessionId
+  );
 }
 
 function projectHeaderSnapshot(record: SessionMetadataRecord): SessionHeaderSnapshot {
