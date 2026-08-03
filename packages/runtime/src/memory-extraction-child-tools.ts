@@ -6,6 +6,9 @@ export const MEMORY_EVIDENCE_SEARCH_TOOL_NAME = 'memory_evidence_search';
 export const MEMORY_EVIDENCE_READ_TOOL_NAME = 'memory_evidence_read';
 export const MEMORY_SUBMIT_TOOL_NAME = 'memory_submit';
 
+/** Includes replayed calls so a model cannot keep an Attempt alive by repeating valid inputs. */
+const MAX_MEMORY_EXTRACTION_TOOL_INVOCATIONS = 12;
+
 const OPAQUE_REF = z
   .string()
   .min(1)
@@ -409,7 +412,7 @@ function buildMemoryExtractionToolDefinitions(
     name: MEMORY_EVIDENCE_SEARCH_TOOL_NAME,
     displayName: 'Search memory evidence',
     description:
-      'Search the authorized current-session evidence boundary for older turns. Use only when the supplied evidence does not explain a reference to earlier conversation content.',
+      'Internal memory-extraction protocol tool. Use only when the current user instruction explicitly identifies this run as a memory extraction operation; otherwise never call it. During extraction, search authorized current-session evidence only when supplied evidence cannot explain a reference to older content.',
     parameters: searchParameters,
     categoryHint: 'read',
     recoveryMode: 'replay_safe',
@@ -419,7 +422,7 @@ function buildMemoryExtractionToolDefinitions(
     name: MEMORY_EVIDENCE_READ_TOOL_NAME,
     displayName: 'Read memory evidence',
     description:
-      'Expand one spanRef returned by memory_evidence_search by complete neighboring turns. Use only when the current span lacks necessary context.',
+      'Internal memory-extraction protocol tool. Use only when the current user instruction explicitly identifies this run as a memory extraction operation; otherwise never call it. During extraction, expand a spanRef returned by memory_evidence_search only when that span lacks necessary context.',
     parameters: readParameters,
     categoryHint: 'read',
     recoveryMode: 'replay_safe',
@@ -429,7 +432,7 @@ function buildMemoryExtractionToolDefinitions(
     name: MEMORY_SUBMIT_TOOL_NAME,
     displayName: 'Submit extracted memory',
     description:
-      'Submit the complete extraction result. Start with action=propose. If candidates are returned, call again with action=resolve and exactly one decision for every proposalRef.',
+      'Internal memory-extraction protocol tool. Use only when the current user instruction explicitly identifies this run as a memory extraction operation; otherwise never call it. During extraction, submit the complete result with action=propose, then resolve every returned candidate case if required.',
     parameters: submitParameters,
     categoryHint: 'custom_tool',
     recoveryMode: 'idempotent',
@@ -457,6 +460,7 @@ class AttemptToolState {
   readonly #searchReplays = new Map<string, MemoryEvidenceSearchResult>();
   readonly #readReplays = new Map<string, MemoryEvidenceReadResult>();
   #remainingRepairs: number;
+  #remainingToolInvocations = MAX_MEMORY_EXTRACTION_TOOL_INVOCATIONS;
   #terminated = false;
   #terminalFailure: MemoryExtractionTerminalToolFailure | undefined;
   #submission:
@@ -607,6 +611,10 @@ class AttemptToolState {
   ): Promise<T | MemoryToolErrorResult> {
     try {
       if (this.#terminated) throw protocolError('protocol_violation', false, phase);
+      if (this.#remainingToolInvocations <= 0) {
+        throw protocolError('tool_budget_exhausted', false, phase);
+      }
+      this.#remainingToolInvocations -= 1;
       const invocation = this.#invocation(context, phase);
       const replayed = replay?.(invocation);
       if (replayed !== undefined) return replayed;

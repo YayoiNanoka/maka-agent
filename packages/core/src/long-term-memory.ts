@@ -538,6 +538,10 @@ export interface MemoryItemStore {
   listRecoverableMemoryExtractions(
     request?: ListRecoverableMemoryExtractionsRequest,
   ): Promise<readonly MemoryExtractionOperation[]>;
+  /** Terminal Operations whose diagnostic retention elapsed and whose cleanup is claimable. */
+  listRecoverableMemoryExtractionCleanups(
+    request?: ListRecoverableMemoryExtractionsRequest,
+  ): Promise<readonly MemoryExtractionOperation[]>;
   hasUnfinishedMemoryExtractions(): Promise<boolean>;
   listUnassignedMemoryExtractionSweepDebts(
     request?: ListUnassignedMemoryExtractionSweepDebtsRequest,

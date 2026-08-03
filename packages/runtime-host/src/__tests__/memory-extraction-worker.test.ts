@@ -170,7 +170,27 @@ test('does not claim queued work while Memory execution is policy-blocked', asyn
   assert.equal(fixture.runs.length, 0);
   assert.equal(fixture.store.listCalls, 1, 'policy blocking must not create a hot rescan loop');
   assert.equal(fixture.residencies, 1);
-  assert.equal(fixture.releases, 0, 'policy-blocked durable work must keep Host residency');
+  assert.equal(fixture.releases, 1, 'policy-blocked work must release idle Host residency');
+  await fixture.worker.close();
+});
+
+test('retires a terminal Operation internal Session after diagnostic retention', async () => {
+  const cleaned: string[] = [];
+  const fixture = workerFixture({
+    cleanupInternalSession: async (value) => {
+      cleaned.push(value.internalSessionId);
+    },
+  });
+  fixture.store.add(operation('cleanup-1', 'targeted'));
+  await fixture.worker.recover();
+  fixture.worker.start();
+  await eventually(() => fixture.runs.length === 1);
+  fixture.store.commit('cleanup-1');
+  fixture.runs[0]!.resolve();
+
+  await fixture.clock.advance(100);
+  await eventually(() => fixture.store.read('cleanup-1')?.cleanupState === 'completed');
+  assert.deepEqual(cleaned, ['internal-cleanup-1']);
   await fixture.worker.close();
 });
 
@@ -200,6 +220,7 @@ function workerFixture(
     autoRunnerResolve?: boolean;
     scanGate?: Promise<void>;
     policyAuthorized?: boolean;
+    cleanupInternalSession?: (operation: MemoryExtractionOperation) => Promise<void>;
   } = {},
 ) {
   const clock = new FakeClock();
@@ -245,6 +266,9 @@ function workerFixture(
       await execute();
       return true;
     },
+    ...(options.cleanupInternalSession
+      ? { cleanupInternalSession: options.cleanupInternalSession }
+      : {}),
     concurrency: options.concurrency ?? 2,
     leaseDurationMs: options.leaseDurationMs ?? 30,
     leaseRenewIntervalMs: options.leaseRenewIntervalMs ?? 10,
@@ -321,6 +345,21 @@ class FakeExtractionStore {
     return [...this.operations.values()].some(
       (operation) => operation.state === 'pending' || operation.state === 'running',
     );
+  }
+
+  async listRecoverableMemoryExtractionCleanups(input: { limit?: number } = {}) {
+    return [...this.operations.values()]
+      .filter(
+        (operation) =>
+          (operation.state === 'succeeded' || operation.state === 'failed') &&
+          operation.diagnosticRetentionUntil !== null &&
+          operation.diagnosticRetentionUntil <= this.now() &&
+          (operation.cleanupState === 'pending' ||
+            (operation.cleanupState === 'running' &&
+              operation.cleanupLeaseExpiresAt !== null &&
+              operation.cleanupLeaseExpiresAt <= this.now())),
+      )
+      .slice(0, input.limit);
   }
 
   async claimMemoryExtractionOperation(request: ClaimMemoryExtractionOperationRequest) {
@@ -408,6 +447,57 @@ class FakeExtractionStore {
     return this.attempts.get(attemptId);
   }
 
+  async claimMemoryExtractionCleanup(request: {
+    operationId: string;
+    claimId: string;
+    leaseExpiresAt: number;
+  }) {
+    const current = this.operations.get(request.operationId);
+    if (
+      !current ||
+      current.diagnosticRetentionUntil === null ||
+      current.diagnosticRetentionUntil > this.now() ||
+      (current.cleanupState !== 'pending' &&
+        !(
+          current.cleanupState === 'running' &&
+          current.cleanupLeaseExpiresAt !== null &&
+          current.cleanupLeaseExpiresAt <= this.now()
+        ))
+    ) {
+      return undefined;
+    }
+    const claimed: MemoryExtractionOperation = {
+      ...current,
+      cleanupState: 'running',
+      cleanupClaimId: request.claimId,
+      cleanupLeaseExpiresAt: request.leaseExpiresAt,
+      cleanupAttemptCount: current.cleanupAttemptCount + 1,
+      cleanupErrorCode: null,
+    };
+    this.operations.set(current.operationId, claimed);
+    return claimed;
+  }
+
+  async finishMemoryExtractionCleanup(request: {
+    operationId: string;
+    claimId: string;
+    errorCode?: string;
+  }) {
+    const current = this.operations.get(request.operationId);
+    assert.ok(current);
+    assert.equal(current.cleanupClaimId, request.claimId);
+    const completed: MemoryExtractionOperation = {
+      ...current,
+      cleanupState: request.errorCode ? 'pending' : 'completed',
+      cleanupClaimId: null,
+      cleanupLeaseExpiresAt: null,
+      cleanupErrorCode: request.errorCode ?? null,
+      cleanedAt: request.errorCode ? null : this.now(),
+    };
+    this.operations.set(current.operationId, completed);
+    return completed;
+  }
+
   async cancelMemoryExtractionsForSessions(request: {
     sessionIds: readonly string[];
     diagnosticRetentionUntil: number;
@@ -469,6 +559,8 @@ class FakeExtractionStore {
       completedAt: this.now(),
       updatedAt: this.now(),
       resultType: 'empty',
+      diagnosticRetentionUntil: this.now() + 100,
+      cleanupState: 'pending',
     });
   }
 }

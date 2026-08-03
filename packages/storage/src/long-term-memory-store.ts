@@ -146,6 +146,12 @@ function createWriterFacade(
       ) as ListRecoverableMemoryExtractionsRequest;
       return run(() => store.listRecoverableMemoryExtractions(snapshot));
     },
+    listRecoverableMemoryExtractionCleanups: (request) => {
+      const snapshot = Object.freeze(
+        request?.limit === undefined ? {} : { limit: request.limit },
+      ) as ListRecoverableMemoryExtractionsRequest;
+      return run(() => store.listRecoverableMemoryExtractionCleanups(snapshot));
+    },
     hasUnfinishedMemoryExtractions: () => run(() => store.hasUnfinishedMemoryExtractions()),
     listUnassignedMemoryExtractionSweepDebts: (request) => {
       const snapshot = Object.freeze(

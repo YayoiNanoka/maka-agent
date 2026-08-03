@@ -108,6 +108,10 @@ test('runs one Attempt in a stable hidden Session with inherited model configura
   });
   assert.match((sends[0] as any).input.text, /runtime_memory_extraction/u);
   assert.match((sends[0] as any).input.text, /bounded evidence/u);
+  assert.match((sends[0] as any).input.text, /future Agent would plausibly act better/u);
+  assert.match((sends[0] as any).input.text, /Empty is preferable to low-value memory/u);
+  assert.match((sends[0] as any).input.text, /Assistant text alone does not prove/u);
+  assert.match((sends[0] as any).input.text, /Time passing never converts a plan/u);
   assert.deepEqual(invalidations, ['memory-session-1', 'memory-session-1']);
   assert.equal(bindings.resolveForSession(internalHeader()), undefined);
 });

@@ -542,6 +542,7 @@ describe('SQLite long-term memory extraction', () => {
         leaseExpiresAt: 2_000,
       });
       await store.commitMemoryExtraction(emptyCommit());
+
       assert.equal((await store.listUnassignedMemoryExtractionSweepDebts()).length, 1);
 
       assert.deepEqual(
@@ -568,6 +569,8 @@ describe('SQLite long-term memory extraction', () => {
       });
       await store.commitMemoryExtraction(emptyCommit());
 
+      assert.deepEqual(await store.listRecoverableMemoryExtractionCleanups(), []);
+
       assert.equal(
         await store.claimMemoryExtractionCleanup({
           operationId: 'operation-1',
@@ -577,6 +580,12 @@ describe('SQLite long-term memory extraction', () => {
         undefined,
       );
       setNow(2_000);
+      assert.deepEqual(
+        (await store.listRecoverableMemoryExtractionCleanups()).map(
+          (operation) => operation.operationId,
+        ),
+        ['operation-1'],
+      );
       const claimed = await store.claimMemoryExtractionCleanup({
         operationId: 'operation-1',
         claimId: 'cleanup-1',
@@ -590,6 +599,7 @@ describe('SQLite long-term memory extraction', () => {
       });
       assert.equal(completed.cleanupState, 'completed');
       assert.equal(completed.cleanedAt, 2_000);
+      assert.deepEqual(await store.listRecoverableMemoryExtractionCleanups(), []);
     });
   });
 

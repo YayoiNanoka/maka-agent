@@ -24,12 +24,15 @@ type TimerHandle = ReturnType<typeof setTimeout>;
 type MemoryExtractionWorkerStore = Pick<
   MemoryItemStore,
   | 'listRecoverableMemoryExtractions'
+  | 'listRecoverableMemoryExtractionCleanups'
   | 'hasUnfinishedMemoryExtractions'
   | 'claimMemoryExtractionOperation'
   | 'renewMemoryExtractionAttemptLease'
   | 'failMemoryExtractionAttempt'
   | 'readMemoryExtractionOperation'
   | 'readMemoryExtractionAttempt'
+  | 'claimMemoryExtractionCleanup'
+  | 'finishMemoryExtractionCleanup'
   | 'cancelMemoryExtractionsForSessions'
 >;
 
@@ -65,6 +68,8 @@ export interface HostMemoryExtractionWorkerInput {
   readonly runner: MemoryExtractionAttemptRunner;
   readonly acquireResidency: () => RuntimeHostResidency;
   readonly requestDrain: () => void;
+  /** Retires the hidden diagnostic Session after the Operation retention window. */
+  readonly cleanupInternalSession?: (operation: MemoryExtractionOperation) => Promise<void>;
   /** Durable Cursor-debt repair, invoked on recovery and every poll/notification scan. */
   readonly reconcileSweepDebts?: () => Promise<unknown>;
   /** Linearizes policy-dependent execution with privacy/memory policy mutation. */
@@ -105,6 +110,7 @@ export class HostMemoryExtractionWorker {
   readonly #runner: MemoryExtractionAttemptRunner;
   readonly #acquireResidency: () => RuntimeHostResidency;
   readonly #requestDrain: () => void;
+  readonly #cleanupInternalSession: (operation: MemoryExtractionOperation) => Promise<void>;
   readonly #reconcileSweepDebts: () => Promise<unknown>;
   readonly #runPolicyAuthorized: NonNullable<
     HostMemoryExtractionWorkerInput['runPolicyAuthorized']
@@ -123,6 +129,8 @@ export class HostMemoryExtractionWorker {
   readonly #setTimeout: typeof setTimeout;
   readonly #clearTimeout: typeof clearTimeout;
   readonly #notifiedOperationIds = new Set<string>();
+  readonly #policyBlockedOperationIds = new Set<string>();
+  readonly #cleanupFailures = new Set<string>();
   readonly #active = new Map<string, ActiveAttempt>();
   #residency: RuntimeHostResidency | undefined;
   #recoverTask: Promise<void> | undefined;
@@ -140,6 +148,7 @@ export class HostMemoryExtractionWorker {
     this.#runner = input.runner;
     this.#acquireResidency = input.acquireResidency;
     this.#requestDrain = input.requestDrain;
+    this.#cleanupInternalSession = input.cleanupInternalSession ?? (() => Promise.resolve());
     this.#reconcileSweepDebts = input.reconcileSweepDebts ?? (() => Promise.resolve());
     this.#runPolicyAuthorized =
       input.runPolicyAuthorized ??
@@ -188,9 +197,17 @@ export class HostMemoryExtractionWorker {
   notify(operationId: string): void {
     if (this.isDraining) return;
     if (operationId.trim() === '') return;
+    this.#policyBlockedOperationIds.delete(operationId);
     this.#notifiedOperationIds.add(operationId);
     this.#durableWorkPresent = true;
     this.#refreshResidency();
+    this.#requestScan();
+  }
+
+  /** Reconsiders Operations paused by the previous privacy/memory policy snapshot. */
+  notifyPolicyChanged(): void {
+    if (this.isDraining) return;
+    this.#policyBlockedOperationIds.clear();
     this.#requestScan();
   }
 
@@ -222,6 +239,7 @@ export class HostMemoryExtractionWorker {
     this.#draining = true;
     this.#stopPoll();
     this.#notifiedOperationIds.clear();
+    this.#policyBlockedOperationIds.clear();
     const reason = new MemoryExtractionWorkerDrainError();
     for (const active of this.#active.values()) active.controller.abort(reason);
     this.#refreshResidency();
@@ -287,11 +305,18 @@ export class HostMemoryExtractionWorker {
     const operations = await this.#store.listRecoverableMemoryExtractions({
       limit: RECOVERABLE_SCAN_LIMIT,
     });
-    this.#durableWorkPresent = await this.#store.hasUnfinishedMemoryExtractions();
+    const runnableOperations = operations.filter(
+      (operation) => !this.#policyBlockedOperationIds.has(operation.operationId),
+    );
+    const unfinished = await this.#store.hasUnfinishedMemoryExtractions();
+    this.#durableWorkPresent =
+      runnableOperations.length > 0 || (unfinished && this.#policyBlockedOperationIds.size === 0);
     this.#refreshResidency();
     if (this.isDraining) return;
+    await this.#runDueCleanups();
+    if (this.isDraining) return;
     let launched = 0;
-    for (const operation of operations) {
+    for (const operation of runnableOperations) {
       if (launched >= available || this.isDraining) break;
       if (this.#active.has(operation.operationId)) continue;
       if ([...this.#active.values()].some((active) => active.sessionId === operation.sessionId)) {
@@ -330,6 +355,45 @@ export class HostMemoryExtractionWorker {
       this.#runAuthorizedOperation(operation, active),
     );
     active.policyBlocked = !authorized;
+    if (authorized) {
+      this.#policyBlockedOperationIds.delete(operation.operationId);
+      return;
+    }
+    this.#policyBlockedOperationIds.add(operation.operationId);
+    // Paused policy work is durable but not runnable. It must not keep an idle
+    // Runtime Host resident or relaunch on every poll.
+    this.#durableWorkPresent = false;
+  }
+
+  async #runDueCleanups(): Promise<void> {
+    const cleanups = await this.#store.listRecoverableMemoryExtractionCleanups({
+      limit: RECOVERABLE_SCAN_LIMIT,
+    });
+    for (const operation of cleanups) {
+      if (this.isDraining) return;
+      if (this.#cleanupFailures.has(operation.operationId)) continue;
+      const claimId = this.#newId();
+      const claimed = await this.#store.claimMemoryExtractionCleanup({
+        operationId: operation.operationId,
+        claimId,
+        leaseExpiresAt: this.#now() + this.#leaseDurationMs,
+      });
+      if (!claimed) continue;
+      try {
+        await this.#cleanupInternalSession(claimed);
+        await this.#store.finishMemoryExtractionCleanup({
+          operationId: claimed.operationId,
+          claimId,
+        });
+      } catch {
+        this.#cleanupFailures.add(claimed.operationId);
+        await this.#store.finishMemoryExtractionCleanup({
+          operationId: claimed.operationId,
+          claimId,
+          errorCode: 'internal_session_cleanup_failed',
+        });
+      }
+    }
   }
 
   async #runAuthorizedOperation(

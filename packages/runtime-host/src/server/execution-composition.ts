@@ -103,6 +103,7 @@ export async function createExecutionRuntimeHostComposition(
     | undefined;
   let graphClient: HostAgentGraphCoordinator | undefined;
   let memoryExtractionWorker: HostMemoryExtractionWorker | undefined;
+  let sessionRetirement: HostSessionRetirementCoordinator | undefined;
   try {
     const runtimePolicyStores = await openInteractiveRuntimePolicyStoresForWrite(
       context.owner.lease,
@@ -541,6 +542,34 @@ export async function createExecutionRuntimeHostComposition(
           await execute();
           return true;
         }),
+      cleanupInternalSession: async (operation) => {
+        const retirement = sessionRetirement;
+        if (!retirement) throw new Error('Session retirement authority is unavailable');
+        let snapshot;
+        try {
+          snapshot = await stores.sessionStore.readHeaderRecordSnapshot(
+            operation.internalSessionId,
+          );
+        } catch (error) {
+          if (isSessionNotFoundError(error)) return;
+          throw error;
+        }
+        const owner = snapshot.header.internalOwner;
+        if (
+          owner?.kind !== 'memory_extraction' ||
+          owner.operationId !== operation.operationId ||
+          owner.parentSessionId !== operation.sessionId
+        ) {
+          throw new Error('Memory Extraction internal Session ownership changed');
+        }
+        const outcome = await retirement.removeInternalSession({
+          sessionId: operation.internalSessionId,
+          expectedRevision: snapshot.revision,
+        });
+        if (!outcome.ok || outcome.result.kind !== 'removed') {
+          throw new Error('Memory Extraction internal Session retirement did not commit');
+        }
+      },
     });
     graphSupervisorWake = new AgentGraphSupervisorWakeCoordinator({
       activityRegistry: graphWakeActivities,
@@ -627,6 +656,7 @@ export async function createExecutionRuntimeHostComposition(
           context.requestDrain();
           throw error;
         }
+        memoryExtractionWorker?.notifyPolicyChanged();
         registerBackendInvalidation();
       },
     );
@@ -654,7 +684,7 @@ export async function createExecutionRuntimeHostComposition(
       isSessionActive: (sessionId) => coordinator.readRootState(sessionId).kind !== 'idle',
       requestDrain: context.requestDrain,
     });
-    const sessionRetirement = new HostSessionRetirementCoordinator({
+    const retirementCoordinator = new HostSessionRetirementCoordinator({
       stores: stores.sessionStore,
       admission: sessionAdmission,
       root: coordinator,
@@ -682,6 +712,7 @@ export async function createExecutionRuntimeHostComposition(
       worktrees: worktreeChildExecutor,
       requestDrain: context.requestDrain,
     });
+    sessionRetirement = retirementCoordinator;
     const artifacts = new HostArtifactCoordinator(
       openedArtifactStore,
       context.requestDrain,
@@ -695,7 +726,7 @@ export async function createExecutionRuntimeHostComposition(
       ...executionInspect.handlers,
       ...graphClient.handlers,
       ...sessionRevisions.handlers,
-      ...sessionRetirement.handlers,
+      ...retirementCoordinator.handlers,
       ...messages.handlers,
       ...interactions.handlers,
       ...runtimePolicy.handlers,
@@ -716,7 +747,7 @@ export async function createExecutionRuntimeHostComposition(
         await requireMemory(memory).recover();
         await skills.recover();
         await openedArtifactStore.recover();
-        await sessionRetirement.recover();
+        await retirementCoordinator.recover();
         const sessions = await stores.sessionStore.listForRecovery();
         await worktreeChildExecutor.recover(
           sessions.flatMap((session) =>
@@ -763,7 +794,7 @@ export async function createExecutionRuntimeHostComposition(
         // Retirement cleanup may still need the Memory Worker and memory.sqlite
         // to terminalize Operations before source evidence is purged.
         try {
-          await sessionRetirement.close();
+          await retirementCoordinator.close();
         } catch (error) {
           errors.push(error);
         }

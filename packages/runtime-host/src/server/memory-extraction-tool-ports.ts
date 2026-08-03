@@ -34,7 +34,8 @@ import {
 const SEARCH_MATCH_LIMIT = 5;
 const SEARCH_CANDIDATE_LIMIT = 20;
 const EXPOSED_CANDIDATE_LIMIT = 5;
-const MAX_EVIDENCE_CHARS = 32_768;
+/** Additional searched/read evidence only; the frozen extraction Range is already model-bounded. */
+const MAX_ADDITIONAL_EVIDENCE_CHARS = 32_768;
 const MAX_SEARCH_CALLS = 3;
 const MAX_READ_CALLS = 4;
 const DIAGNOSTIC_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
@@ -158,7 +159,7 @@ export class HostMemoryExtractionAttemptPorts implements MemoryExtractionChildTo
   readonly #refSecret = randomBytes(32);
   readonly #issuedSources = new Map<string, AuthorizedSource>();
   readonly #issuedSpans = new Map<string, IssuedSpan>();
-  #remainingEvidenceChars = MAX_EVIDENCE_CHARS;
+  #remainingEvidenceChars = MAX_ADDITIONAL_EVIDENCE_CHARS;
   #searchCalls = 0;
   #readCalls = 0;
   #initialSpan: MemoryEvidenceSpanView | undefined;
@@ -177,11 +178,9 @@ export class HostMemoryExtractionAttemptPorts implements MemoryExtractionChildTo
       this.#initialSpan = this.#issueSpan(evidence, 0, -1, 0);
       return this.#initialSpan;
     }
-    const size = spanCharCount(evidence, indexes[0]!, indexes.at(-1)!);
-    if (size > this.#remainingEvidenceChars) {
-      throw protocolError('evidence_budget_exhausted', false, 'read');
-    }
-    this.#remainingEvidenceChars -= size;
+    // The scheduler freezes this Range from an already model-bounded parent
+    // request. Do not reject a valid coverage Range using the smaller budget
+    // reserved for optional historical search/read expansion.
     this.#initialSpan = this.#issueSpan(evidence, indexes[0]!, indexes.at(-1)!, 0);
     return this.#initialSpan;
   }
@@ -682,7 +681,17 @@ export class HostMemoryExtractionAttemptPorts implements MemoryExtractionChildTo
       });
     }
 
-    const authorizedEntries = new Map<string, { event: RuntimeEvent; initial: boolean }>();
+    const targetedPriorRunIds =
+      operation.mode === 'targeted' ? authorizedPriorRunIds(manifest, runs[0]!.runId) : [];
+    const orderedRunIds =
+      operation.mode === 'targeted'
+        ? [...targetedPriorRunIds, runs[0]!.runId]
+        : runs.map((run) => run.runId);
+    const runOrder = new Map(orderedRunIds.map((runId, index) => [runId, index] as const));
+    const authorizedEntries = new Map<
+      string,
+      { event: RuntimeEvent; initial: boolean; runOrder: number; eventSeq: number }
+    >();
     for (const run of runs) {
       const readPrefix = this.#input.runtimeEvents.readImmutableRuntimePrefix;
       if (!readPrefix) throw protocolError('evidence_authority_unavailable', false, 'search');
@@ -706,28 +715,36 @@ export class HostMemoryExtractionAttemptPorts implements MemoryExtractionChildTo
           initial:
             (operation.mode === 'sweep' && eventSeq > run.fromEventSeqExclusive) ||
             (operation.mode === 'targeted' && event.turnId === run.initialTurnId),
+          runOrder: runOrder.get(run.runId) ?? Number.MAX_SAFE_INTEGER,
+          eventSeq,
         });
       }
     }
     if (operation.mode === 'targeted') {
-      const currentRunId = runs[0]!.runId;
       const readImmutableEvents = this.#input.runtimeEvents.readImmutableRuntimeEvents;
       if (!readImmutableEvents) {
         throw protocolError('evidence_authority_unavailable', false, 'search');
       }
-      for (const priorRunId of authorizedPriorRunIds(manifest, currentRunId)) {
+      for (const priorRunId of targetedPriorRunIds) {
         const events = await readImmutableEvents.call(
           this.#input.runtimeEvents,
           operation.sessionId,
           priorRunId,
         );
         assertTerminalPriorRun(events, operation.sessionId, priorRunId);
-        for (const event of events) authorizedEntries.set(event.id, { event, initial: false });
+        for (const [index, event] of events.entries()) {
+          authorizedEntries.set(event.id, {
+            event,
+            initial: false,
+            runOrder: runOrder.get(priorRunId) ?? Number.MAX_SAFE_INTEGER,
+            eventSeq: index + 1,
+          });
+        }
       }
     }
     const authorizedEvents = [...authorizedEntries.values()].sort(
       (left, right) =>
-        left.event.ts - right.event.ts || left.event.id.localeCompare(right.event.id),
+        left.runOrder - right.runOrder || left.eventSeq - right.eventSeq,
     );
     const projectedViews = projectEvidenceViews(authorizedEvents.map((entry) => entry.event));
     const turns: Array<{ key: string; sources: AuthorizedSource[] }> = [];

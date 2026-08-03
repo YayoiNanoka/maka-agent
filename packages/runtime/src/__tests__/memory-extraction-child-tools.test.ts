@@ -31,6 +31,10 @@ test('main and Memory Agents share one strict provider schema while main dispatc
     ['replay_safe', 'replay_safe', 'idempotent'],
   );
   assert.equal(bound[2]?.executionSemantics, 'exclusive_step');
+  assert.ok(
+    bound.every((tool) => tool.description.includes('otherwise never call it')),
+    'provider-visible internal tools must not invite ordinary Agent runs to call them',
+  );
   assert.deepEqual(
     unbound.map((tool) => ({
       name: tool.name,
@@ -268,6 +272,33 @@ test('identical propose and resolve calls replay without invoking ports again', 
   );
   assert.equal(proposeCalls, 1);
   assert.equal(resolveCalls, 1);
+});
+
+test('replayed valid calls still consume the total Attempt tool budget', async () => {
+  let searchCalls = 0;
+  const [search] = buildMemoryExtractionChildTools(
+    binding(),
+    ports({
+      evidenceSearch: {
+        search: async () => {
+          searchCalls += 1;
+          return { status: 'ok', spans: [], truncated: false, omittedCount: 0 };
+        },
+      },
+    }),
+  );
+  for (let index = 0; index < 12; index += 1) {
+    const result = await search!.impl(
+      { queries: ['workflow'] },
+      context({ toolCallId: `tool-${index}` }),
+    );
+    assert.equal((result as { status: string }).status, 'ok');
+  }
+  assert.deepEqual(
+    await search!.impl({ queries: ['workflow'] }, context({ toolCallId: 'tool-over-budget' })),
+    toolError('tool_budget_exhausted', false, 0, 'search'),
+  );
+  assert.equal(searchCalls, 1);
 });
 
 test('forged candidateRef is rejected before the final commit port', async () => {

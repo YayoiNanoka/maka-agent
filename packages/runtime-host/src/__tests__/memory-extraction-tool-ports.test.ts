@@ -122,6 +122,37 @@ test('search enforces cumulative evidence and call budgets across one Attempt', 
   );
 });
 
+test('initial coverage is not rejected by the smaller optional-search budget', async () => {
+  const content = `durable workflow ${'x'.repeat(40_000)}`;
+  const fixture = targetedFixture(
+    [textEvent('event-1', 'turn-1', 'user', 'user', content, 1)],
+    1,
+  );
+  const initial = await fixture.ports.prepareInitialEvidence();
+  assert.equal(initial.sources.length, 1);
+  assert.equal(initial.sources[0]!.content, content);
+});
+
+test('authorized evidence follows canonical Run and event sequence, not timestamps', async () => {
+  const fixture = targetedFixture(
+    [
+      textEvent('event-1', 'turn-1', 'user', 'user', 'shared first', 1, 300),
+      textEvent('event-2', 'turn-2', 'user', 'user', 'shared second', 2, 200),
+      textEvent('event-3', 'turn-3', 'user', 'user', 'shared current', 3, 100),
+    ],
+    3,
+  );
+  const found = await fixture.ports.evidenceSearch.search(
+    invocation(),
+    { queries: ['shared'] },
+    new AbortController().signal,
+  );
+  assert.deepEqual(
+    found.spans.flatMap((span) => span.sources).map((source) => source.content),
+    ['shared first', 'shared second', 'shared current'],
+  );
+});
+
 test('evidence projection keeps orphan calls but excludes private and control events', async () => {
   const events: RuntimeEvent[] = [
     textEvent('event-1', 'turn-1', 'user', 'user', 'Remember the public constraint.', 1),

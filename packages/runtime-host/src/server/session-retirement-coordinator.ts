@@ -194,6 +194,11 @@ export class HostSessionRetirementCoordinator {
     await this.#cleanupWorker;
   }
 
+  /** Host-only retirement path for hidden Sessions that have no client connection context. */
+  removeInternalSession(input: SessionRemoveInput): Promise<OperationOutcome<'session.remove'>> {
+    return this.#remove(input);
+  }
+
   async #setLifecycle(
     input: SessionLifecycleSetInput,
   ): Promise<OperationOutcome<'session.lifecycle.set'>> {

@@ -547,6 +547,28 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
     });
   }
 
+  async listRecoverableMemoryExtractionCleanups(
+    request: ListRecoverableMemoryExtractionsRequest = {},
+  ): Promise<readonly MemoryExtractionOperation[]> {
+    this.#assertOpen();
+    const now = normalizeTimestamp((this.#options.now ?? Date.now)(), 'current time');
+    const limit = normalizeRecoverableExtractionLimit(request);
+    return this.#readSnapshot(() => {
+      const rows = this.#database
+        .prepare(
+          `SELECT * FROM memory_extraction_operations
+           WHERE state IN ('succeeded', 'failed')
+             AND diagnostic_retention_until <= ?
+             AND (cleanup_state = 'pending'
+               OR (cleanup_state = 'running' AND cleanup_lease_expires_at <= ?))
+           ORDER BY diagnostic_retention_until ASC, operation_id ASC
+           LIMIT ?`,
+        )
+        .all(now, now, limit) as unknown as MemoryExtractionOperationRow[];
+      return rows.map((row) => this.#decodeExtractionOperation(row));
+    });
+  }
+
   async hasUnfinishedMemoryExtractions(): Promise<boolean> {
     this.#assertOpen();
     return this.#readSnapshot(() =>
