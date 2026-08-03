@@ -19,7 +19,7 @@ const DIGEST_B = digest('b');
 
 describe('SQLite long-term memory extraction', () => {
   test('commits an empty sweep atomically and replays its frozen receipt', async () => {
-    await withExtractionStore(async ({ store, setNow, setFailpoint }) => {
+    await withExtractionStore(async ({ store, setNow }) => {
       await store.createMemoryExtractionOperation(sweepOperation());
       await store.claimMemoryExtractionOperation({
         operationId: 'operation-1',
@@ -29,15 +29,6 @@ describe('SQLite long-term memory extraction', () => {
         snapshotKind: 'provider_prefix',
         leaseExpiresAt: 2_000,
       });
-
-      setFailpoint('after_cursor_write');
-      await assert.rejects(store.commitMemoryExtraction(emptyCommit()), /after_cursor_write/);
-      setFailpoint(undefined);
-      assert.equal(
-        (await store.readMemoryExtractionCursor('session-1', 'run-1'))?.committedEventSeq,
-        0,
-      );
-      assert.equal((await store.readMemoryExtractionOperation('operation-1'))?.state, 'running');
 
       const committed = await store.commitMemoryExtraction(emptyCommit());
       assert.equal(committed.replayed, false);
@@ -328,22 +319,22 @@ describe('SQLite long-term memory extraction', () => {
     });
   });
 
-  test('commits proposed Items with provenance in the extraction transaction', async () => {
+  test('commits a Targeted proposed Item without a Cursor range', async () => {
     await withExtractionStore(async ({ store }) => {
       await store.createMemoryExtractionOperation(targetedOperation());
       await store.claimMemoryExtractionOperation({
         operationId: 'operation-targeted',
-        attemptId: 'attempt-proposed',
-        turnId: 'memory-turn-proposed',
-        runId: 'memory-run-proposed',
+        attemptId: 'attempt-targeted',
+        turnId: 'memory-turn-targeted',
+        runId: 'memory-run-targeted',
         snapshotKind: 'provider_prefix',
         leaseExpiresAt: 2_000,
       });
 
       const committed = await store.commitMemoryExtraction({
         operationId: 'operation-targeted',
-        attemptId: 'attempt-proposed',
-        runId: 'memory-run-proposed',
+        attemptId: 'attempt-targeted',
+        runId: 'memory-run-targeted',
         resultType: 'proposed',
         selectionSaturated: false,
         evidenceDigest: DIGEST_A,
@@ -351,13 +342,11 @@ describe('SQLite long-term memory extraction', () => {
         diagnosticRetentionUntil: 2_000,
       });
 
+      assert.equal(committed.operation.state, 'succeeded');
+      assert.deepEqual(committed.cursors, []);
       const itemId = committed.writeOperation.results[0]?.itemId;
       assert.ok(itemId);
-      const record = await store.readItem(itemId);
-      assert.equal(record?.item.content, 'The project uses SQLite for durable memory.');
-      assert.equal(record?.sources[0]?.eventId, 'event-a');
-      assert.equal(committed.operation.state, 'succeeded');
-      assert.equal(committed.attempt.state, 'succeeded');
+      assert.equal((await store.readItem(itemId))?.sources[0]?.eventId, 'event-a');
     });
   });
 

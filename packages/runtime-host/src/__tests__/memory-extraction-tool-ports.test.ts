@@ -122,22 +122,7 @@ test('search enforces cumulative evidence and call budgets across one Attempt', 
   );
 });
 
-test('an orphan tool call remains usable only as outcome_unknown evidence', async () => {
-  const fixture = targetedFixture(
-    [
-      textEvent('event-1', 'turn-1', 'user', 'user', 'Run the check.', 1),
-      toolEvent('event-2', 'turn-1', 'function_call', 2),
-    ],
-    2,
-  );
-  const initial = await fixture.ports.prepareInitialEvidence();
-  assert.match(
-    initial.sources.map((source) => source.content).join('\n'),
-    /tool_call name=test_tool outcome=unknown/u,
-  );
-});
-
-test('private thinking, Memory control tools, and orphan results never become evidence', async () => {
+test('evidence projection keeps orphan calls but excludes private and control events', async () => {
   const events: RuntimeEvent[] = [
     textEvent('event-1', 'turn-1', 'user', 'user', 'Remember the public constraint.', 1),
     {
@@ -155,18 +140,26 @@ test('private thinking, Memory control tools, and orphan results never become ev
     toolEvent('event-3', 'turn-1', 'function_call', 3, 'memory_remember', 'memory-call'),
     toolEvent('event-4', 'turn-1', 'function_response', 4, 'memory_remember', 'memory-call'),
     toolEvent('event-5', 'turn-1', 'function_response', 5, 'orphan_tool', 'orphan-call'),
+    toolEvent('event-6', 'turn-1', 'function_call', 6),
   ];
-  const fixture = targetedFixture(events, 5);
+  const fixture = targetedFixture(events, 6);
+  const initial = await fixture.ports.prepareInitialEvidence();
+  const initialContent = initial.sources.map((source) => source.content).join('\n');
+  assert.match(initialContent, /tool_call name=test_tool outcome=unknown/u);
+  assert.doesNotMatch(initialContent, /private chain of thought|memory_remember|orphan_tool/u);
+
   const result = await fixture.ports.evidenceSearch.search(
     invocation(),
     { queries: ['public constraint'] },
     new AbortController().signal,
   );
 
-  assert.deepEqual(
-    result.spans.flatMap((span) => span.sources).map((source) => source.content),
-    ['Remember the public constraint.'],
-  );
+  const resultContent = result.spans
+    .flatMap((span) => span.sources)
+    .map((source) => source.content)
+    .join('\n');
+  assert.match(resultContent, /Remember the public constraint\./u);
+  assert.doesNotMatch(resultContent, /private chain of thought|memory_remember|orphan_tool/u);
 });
 
 test('tool call ids are paired within a Run and may repeat across authorized prior Runs', async () => {

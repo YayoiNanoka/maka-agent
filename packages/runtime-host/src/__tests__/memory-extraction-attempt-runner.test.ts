@@ -47,6 +47,29 @@ test('runs one Attempt in a stable hidden Session with inherited model configura
       executeRoot: async (input) => {
         executions.push(input);
         activeToolsSeen = bindings.resolveForSession(internalHeader())?.length === 3;
+        assert.equal(bindings.resolveForSession(parentHeader()), undefined);
+        assert.equal(
+          bindings.resolveForSession({
+            id: 'memory-session-1',
+            internalOwner: {
+              kind: 'memory_extraction',
+              operationId: 'other-operation',
+              parentSessionId: 'parent-session',
+            },
+          }),
+          undefined,
+        );
+        assert.equal(
+          bindings.resolveForSession({
+            id: 'memory-session-1',
+            internalOwner: {
+              kind: 'memory_extraction',
+              operationId: 'operation-1',
+              parentSessionId: 'other-parent',
+            },
+          }),
+          undefined,
+        );
         for await (const _event of input.start({
           runId: input.runId,
           userMessageId: input.userMessageId,
@@ -121,44 +144,6 @@ test('fails non-retryably before creating an internal Session when the parent is
       error.code === 'parent_session_missing' &&
       error.retryable === false,
   );
-});
-
-test('attempt tool bindings fail closed for ordinary or mismatched internal Sessions', async () => {
-  const bindings = new HostMemoryExtractionAttemptToolBindings({
-    prepare: async () => ({ tools: buildUnboundMemoryExtractionChildTools() }),
-  });
-  const activation = await bindings.activate({
-    operation: operation(),
-    attempt: attempt(),
-    signal: new AbortController().signal,
-  });
-
-  assert.equal(bindings.resolveForSession(parentHeader()), undefined);
-  assert.equal(
-    bindings.resolveForSession({
-      id: 'memory-session-1',
-      internalOwner: {
-        kind: 'memory_extraction',
-        operationId: 'other-operation',
-        parentSessionId: 'parent-session',
-      },
-    }),
-    undefined,
-  );
-  assert.equal(
-    bindings.resolveForSession({
-      id: 'memory-session-1',
-      internalOwner: {
-        kind: 'memory_extraction',
-        operationId: 'operation-1',
-        parentSessionId: 'other-parent',
-      },
-    }),
-    undefined,
-  );
-  assert.equal(bindings.resolveForSession(internalHeader())?.length, 3);
-  await activation.release();
-  assert.equal(bindings.resolveForSession(internalHeader()), undefined);
 });
 
 test('an abort completed during binding preparation is observed before Root execution', async () => {

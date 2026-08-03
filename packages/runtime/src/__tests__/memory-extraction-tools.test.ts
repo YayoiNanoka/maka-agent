@@ -52,17 +52,12 @@ test('memory scheduling tools expose stable empty schemas and distinct trigger s
       toolCallId: 'tool-2',
     },
   ]);
-});
-
-test('memory scheduling requires a durable Agent Run identity', async () => {
-  const [remember] = buildMemoryExtractionScheduleTools({
-    schedule: async () => assert.fail('scheduler must not run without a Run identity'),
-  });
 
   await assert.rejects(
     async () => remember!.impl({}, { ...context(), runId: undefined }),
     /requires an active Agent Run/,
   );
+  assert.equal(requests.length, 2, 'invalid execution identity must not reach the scheduler');
 });
 
 function context(toolCallId = 'tool-1'): MakaToolContext {

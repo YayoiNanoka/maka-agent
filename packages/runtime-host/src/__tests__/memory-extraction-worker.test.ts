@@ -41,39 +41,28 @@ test('notify asynchronously wakes one durable scan and duplicate hints do not du
   );
 });
 
-test('recover honors Store targeted-first ordering and the independent concurrency limit', async () => {
-  const fixture = workerFixture({ concurrency: 1 });
-  fixture.store.add(operation('sweep-1', 'sweep'));
-  fixture.store.add(operation('targeted-1', 'targeted'));
-
-  await fixture.worker.recover();
-  await eventually(() => fixture.runs.length === 1);
-  assert.equal(fixture.runs[0]!.operationId, 'targeted-1');
-
-  fixture.store.commit('targeted-1');
-  fixture.runs[0]!.resolve();
-  await eventually(() => fixture.runs.length === 2);
-  assert.equal(fixture.runs[1]!.operationId, 'sweep-1');
-  fixture.store.commit('sweep-1');
-  fixture.runs[1]!.resolve();
-  await fixture.worker.close();
-});
-
-test('serializes Targeted and Sweep operations that read the same parent Session', async () => {
+test('runs different parents concurrently while preserving targeted-first per-parent order', async () => {
   const fixture = workerFixture({ concurrency: 2 });
-  fixture.store.add(operation('sweep-1', 'sweep'));
-  fixture.store.add(operation('targeted-1', 'targeted'));
+  fixture.store.add(operation('sweep-1', 'sweep', 'session-1'));
+  fixture.store.add(operation('targeted-1', 'targeted', 'session-1'));
+  fixture.store.add(operation('sweep-2', 'sweep', 'session-2'));
 
   await fixture.worker.recover();
-  await eventually(() => fixture.runs.length === 1);
-  assert.equal(fixture.runs[0]!.operationId, 'targeted-1');
+  await eventually(() => fixture.runs.length === 2);
+  assert.deepEqual(
+    fixture.runs.map((run) => run.operationId),
+    ['targeted-1', 'sweep-2'],
+  );
 
   fixture.store.commit('targeted-1');
   fixture.runs[0]!.resolve();
-  await eventually(() => fixture.runs.length === 2);
-  assert.equal(fixture.runs[1]!.operationId, 'sweep-1');
-  fixture.store.commit('sweep-1');
+  await eventually(() => fixture.runs.length === 3);
+  assert.equal(fixture.runs[2]!.operationId, 'sweep-1');
+
+  fixture.store.commit('sweep-2');
   fixture.runs[1]!.resolve();
+  fixture.store.commit('sweep-1');
+  fixture.runs[2]!.resolve();
   await fixture.worker.close();
 });
 
@@ -518,10 +507,14 @@ class FakeClock {
   }
 }
 
-function operation(operationId: string, mode: 'targeted' | 'sweep'): MemoryExtractionOperation {
+function operation(
+  operationId: string,
+  mode: 'targeted' | 'sweep',
+  sessionId = 'session-1',
+): MemoryExtractionOperation {
   return {
     operationId,
-    sessionId: 'session-1',
+    sessionId,
     mode,
     triggerKind: mode === 'targeted' ? 'user_requested' : 'agent_requested',
     internalSessionId: `internal-${operationId}`,

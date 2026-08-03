@@ -19,7 +19,7 @@ import { HostMemoryExtractionScheduler } from '../server/memory-extraction-sched
 import { RuntimePolicyActivationGate } from '../server/runtime-policy-activation-gate.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 
-test('targeted scheduling ignores agentReadEnabled and persists an authoritative frozen boundary', async () => {
+test('targeted scheduling freezes authority and maps durable admission outcomes', async () => {
   const fixture = schedulerFixture({ agentReadEnabled: false });
 
   assert.deepEqual(await fixture.scheduler.schedule(scheduleRequest('targeted')), {
@@ -55,6 +55,19 @@ test('targeted scheduling ignores agentReadEnabled and persists an authoritative
     status: 'rejected',
     reason: 'queue_full',
   });
+
+  const replayed = schedulerFixture({ replayed: true });
+  assert.deepEqual(await replayed.scheduler.schedule(scheduleRequest('targeted')), {
+    status: 'coalesced',
+  });
+  assert.equal(replayed.ready.length, 1);
+
+  const missingDispatch = schedulerFixture({ omitDispatch: true });
+  assert.deepEqual(await missingDispatch.scheduler.schedule(scheduleRequest('targeted')), {
+    status: 'rejected',
+    reason: 'runtime_unavailable',
+  });
+  assert.deepEqual(missingDispatch.created, []);
 });
 
 test('scheduler rejects incognito and disabled Memory before reading RuntimeEvent evidence', async () => {
@@ -103,7 +116,7 @@ test('sweep scheduling freezes the dispatch high-water and creates a Cursor rang
   assert.deepEqual(fixture.prefixReads, [undefined, 1]);
 });
 
-test('sweep returns already_covered only for a committed authoritative boundary', async () => {
+test('sweep distinguishes committed and active Cursor boundaries', async () => {
   // The same Tool Call may be replayed after a later boundary was committed.
   // The committed digest is revalidated at its own high-water before the old
   // dispatch boundary is classified as covered.
@@ -114,10 +127,8 @@ test('sweep returns already_covered only for a committed authoritative boundary'
     status: 'already_covered',
   });
   assert.deepEqual(fixture.created, []);
-});
 
-test('sweep raises an active requested boundary and returns coalesced', async () => {
-  const fixture = schedulerFixture({
+  const active = schedulerFixture({
     cursor: {
       ...emptyCursor(),
       activeSweepOperationId: 'active-sweep',
@@ -127,11 +138,11 @@ test('sweep raises an active requested boundary and returns coalesced', async ()
     },
   });
 
-  assert.deepEqual(await fixture.scheduler.schedule(scheduleRequest('sweep')), {
+  assert.deepEqual(await active.scheduler.schedule(scheduleRequest('sweep')), {
     status: 'coalesced',
   });
-  assert.equal(fixture.raised.length, 1);
-  assert.deepEqual(fixture.raised[0], {
+  assert.equal(active.raised.length, 1);
+  assert.deepEqual(active.raised[0], {
     sessionId: 'session-1',
     runId: 'run-1',
     activeSweepOperationId: 'active-sweep',
@@ -139,15 +150,7 @@ test('sweep raises an active requested boundary and returns coalesced', async ()
     requestedEventId: 'user-event',
     requestedPrefixDigest: prefixFor('sweep', 1).prefixDigest,
   });
-  assert.deepEqual(fixture.created, []);
-});
-
-test('replayed durable Operation is acknowledged as coalesced', async () => {
-  const fixture = schedulerFixture({ replayed: true });
-  assert.deepEqual(await fixture.scheduler.schedule(scheduleRequest('targeted')), {
-    status: 'coalesced',
-  });
-  assert.equal(fixture.ready.length, 1);
+  assert.deepEqual(active.created, []);
 });
 
 test('a concurrent Sweep winner is re-read and coalesced after create loses the Cursor race', async () => {
@@ -168,15 +171,6 @@ test('a concurrent Sweep winner is re-read and coalesced after create loses the 
   });
   assert.equal(fixture.created.length, 1);
   assert.deepEqual(fixture.ready, ['concurrent-sweep']);
-});
-
-test('missing dispatch authority fails closed without inventing a boundary', async () => {
-  const fixture = schedulerFixture({ omitDispatch: true });
-  assert.deepEqual(await fixture.scheduler.schedule(scheduleRequest('targeted')), {
-    status: 'rejected',
-    reason: 'runtime_unavailable',
-  });
-  assert.deepEqual(fixture.created, []);
 });
 
 test('reconciles durable Cursor debt into one CAS-bound follow-up Sweep', async () => {
