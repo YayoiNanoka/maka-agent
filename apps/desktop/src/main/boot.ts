@@ -115,6 +115,7 @@ import { registerPlanReminderIpc } from './plan-reminders-ipc-main.js';
 import { registerWorkspaceResourcesIpc } from './workspace-resources-ipc-main.js';
 import type { NewSessionSkillContext } from './workspace-resources-ipc-main.js';
 import { registerDailyReviewIpc } from './daily-review-ipc-main.js';
+import { registerInspectorIpc } from './inspector-ipc-main.js';
 import { registerUsageIpc } from './usage-ipc-main.js';
 import { registerWebSearchIpc } from './web-search-ipc-main.js';
 import { registerNotificationsIpc } from './notifications-ipc-main.js';
@@ -243,7 +244,10 @@ async function confirmDesktopStorageRootRepair(): Promise<boolean> {
 const keepSystemAwake = createKeepSystemAwakeController(powerSaveBlocker);
 const store = createSessionStore(workspaceRoot);
 const agentGraphControlStore = createAgentGraphControlStore(workspaceRoot);
-const projectCatalog = createProjectCatalog(workspaceRoot);
+const projectCatalog = createProjectCatalog(workspaceRoot, {
+  onLegacyImportFailure: (error) =>
+    console.error('[projects] projects.json could not be imported:', error),
+});
 const worktreeChildExecutor = createGitWorktreeChildExecutor({ storageRoot: workspaceRoot });
 const planStore = createSqlitePlanStore(workspaceRoot);
 const executionStoreWiring = await openDesktopExecutionStoreWiring(workspaceRoot);
@@ -1206,6 +1210,12 @@ function registerIpc(): void {
       : {}),
   });
   registerDailyReviewIpc({ dailyReview, dailyReviewArchiveStore, mainWindowController });
+  registerInspectorIpc({
+    ipcMain,
+    readSessionRuntimeEvents: (sessionId) => runtimeEventStore.readSessionRuntimeEvents(sessionId),
+    listSessionRuns: (sessionId) => runStore.listSessionRuns(sessionId),
+    readRunEvents: (sessionId, runId) => runStore.readEvents(sessionId, runId),
+  });
   registerUsageIpc({
     ipcMain,
     settingsStore,

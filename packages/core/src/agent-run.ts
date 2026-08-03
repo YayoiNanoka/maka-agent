@@ -49,7 +49,7 @@ export type AgentRunContinuationSource =
   | AgentRunContinuationSourceV2;
 
 export type RootExecutionDescriptor =
-  | { kind: 'external_message' }
+  | { kind: 'external_message'; inputDigest?: `sha256:${string}` }
   | { kind: 'regenerate'; sourceTurnId: string }
   | { kind: 'context_compact' }
   | { kind: 'automation'; automationId: string }
@@ -384,8 +384,6 @@ export const AGENT_RUN_EVENT_TYPES = [
   'sandbox_denial_detected',
   'provider_request_captured',
   'provider_request_attempt_recorded',
-  // No current writer; shipped ledgers still carry it and strict reads must not reject them (#1942).
-  'usage_recorded',
   'model_call_attempt_recorded',
   'history_compact_checkpoint_recorded',
   'active_full_compact_block_recorded',
@@ -401,8 +399,14 @@ export const AGENT_RUN_EVENT_TYPES = [
 
 export type AgentRunEventType = (typeof AGENT_RUN_EVENT_TYPES)[number];
 
+/**
+ * A decoded ledger record. The ledger is append-only and outlives any single build, so `type` is
+ * an open string: a reader must accept a type another version wrote, whether that version retired
+ * the writer or has not shipped yet (#1942). The envelope around `type` is still validated, so
+ * this tolerance does not extend to a record that gained or lost a field.
+ */
 export interface AgentRunEvent {
-  type: AgentRunEventType;
+  type: string;
   id: string;
   runId: string;
   sessionId: string;
@@ -410,6 +414,22 @@ export interface AgentRunEvent {
   ts: number;
   message?: string;
   data?: Record<string, unknown>;
+}
+
+/**
+ * What this build may append. `AGENT_RUN_EVENT_TYPES` is the emitted catalogue, not the readable
+ * one, so it stays free to shrink when a writer retires while a misspelled or retired type fails
+ * to compile at the append that would persist it.
+ */
+export interface EmittedAgentRunEvent extends AgentRunEvent {
+  type: AgentRunEventType;
+}
+
+const EMITTED_AGENT_RUN_EVENT_TYPES: ReadonlySet<string> = new Set(AGENT_RUN_EVENT_TYPES);
+
+/** Whether this build emits `type`, and so knows what its record means. */
+export function isEmittedAgentRunEventType(type: string): type is AgentRunEventType {
+  return EMITTED_AGENT_RUN_EVENT_TYPES.has(type);
 }
 
 const AGENT_RUN_HEADER_SHAPE = defineObjectShape<AgentRunHeader>()(
@@ -561,7 +581,8 @@ export function decodeAgentRunEvent(value: unknown): AgentRunEvent {
   if (
     !isRecord(value) ||
     !hasExactShape(value, AGENT_RUN_EVENT_SHAPE) ||
-    !(AGENT_RUN_EVENT_TYPES as readonly unknown[]).includes(value.type) ||
+    typeof value.type !== 'string' ||
+    value.type.trim().length === 0 ||
     typeof value.id !== 'string' ||
     typeof value.runId !== 'string' ||
     typeof value.sessionId !== 'string' ||
@@ -592,7 +613,7 @@ export interface AgentRunStore {
   appendEvent(
     sessionId: string,
     runId: string,
-    event: AgentRunEvent,
+    event: EmittedAgentRunEvent,
     options?: { durable?: boolean },
   ): Promise<void>;
   readEvents(sessionId: string, runId: string): Promise<AgentRunEvent[]>;

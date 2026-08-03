@@ -31,6 +31,7 @@ import type {
   AgentGraphOperatorProvisionRequest,
   AgentGraphOperatorProvisionResult,
   AgentRunEvent,
+  EmittedAgentRunEvent,
   AgentRunHeader,
   AgentRunStore,
   ArtifactRecord,
@@ -22459,7 +22460,7 @@ function makeRunHeader(overrides: Partial<AgentRunHeader> = {}): AgentRunHeader 
   };
 }
 
-function makeRunEvent(overrides: Partial<AgentRunEvent> = {}): AgentRunEvent {
+function makeRunEvent(overrides: Partial<EmittedAgentRunEvent> = {}): EmittedAgentRunEvent {
   return {
     type: 'run_started',
     id: `${overrides.runId ?? 'run-1'}-${overrides.type ?? 'run_started'}-${overrides.ts ?? 10}`,
@@ -22693,7 +22694,7 @@ async function seedRuntimeReadTurnWithHeader(input: {
 async function seedRun(
   runStore: AgentRunStore,
   header: AgentRunHeader,
-  events: AgentRunEvent[],
+  events: EmittedAgentRunEvent[],
 ): Promise<void> {
   await runStore.createRun(header);
   for (const event of events) {

@@ -73,6 +73,7 @@ import {
   type HostOAuthExecutionBinding,
 } from './oauth-execution-authority.js';
 import type { HostChildAgentBackendCapabilities } from './child-agent-composition.js';
+import type { HostExecutionArtifactServices } from './execution-artifacts.js';
 import { toRuntimePolicyProxy } from './runtime-policy-proxy.js';
 
 const CHILD_INSTRUCTION_BOUNDARY = [
@@ -216,6 +217,7 @@ export interface HostAiSdkBackendInput {
   readonly memory: HostMemoryCoordinator;
   readonly taskLedger: TaskLedgerStore;
   readonly artifacts: InteractiveArtifactStoreWriter;
+  readonly executionArtifacts: HostExecutionArtifactServices;
   readonly usage: InteractiveUsageStoresWriter;
   readonly requestDrain: () => void;
   readonly clientCapabilities: HostClientCapabilityCoordinator;
@@ -638,6 +640,9 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
           artifactStore: input.artifacts,
           sessionId: input.context.sessionId,
         }),
+        recordToolArtifacts: input.executionArtifacts.recordToolArtifacts,
+        archiveToolResult: input.executionArtifacts.archiveToolResult,
+        readToolResultArchive: input.executionArtifacts.readToolResultArchive,
         loadHistoryCompactCheckpoint: input.context.loadHistoryCompactCheckpoint,
         summarizeHistoryCompact: buildLlmHistorySummarizer({
           resolveModel: () =>

@@ -8,6 +8,7 @@ import {
   createMemoryExtractionChildToolSet,
   buildMemoryExtractionScheduleTools,
   buildUnboundMemoryExtractionChildTools,
+  buildHostCapabilitiesFromBinding,
   createLocalContinuationSafetyInspector,
   createBuiltinSandboxManager,
   createFilesystemWorkerLaunchSpecProvider,
@@ -15,6 +16,7 @@ import {
   FilesystemWorkerClient,
   isOAuthEnrollmentProviderEnabled,
   isBuiltinFilesystemWorkerSandboxAvailable,
+  prepareSkillInvocationMessageFromInventory,
   SessionManager,
   SessionActivityRegistry,
   ShellRunProcessManager,
@@ -91,6 +93,7 @@ import { SkillCatalogRepository } from './skill-catalog-repository.js';
 import { HostTaskLedgerCoordinator } from './task-ledger-coordinator.js';
 import { HostUsagePricingCoordinator } from './usage-pricing-coordinator.js';
 import { createHostWebSearchTool } from './web-search-tool.js';
+import { createHostExecutionArtifactServices } from './execution-artifacts.js';
 
 export async function createExecutionRuntimeHostComposition(
   context: RuntimeHostCompositionContext,
@@ -179,9 +182,14 @@ export async function createExecutionRuntimeHostComposition(
       acquireResidency: context.acquireResidency,
       requestDrain: context.requestDrain,
     });
+    const executionArtifacts = createHostExecutionArtifactServices({
+      artifacts: openedArtifactStore,
+      requestDrain: context.requestDrain,
+    });
     const builtinTools = {
       shellRuns: runtimeResources,
       runtimeResources,
+      archiveResources: executionArtifacts,
       backgroundTasks: runtimeResources,
       ptyControls: runtimeResources,
       snapshotImage: createReadImageSnapshotter(openedArtifactStore),
@@ -378,6 +386,7 @@ export async function createExecutionRuntimeHostComposition(
         memory: requireMemory(memory),
         taskLedger,
         artifacts: openedArtifactStore,
+        executionArtifacts,
         usage: openedUsageStores,
         clientCapabilities: requireClientCapabilities(clientCapabilities),
         automationTool: requireAutomationCoordinator(automations).modelTool,
@@ -410,6 +419,28 @@ export async function createExecutionRuntimeHostComposition(
       stopSession: (sessionId, input) =>
         requireRootCoordinator(rootCoordinator).stopSession(sessionId, input),
     };
+    const resolveAvailableToolNames = async (sessionId: string): Promise<string[]> => {
+      const capabilitySnapshot =
+        requireClientCapabilities(clientCapabilities).snapshotForSession(sessionId);
+      try {
+        const graphTools =
+          await requireGraphCoordinator(graphCoordinator).toolsForSession(sessionId);
+        return createHostExecutionModelComposition({
+          policy: runtimePolicyStores.runtimePolicy,
+          skills,
+          memory: requireMemory(memory),
+          taskLedger,
+          ...(capabilitySnapshot ? { clientCapabilities: capabilitySnapshot } : {}),
+          builtinTools,
+          hostTools: [...hostTools, ...graphTools],
+          automationTool: requireAutomationCoordinator(automations).modelTool,
+          goalTools: requireGoal(goal).tools,
+          parentAgentTools: childAgentTools.parentTools,
+        }).tools.map((tool) => tool.name);
+      } finally {
+        capabilitySnapshot?.release();
+      }
+    };
     manager = new SessionManager({
       store: stores.sessionStore,
       runStore: stores.agentRunStore,
@@ -423,28 +454,7 @@ export async function createExecutionRuntimeHostComposition(
         readSessionCwd: async (sessionId) =>
           (await stores.sessionStore.readHeaderSnapshot(sessionId)).cwd,
         resolveWorkspaceIdentity: async (cwd) => resolveWorkspaceIdentity({ path: cwd }),
-        listAvailableToolNames: async (sessionId) => {
-          const capabilitySnapshot =
-            requireClientCapabilities(clientCapabilities).snapshotForSession(sessionId);
-          try {
-            const graphTools =
-              await requireGraphCoordinator(graphCoordinator).toolsForSession(sessionId);
-            return createHostExecutionModelComposition({
-              policy: runtimePolicyStores.runtimePolicy,
-              skills,
-              memory: requireMemory(memory),
-              taskLedger,
-              ...(capabilitySnapshot ? { clientCapabilities: capabilitySnapshot } : {}),
-              builtinTools,
-              hostTools: [...hostTools, ...graphTools],
-              automationTool: requireAutomationCoordinator(automations).modelTool,
-              goalTools: requireGoal(goal).tools,
-              parentAgentTools: childAgentTools.parentTools,
-            }).tools.map((tool) => tool.name);
-          } finally {
-            capabilitySnapshot?.release();
-          }
-        },
+        listAvailableToolNames: resolveAvailableToolNames,
         hasPendingBackgroundOperations: async (sessionId) => {
           const graph = requireGraphCoordinator(graphCoordinator);
           const graphWake = requireGraphSupervisorWake(graphSupervisorWake);
@@ -559,6 +569,12 @@ export async function createExecutionRuntimeHostComposition(
       // The authority read behind Usage read-model repair (#1679).
       (sessionId, runId) => stores.agentRunStore.readEvents(sessionId, runId),
     );
+    const artifacts = new HostArtifactCoordinator(
+      openedArtifactStore,
+      context.requestDrain,
+      sessionAdmission,
+      stores.sessionStore,
+    );
     rootCoordinator = new RootTurnCoordinator(
       manager,
       stores,
@@ -572,6 +588,20 @@ export async function createExecutionRuntimeHostComposition(
       clientCapabilities,
       () => requireGoal(goal),
       (admission) => requireAutomationCoordinator(automations).assertRecoveryAdmission(admission),
+      artifacts,
+      async ({ sessionId, text, skillIds }) => {
+        const header = await stores.sessionStore.readHeaderSnapshot(sessionId);
+        const [inventory, toolNames] = await Promise.all([
+          skills.readCanonicalModelInventory({ projectRoot: header.cwd }),
+          resolveAvailableToolNames(sessionId),
+        ]);
+        return prepareSkillInvocationMessageFromInventory({
+          text,
+          skillIds,
+          inventory: inventory.inventory,
+          host: buildHostCapabilitiesFromBinding(toolNames),
+        });
+      },
     );
     const coordinator = rootCoordinator;
     const memoryExtractionAttemptRunner = new HostMemoryExtractionAttemptRunner({
@@ -767,12 +797,6 @@ export async function createExecutionRuntimeHostComposition(
       requestDrain: context.requestDrain,
     });
     sessionRetirement = retirementCoordinator;
-    const artifacts = new HostArtifactCoordinator(
-      openedArtifactStore,
-      context.requestDrain,
-      sessionAdmission,
-      stores.sessionStore,
-    );
     const handlers = {
       ...coordinator.handlers,
       ...requireGoal(goal).handlers,
@@ -994,6 +1018,7 @@ export async function createExecutionRuntimeHostComposition(
       continuity: continuityCoordinator,
       clientCapabilities,
       releaseConnection: (connectionId: string) => {
+        artifacts.releaseConnection(connectionId);
         requireMemory(memory).releaseConnection(connectionId);
         clientCapabilities?.releaseConnection(connectionId);
         runtimeResources?.releaseConnection(connectionId);
