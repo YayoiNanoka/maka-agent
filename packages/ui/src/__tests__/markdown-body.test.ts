@@ -2,13 +2,25 @@ import { strict as assert } from 'node:assert';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { it } from 'node:test';
-import { MarkdownBody } from '../markdown-body.js';
+import {
+  applyMermaidRenderBudget,
+  MarkdownBody,
+  MAX_AUTOMATIC_MERMAID_DIAGRAMS,
+  MAX_AUTOMATIC_MERMAID_SOURCE_LENGTH,
+  MAX_AUTOMATIC_MERMAID_TOTAL_SOURCE_LENGTH,
+} from '../markdown-body.js';
 import { MakaUriContext, Markdown } from '../markdown.js';
 import {
   AstryxLocaleProvider,
   astryxMessageOverrides,
 } from '../astryx-i18n.js';
 import { LocaleProvider } from '../locale-context.js';
+import {
+  calculateMermaidFitScale,
+  createMermaidConfig,
+  MAX_MERMAID_EDGES,
+  MAX_MERMAID_SOURCE_LENGTH,
+} from '../mermaid-diagram.js';
 
 it('keeps raw HTML inert instead of expanding the Markdown trust surface', () => {
   const markup = renderToStaticMarkup(createElement(MarkdownBody, {
@@ -233,6 +245,102 @@ it('uses the localized Astryx code block and syntax tokenizer', () => {
 
   assert.match(markup, /aria-label="复制代码"/);
   assert.match(markup.replace(/<[^>]*>/g, ''), /const answer = 42;/);
+});
+
+it('routes settled Mermaid fences to the lazy diagram surface', () => {
+  const markup = renderToStaticMarkup(
+    createElement(
+      LocaleProvider,
+      {
+        locale: 'en',
+        children: createElement(MarkdownBody, {
+          text: ['```mermaid', 'flowchart LR', 'A --> B', '```'].join('\n'),
+        }),
+      },
+    ),
+  );
+
+  assert.match(markup, /data-maka-contract="mermaid"/);
+  assert.match(markup, /data-maka-mermaid-state="loading"/);
+  assert.match(markup, /Rendering Mermaid diagram/);
+  assert.match(markup, /flowchart LR/);
+});
+
+it('defers Mermaid fences beyond the per-Markdown automatic diagram budget', () => {
+  const fence = (index: number) => [
+    '```mermaid',
+    `flowchart LR\nA${index} --> B${index}`,
+    '```',
+  ].join('\n');
+  const markup = renderToStaticMarkup(
+    createElement(
+      LocaleProvider,
+      {
+        locale: 'en',
+        children: createElement(MarkdownBody, {
+          text: Array.from(
+            { length: MAX_AUTOMATIC_MERMAID_DIAGRAMS + 1 },
+            (_, index) => fence(index),
+          ).join('\n\n'),
+        }),
+      },
+    ),
+  );
+
+  assert.equal(markup.match(/data-maka-mermaid-state="loading"/g)?.length, 3);
+  assert.equal(markup.match(/data-maka-mermaid-state="deferred"/g)?.length, 1);
+  assert.match(markup, /Render diagram/);
+  assert.doesNotMatch(markup, /makamermaiddeferred/);
+});
+
+it('enforces per-diagram and total automatic Mermaid source budgets', () => {
+  const oversized = ['```mermaid', 'x'.repeat(MAX_AUTOMATIC_MERMAID_SOURCE_LENGTH + 1), '```'].join('\n');
+  assert.match(
+    applyMermaidRenderBudget(oversized),
+    /```makamermaiddeferred/,
+  );
+
+  const nearHalfTotal = 'x'.repeat(Math.floor(MAX_AUTOMATIC_MERMAID_TOTAL_SOURCE_LENGTH / 2) - 100);
+  const source = [nearHalfTotal, nearHalfTotal, 'x'.repeat(250)]
+    .map((code) => ['```mermaid', code, '```'].join('\n'))
+    .join('\n\n');
+  assert.equal(
+    applyMermaidRenderBudget(source).match(/```makamermaiddeferred/g)?.length,
+    1,
+  );
+});
+
+it('does not render Mermaid while the assistant turn is streaming', () => {
+  const markup = renderToStaticMarkup(createElement(MarkdownBody, {
+    text: ['```mermaid', 'flowchart LR', 'A --> B', '```'].join('\n'),
+    streaming: true,
+  }));
+
+  assert.doesNotMatch(markup, /data-maka-contract="mermaid"/);
+});
+
+it('pins Mermaid security and complexity limits for untrusted assistant output', () => {
+  const config = createMermaidConfig('dark');
+
+  assert.equal(config.startOnLoad, false);
+  assert.equal(config.securityLevel, 'strict');
+  assert.equal(config.suppressErrorRendering, true);
+  assert.equal(config.htmlLabels, false);
+  assert.equal(config.maxTextSize, MAX_MERMAID_SOURCE_LENGTH);
+  assert.equal(config.maxEdges, MAX_MERMAID_EDGES);
+  assert.equal(config.theme, 'dark');
+});
+
+it('lets fullscreen Mermaid diagrams grow beyond their inline natural size', () => {
+  const viewport = {
+    availableWidth: 1200,
+    availableHeight: 900,
+    naturalWidth: 600,
+    naturalHeight: 300,
+  };
+
+  assert.equal(calculateMermaidFitScale({ ...viewport, expanded: false }), 1);
+  assert.equal(calculateMermaidFitScale({ ...viewport, expanded: true }), 2);
 });
 
 it('keeps a single newline as a CommonMark soft break', () => {

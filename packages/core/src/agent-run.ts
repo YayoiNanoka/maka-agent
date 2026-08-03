@@ -50,6 +50,8 @@ export type AgentRunContinuationSource =
 
 export type RootExecutionDescriptor =
   | { kind: 'external_message' }
+  | { kind: 'regenerate'; sourceTurnId: string }
+  | { kind: 'context_compact' }
   | { kind: 'automation'; automationId: string }
   | { kind: 'goal'; goalId: string }
   | {
@@ -57,6 +59,18 @@ export type RootExecutionDescriptor =
       graphId: string;
       wakeId: string;
       attemptId: string;
+    }
+  | {
+      kind: 'safe_boundary_continuation';
+      sourceInvocationId: string;
+      sourceRunId: string;
+      sourceTurnId: string;
+      sourceRuntimeEventHighWater: number;
+      claimId: string;
+      boundaryDigest: `sha256:${string}`;
+      providerReplayDigest: `sha256:${string}`;
+      safetyDigest: `sha256:${string}`;
+      targetInvocationId: string;
     }
   | {
       kind: 'linked_child_initial';
@@ -157,6 +171,8 @@ export interface AgentRunHeader {
   memoryExtractionOperationId?: string;
   /** Durable lease attempt that admitted this internal Memory Run. */
   memoryExtractionAttemptId?: string;
+  /** Positive identity for a host-authored root that has no message lineage. */
+  rootExecutionKind?: 'context_compact';
   failureClass?: string;
   failureMessage?: string;
   abortSource?: string;
@@ -165,13 +181,98 @@ export interface AgentRunHeader {
 
 type HostedRootExecutionDescriptor = Extract<
   RootExecutionDescriptor,
-  { kind: 'automation' | 'goal' | 'agent_graph_supervisor_wake' | 'memory_extraction_child' }
+  {
+    kind:
+      | 'regenerate'
+      | 'context_compact'
+      | 'automation'
+      | 'goal'
+      | 'agent_graph_supervisor_wake'
+      | 'safe_boundary_continuation'
+      | 'memory_extraction_child';
+  }
 >;
 
 export function agentRunMatchesHostedRootExecution(
   run: AgentRunHeader,
   execution: HostedRootExecutionDescriptor,
 ): boolean {
+  if (execution.kind !== 'context_compact' && run.rootExecutionKind !== undefined) return false;
+  if (
+    execution.kind !== 'memory_extraction_child' &&
+    (run.memoryExtractionOperationId !== undefined || run.memoryExtractionAttemptId !== undefined)
+  ) {
+    return false;
+  }
+  if (execution.kind === 'regenerate') {
+    return (
+      run.parentTurnId === execution.sourceTurnId &&
+      run.regeneratedFromTurnId === execution.sourceTurnId &&
+      run.parentRunId === undefined &&
+      run.resumedFromRunId === undefined &&
+      run.retriedFromRunId === undefined &&
+      run.agentId === undefined &&
+      run.agentName === undefined &&
+      run.retriedFromTurnId === undefined &&
+      run.branchOfTurnId === undefined &&
+      run.parentSessionId === undefined &&
+      run.continuationSource === undefined &&
+      run.automationId === undefined &&
+      run.goalId === undefined &&
+      run.agentGraphWakeId === undefined &&
+      run.agentGraphWakeAttemptId === undefined
+    );
+  }
+  if (execution.kind === 'context_compact') {
+    return (
+      run.rootExecutionKind === 'context_compact' &&
+      run.parentTurnId === undefined &&
+      run.regeneratedFromTurnId === undefined &&
+      run.parentRunId === undefined &&
+      run.resumedFromRunId === undefined &&
+      run.retriedFromRunId === undefined &&
+      run.agentId === undefined &&
+      run.agentName === undefined &&
+      run.retriedFromTurnId === undefined &&
+      run.branchOfTurnId === undefined &&
+      run.parentSessionId === undefined &&
+      run.continuationSource === undefined &&
+      run.automationId === undefined &&
+      run.goalId === undefined &&
+      run.agentGraphWakeId === undefined &&
+      run.agentGraphWakeAttemptId === undefined
+    );
+  }
+  if (execution.kind === 'safe_boundary_continuation') {
+    const source = run.continuationSource;
+    return (
+      run.invocationId === execution.targetInvocationId &&
+      run.parentRunId === execution.sourceRunId &&
+      run.parentTurnId === execution.sourceTurnId &&
+      source !== undefined &&
+      'protocol' in source &&
+      source.protocol === 'continuation_source_v2' &&
+      source.sourceInvocationId === execution.sourceInvocationId &&
+      source.sourceRunId === execution.sourceRunId &&
+      source.sourceTurnId === execution.sourceTurnId &&
+      source.sourceRuntimeEventHighWater === execution.sourceRuntimeEventHighWater &&
+      source.claimId === execution.claimId &&
+      source.boundaryDigest === execution.boundaryDigest &&
+      source.replayManifestDigest === execution.boundaryDigest &&
+      run.resumedFromRunId === undefined &&
+      run.retriedFromRunId === undefined &&
+      run.agentId === undefined &&
+      run.agentName === undefined &&
+      run.retriedFromTurnId === undefined &&
+      run.regeneratedFromTurnId === undefined &&
+      run.branchOfTurnId === undefined &&
+      run.parentSessionId === undefined &&
+      run.automationId === undefined &&
+      run.goalId === undefined &&
+      run.agentGraphWakeId === undefined &&
+      run.agentGraphWakeAttemptId === undefined
+    );
+  }
   const authorityMatches = hostedRootAuthorityMatches(run, execution);
   return (
     authorityMatches &&
@@ -191,7 +292,10 @@ export function agentRunMatchesHostedRootExecution(
 
 function hostedRootAuthorityMatches(
   run: AgentRunHeader,
-  execution: HostedRootExecutionDescriptor,
+  execution: Exclude<
+    HostedRootExecutionDescriptor,
+    { kind: 'regenerate' | 'context_compact' | 'safe_boundary_continuation' }
+  >,
 ): boolean {
   switch (execution.kind) {
     case 'automation':
@@ -343,6 +447,7 @@ const AGENT_RUN_HEADER_SHAPE = defineObjectShape<AgentRunHeader>()(
     'agentGraphWakeAttemptId',
     'memoryExtractionOperationId',
     'memoryExtractionAttemptId',
+    'rootExecutionKind',
     'failureClass',
     'failureMessage',
     'abortSource',
@@ -381,6 +486,7 @@ export function decodeAgentRunHeader(value: unknown): AgentRunHeader {
       isEffectiveOrchestrationSource(value.orchestrationSource)) &&
     (value.agentSwarmAuthorization === undefined ||
       isAgentSwarmAuthorizationSource(value.agentSwarmAuthorization)) &&
+    (value.rootExecutionKind === undefined || value.rootExecutionKind === 'context_compact') &&
     !(value.automationId !== undefined && value.goalId !== undefined) &&
     isFiniteNumber(value.createdAt) &&
     isFiniteNumber(value.updatedAt) &&

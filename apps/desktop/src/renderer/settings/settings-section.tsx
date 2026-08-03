@@ -28,9 +28,41 @@ import type { ReactNode } from 'react';
 import { Divider, Heading, HStack, Item, Text, VStack } from '@astryxdesign/core';
 import { cn } from '@maka/ui';
 
+/**
+ * The ONE page-root container: a flat list of `SettingsSection`s at the open
+ * idiom's 32px rhythm. Pages used to reach for the bare
+ * `.settingsStructuredPage` class; the kit owns the container now, so a page
+ * never references page-layout CSS directly.
+ *
+ * Class is `settingsPageStack`, NOT `settingsPage` — `.settingsModal.settingsPage`
+ * is the pre-existing fullscreen-shell modifier and must not match this rule.
+ * Deliberately a `div` + kit-owned `.settingsPageStack` grid (nav-sidebar.css),
+ * NOT an Astryx `VStack`: the #1362 fix needs grid's `minmax(0, 1fr)`
+ * explicit column. In a flex stack a stretched child keeps its
+ * `min-width: auto` min-content floor, so one wide child (a scrollable
+ * `<pre>`, a long mono path) would poke past the content column again.
+ */
+export function SettingsPage(props: {
+  className?: string;
+  /** `section` when the page is a labeled landmark of a larger surface. */
+  as?: 'div' | 'section';
+  'aria-label'?: string;
+  children: ReactNode;
+}) {
+  const Tag = props.as ?? 'div';
+  return (
+    <Tag className={cn('settingsPageStack', props.className)} aria-label={props['aria-label']}>
+      {props.children}
+    </Tag>
+  );
+}
+
 export function SettingsSection(props: {
   /** Group label. Omit only for a page's single unlabeled lead group. */
   title?: ReactNode;
+  /** id for the title Heading; the section wires `aria-labelledby` to it so
+   *  the landmark is named (remote-access e2e relies on these headings). */
+  titleId?: string;
   /** One quiet line under the title explaining what the group governs. */
   description?: ReactNode;
   /** Group-level action cluster (refresh, add, filter), right-aligned. */
@@ -43,7 +75,7 @@ export function SettingsSection(props: {
 }) {
   const hasHeader = props.title != null || props.description != null || props.action != null;
   return (
-    <section className={cn('settingsSection', props.className)}>
+    <section className={cn('settingsSection', props.className)} aria-labelledby={props.titleId}>
       {hasHeader ? (
         /* The header is Astryx's own settings idiom — `Heading level={3}` over
            a `Text type="supporting" color="secondary"` lede — as used by the
@@ -53,9 +85,12 @@ export function SettingsSection(props: {
            font-semibold`, a caption-sized subtitle). Deferring to Astryx means
            section typography now moves with the theme instead of with a copy
            of the theme's values. */
-        <HStack gap={3} align="start" justify="between">
+        /* wrap: at the 480px window floor a multi-button action cluster
+           must drop under the title instead of crushing it (the old
+           bot-runtime header carried a media query for this). */
+        <HStack gap={3} align="start" justify="between" wrap="wrap">
           <VStack gap={0.5}>
-            {props.title != null ? <Heading level={3}>{props.title}</Heading> : null}
+            {props.title != null ? <Heading level={3} id={props.titleId}>{props.title}</Heading> : null}
             {props.description != null ? (
               <Text type="supporting" size="sm" color="secondary">{props.description}</Text>
             ) : null}

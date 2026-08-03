@@ -124,10 +124,7 @@ test('search enforces cumulative evidence and call budgets across one Attempt', 
 
 test('initial coverage is not rejected by the smaller optional-search budget', async () => {
   const content = `durable workflow ${'x'.repeat(40_000)}`;
-  const fixture = targetedFixture(
-    [textEvent('event-1', 'turn-1', 'user', 'user', content, 1)],
-    1,
-  );
+  const fixture = targetedFixture([textEvent('event-1', 'turn-1', 'user', 'user', content, 1)], 1);
   const initial = await fixture.ports.prepareInitialEvidence();
   assert.equal(initial.sources.length, 1);
   assert.equal(initial.sources[0]!.content, content);

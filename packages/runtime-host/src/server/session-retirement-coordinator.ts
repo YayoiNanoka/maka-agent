@@ -46,7 +46,6 @@ type RetirementStores = Pick<
   | 'readHeaderRecordSnapshot'
   | 'reconcileOrphanedAgentGraphRetirements'
   | 'listPendingSessionRetirementCleanupIds'
-  | 'purgeRemovedSessionTranscript'
   | 'completeSessionRetirementCleanup'
   | 'removeSessionsVersioned'
   | 'setSessionsLifecycleVersioned'
@@ -480,7 +479,6 @@ export class HostSessionRetirementCoordinator {
     await this.#memoryExtractions?.retireSessions([sessionId]);
     const worktree = this.#retiredWorktrees.get(sessionId);
     const outcomes = await Promise.allSettled([
-      this.#stores.purgeRemovedSessionTranscript(sessionId),
       purgeSessionSidecars(
         {
           artifacts: this.#artifacts,

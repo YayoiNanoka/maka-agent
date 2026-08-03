@@ -16,6 +16,7 @@ import {
   type MarkdownComponents,
 } from '@astryxdesign/core/Markdown';
 import { Link as AstryxLink } from '@astryxdesign/core/Link';
+import { CodeBlock } from '@astryxdesign/core/CodeBlock';
 import {
   isMakaUriCandidate,
   isSafeExternalScheme,
@@ -24,11 +25,82 @@ import {
 import { MakaUriContext } from './markdown.js';
 import { useUiLocale } from './locale-context.js';
 import { getSharedUiCopy } from './shared-ui-copy.js';
+import { MermaidDiagram } from './mermaid-diagram.js';
 
-const MAKA_MARKDOWN_COMPONENTS = {
+const BASE_MARKDOWN_COMPONENTS = {
   link: MarkdownLink,
   image: MarkdownImage,
-} satisfies Partial<MarkdownComponents>;
+};
+
+export const MAX_AUTOMATIC_MERMAID_DIAGRAMS = 3;
+export const MAX_AUTOMATIC_MERMAID_SOURCE_LENGTH = 4_000;
+export const MAX_AUTOMATIC_MERMAID_TOTAL_SOURCE_LENGTH = 8_000;
+const DEFERRED_MERMAID_LANGUAGE = 'makamermaiddeferred';
+
+/**
+ * Mark settled Mermaid fences that exceed the per-document automatic-render
+ * budget. The private language marker survives Astryx parsing without changing
+ * the source shown to the user; the code renderer turns it into an explicit
+ * source + Render action instead of scheduling more main-thread layout work.
+ */
+export function applyMermaidRenderBudget(source: string): string {
+  const lines = source.split('\n');
+  let automaticCount = 0;
+  let automaticSourceLength = 0;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const opening = /^( {0,3})(`{3,}|~{3,})([^\n]*)$/.exec(lines[index] ?? '');
+    if (!opening) continue;
+    const [, indent = '', fence = '', info = ''] = opening;
+    const language = /^([ \t]*)mermaid(?=[ \t]|$)/i.exec(info);
+    if (!language) continue;
+
+    const fenceCharacter = fence[0];
+    if (!fenceCharacter) continue;
+    const closing = new RegExp(`^ {0,3}${fenceCharacter}{${fence.length},}[ \\t]*$`);
+    let closingIndex = index + 1;
+    while (closingIndex < lines.length && !closing.test(lines[closingIndex] ?? '')) {
+      closingIndex += 1;
+    }
+    if (closingIndex >= lines.length) continue;
+
+    const codeLength = lines.slice(index + 1, closingIndex).join('\n').length;
+    const withinBudget =
+      codeLength <= MAX_AUTOMATIC_MERMAID_SOURCE_LENGTH
+      && automaticCount < MAX_AUTOMATIC_MERMAID_DIAGRAMS
+      && automaticSourceLength + codeLength <= MAX_AUTOMATIC_MERMAID_TOTAL_SOURCE_LENGTH;
+
+    if (withinBudget) {
+      automaticCount += 1;
+      automaticSourceLength += codeLength;
+    } else {
+      const leadingWhitespace = language[1] ?? '';
+      lines[index] = `${indent}${fence}${leadingWhitespace}${DEFERRED_MERMAID_LANGUAGE}${info.slice(language[0].length)}`;
+    }
+    index = closingIndex;
+  }
+
+  return lines.join('\n');
+}
+
+const MARKDOWN_COMPONENTS = {
+  default: {
+    ...BASE_MARKDOWN_COMPONENTS,
+    code: MarkdownCodeDefault,
+  },
+  compact: {
+    ...BASE_MARKDOWN_COMPONENTS,
+    code: MarkdownCodeCompact,
+  },
+  streamingDefault: {
+    ...BASE_MARKDOWN_COMPONENTS,
+    code: MarkdownCodeStreamingDefault,
+  },
+  streamingCompact: {
+    ...BASE_MARKDOWN_COMPONENTS,
+    code: MarkdownCodeStreamingCompact,
+  },
+} satisfies Record<string, Partial<MarkdownComponents>>;
 
 export function MarkdownBody(props: {
   text: string;
@@ -36,6 +108,13 @@ export function MarkdownBody(props: {
   density?: 'default' | 'compact';
 }) {
   const safeText = neutralizeUnsafeMarkdownImages(props.text);
+  const budgetedText = props.streaming ? safeText : applyMermaidRenderBudget(safeText);
+  const density = props.density ?? 'default';
+  const components = props.streaming
+    ? density === 'compact'
+      ? MARKDOWN_COMPONENTS.streamingCompact
+      : MARKDOWN_COMPONENTS.streamingDefault
+    : MARKDOWN_COMPONENTS[density];
 
   return (
     <div
@@ -59,12 +138,56 @@ export function MarkdownBody(props: {
         // document. Hardcoding `compact` here contradicted that scoping: the
         // review kept full heading sizes but got transcript block spacing,
         // the one combination neither half of the argument asks for.
-        density={props.density ?? 'default'}
-        components={MAKA_MARKDOWN_COMPONENTS}
+        density={density}
+        components={components}
         isStreaming={props.streaming}
       >
-        {safeText}
+        {budgetedText}
       </AstryxMarkdown>
+    </div>
+  );
+}
+
+function MarkdownCodeDefault(props: { code: string; language?: string }) {
+  return <MarkdownCode {...props} density="default" renderMermaid />;
+}
+
+function MarkdownCodeCompact(props: { code: string; language?: string }) {
+  return <MarkdownCode {...props} density="compact" renderMermaid />;
+}
+
+function MarkdownCodeStreamingDefault(props: { code: string; language?: string }) {
+  return <MarkdownCode {...props} density="default" renderMermaid={false} />;
+}
+
+function MarkdownCodeStreamingCompact(props: { code: string; language?: string }) {
+  return <MarkdownCode {...props} density="compact" renderMermaid={false} />;
+}
+
+function MarkdownCode(props: {
+  code: string;
+  language?: string;
+  density: 'default' | 'compact';
+  renderMermaid: boolean;
+}) {
+  const language = props.language?.trim().toLowerCase();
+  if (props.renderMermaid && (language === 'mermaid' || language === DEFERRED_MERMAID_LANGUAGE)) {
+    return (
+      <MermaidDiagram
+        code={props.code}
+        density={props.density}
+        autoRender={language === 'mermaid'}
+      />
+    );
+  }
+
+  return (
+    <div className={`maka-markdown-code maka-markdown-code-${props.density}`}>
+      <CodeBlock
+        code={props.code}
+        language={props.language}
+        isCollapsible
+      />
     </div>
   );
 }

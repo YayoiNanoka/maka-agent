@@ -114,6 +114,7 @@ export interface AgentRunInput {
   sessionId: string;
   header: SessionHeader;
   userInput: UserMessageInput;
+  rootExecutionKind?: AgentRunHeader['rootExecutionKind'];
   runId?: string;
   userMessageId?: string;
   durability?: AgentRunDurability;
@@ -1091,6 +1092,7 @@ export class AgentRun {
             memoryExtractionAttemptId: this.input.userInput.origin.attemptId,
           }
         : {}),
+      ...(this.input.rootExecutionKind ? { rootExecutionKind: this.input.rootExecutionKind } : {}),
     };
     const header =
       continuation && this.input.claimedRunHeader ? this.input.claimedRunHeader : computedHeader;

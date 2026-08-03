@@ -107,11 +107,17 @@ export {
   TOOL_OUTPUT_STREAMS,
 } from './events.js';
 
-// tool-result-status.ts — settled tool activity status from tool_result
-export type { SettledToolActivityStatus } from './tool-result-status.js';
+// tool-result-status.ts — tool activity status from a result, or from its absence
+export type {
+  InFlightToolActivityStatus,
+  SettledToolActivityStatus,
+  ToolActivityStatus,
+} from './tool-result-status.js';
 export {
   isCancelledToolResultContent,
+  isInFlightToolStatus,
   toolResultActivityStatus,
+  unfinishedToolActivityStatus,
 } from './tool-result-status.js';
 
 // agent-swarm.ts — bounded projection over the canonical settled tool result.
@@ -587,6 +593,7 @@ export type {
   ComputerUseBoundAction,
   ComputerUseFrameIdentity,
   ComputerUseFrameSourceKind,
+  ComputerUseModelCallArgs,
   ComputerUseObservationIdentity,
   ComputerUsePageIdentity,
   ComputerUseRect,
@@ -601,6 +608,7 @@ export type {
 export {
   COMPUTER_USE_ACTION_TYPES,
   COMPUTER_USE_APPROVAL_CLASSES,
+  COMPUTER_USE_SEMANTIC_ACTIONS,
   COMPUTER_USE_DISPATCH_TIERS,
   COMPUTER_USE_EFFECTS,
   COMPUTER_USE_ERROR_CODES,
@@ -609,6 +617,7 @@ export {
   CU_SCROLL_DIRECTIONS,
   computerUseApprovalScopeKey,
   computerUseApprovalSummary,
+  computerUseModelCallArgs,
   isComputerUseErrorCode,
 } from './computer-use.js';
 
@@ -941,6 +950,22 @@ export {
   isWorkspacePrivacyContext,
   validateWorkspacePrivacyContext,
 } from './incognito.js';
+
+// cron-expression.ts — shared five-field cron grammar and occurrence authority.
+export type {
+  CompiledCronExpression,
+  CompileCronExpressionResult,
+  CronCompatibilityProfile,
+  CronCompileError,
+  CronCompileErrorCode,
+  CronFieldName,
+  CronSearchBounds,
+} from './cron-expression.js';
+export {
+  CRON_COMPATIBILITY_PROFILES,
+  compileCronExpression,
+  matchesCronField,
+} from './cron-expression.js';
 
 // plan-reminders.ts (PR-PLAN-REMINDER-MVP-0)
 export type {

@@ -743,8 +743,7 @@ export class HostMemoryExtractionAttemptPorts implements MemoryExtractionChildTo
       }
     }
     const authorizedEvents = [...authorizedEntries.values()].sort(
-      (left, right) =>
-        left.runOrder - right.runOrder || left.eventSeq - right.eventSeq,
+      (left, right) => left.runOrder - right.runOrder || left.eventSeq - right.eventSeq,
     );
     const projectedViews = projectEvidenceViews(authorizedEvents.map((entry) => entry.event));
     const turns: Array<{ key: string; sources: AuthorizedSource[] }> = [];

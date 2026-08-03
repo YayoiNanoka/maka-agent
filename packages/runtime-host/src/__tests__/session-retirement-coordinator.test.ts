@@ -172,7 +172,7 @@ describe('Host Session retirement coordinator', () => {
     });
   });
 
-  test('recovers graph operators orphaned by legacy root-only retirement', async () => {
+  test('recovers graph operators orphaned by an interrupted retirement', async () => {
     await withHarness(async (harness) => {
       const childSessionId = await createClosedGraphOperator(harness, harness.rootId, 'a');
       const database = new DatabaseSync(join(harness.workspaceRoot, 'runtime.sqlite'));
@@ -199,17 +199,13 @@ describe('Host Session retirement coordinator', () => {
       } finally {
         database.close();
       }
-      for (const sessionId of harness.familyIds) {
-        await harness.store.purgeRemovedSessionTranscript(sessionId);
-      }
-
       await harness.coordinator.recover();
 
       await waitFor(
         async () =>
           (await harness.store.probeSessionRemoval(childSessionId)).kind === 'removed' &&
           (await harness.store.listPendingSessionRetirementCleanupIds()).length === 0,
-        'Legacy Agent Graph retirement did not converge',
+        'Agent Graph retirement did not converge',
       );
       const graphId = agentGraphIdForRootSession(harness.rootId);
       assert.deepEqual(await harness.graphStore.listAgentGraphScheduleUpdates(graphId), []);
@@ -218,7 +214,7 @@ describe('Host Session retirement coordinator', () => {
     });
   });
 
-  test('recovers legacy graph sidecars without operator provisions', async () => {
+  test('recovers graph sidecars without operator provisions', async () => {
     await withHarness(async (harness) => {
       const projectionGraphId = agentGraphIdForRootSession(harness.rootId);
       const finishedGraphId = agentGraphIdForRootSession(harness.revisionId);
@@ -274,15 +270,11 @@ describe('Host Session retirement coordinator', () => {
       } finally {
         database.close();
       }
-      for (const sessionId of harness.familyIds) {
-        await harness.store.purgeRemovedSessionTranscript(sessionId);
-      }
-
       await harness.coordinator.recover();
 
       await waitFor(
         async () => (await harness.store.listPendingSessionRetirementCleanupIds()).length === 0,
-        'Legacy Agent Graph sidecar cleanup did not converge',
+        'Agent Graph sidecar cleanup did not converge',
       );
       assert.equal(
         await harness.graphStore.readAgentGraphClientProjection(projectionGraphId),
@@ -532,7 +524,7 @@ describe('Host Session retirement coordinator', () => {
     });
   });
 
-  test('cancels Memory extraction after tombstoning and before every RuntimeEvent/transcript purge', async () => {
+  test('cancels Memory extraction after tombstoning and before every operational-state purge', async () => {
     await withHarness(async (harness) => {
       harness.failArtifactCleanup = true;
       const target = await harness.store.readHeaderRecordSnapshot(harness.rootId);
@@ -547,13 +539,12 @@ describe('Host Session retirement coordinator', () => {
       await waitFor(
         () =>
           harness.familyIds.every(
-            (sessionId) => harness.actions.transcriptPurgeAttempts.get(sessionId) === 1,
+            (sessionId) => harness.actions.operationalPurgeCancellationCounts.get(sessionId) === 2,
           ),
-        'initial retirement cleanup did not purge every family RuntimeEvent/transcript',
+        'initial retirement cleanup did not purge every family operational state',
       );
       for (const sessionId of harness.familyIds) {
         assert.equal(harness.actions.memoryExtractionCancellations.get(sessionId), 2);
-        assert.equal(harness.actions.transcriptPurgeCancellationCounts.get(sessionId), 2);
       }
 
       harness.failArtifactCleanup = false;
@@ -564,8 +555,7 @@ describe('Host Session retirement coordinator', () => {
       );
       for (const sessionId of harness.familyIds) {
         assert.equal(harness.actions.memoryExtractionCancellations.get(sessionId), 4);
-        assert.equal(harness.actions.transcriptPurgeAttempts.get(sessionId), 2);
-        assert.equal(harness.actions.transcriptPurgeCancellationCounts.get(sessionId), 4);
+        assert.equal(harness.actions.operationalPurgeCancellationCounts.get(sessionId), 4);
       }
     });
   });
@@ -694,8 +684,7 @@ interface RetirementActions {
   readonly finalizedWorkspacePatches: string[];
   readonly retiredGraphWakes: string[];
   readonly memoryExtractionCancellations: Map<string, number>;
-  readonly transcriptPurgeAttempts: Map<string, number>;
-  readonly transcriptPurgeCancellationCounts: Map<string, number>;
+  readonly operationalPurgeCancellationCounts: Map<string, number>;
   goalCommits: number;
   goalRollbacks: number;
   automationCommits: number;
@@ -735,8 +724,7 @@ async function withHarness(
       finalizedWorkspacePatches: [],
       retiredGraphWakes: [],
       memoryExtractionCancellations: new Map(),
-      transcriptPurgeAttempts: new Map(),
-      transcriptPurgeCancellationCounts: new Map(),
+      operationalPurgeCancellationCounts: new Map(),
       goalCommits: 0,
       goalRollbacks: 0,
       automationCommits: 0,
@@ -789,21 +777,6 @@ async function withHarness(
           store.reconcileOrphanedAgentGraphRetirements(),
         listPendingSessionRetirementCleanupIds: (sessionId) =>
           store.listPendingSessionRetirementCleanupIds(sessionId),
-        purgeRemovedSessionTranscript: async (sessionId) => {
-          const cancellationCount = actions.memoryExtractionCancellations.get(sessionId) ?? 0;
-          const previousPurgeCancellationCount =
-            actions.transcriptPurgeCancellationCounts.get(sessionId) ?? 0;
-          assert.ok(
-            cancellationCount > previousPurgeCancellationCount,
-            `Session ${sessionId} RuntimeEvent/transcript purge requires a fresh Memory cancellation`,
-          );
-          actions.transcriptPurgeAttempts.set(
-            sessionId,
-            (actions.transcriptPurgeAttempts.get(sessionId) ?? 0) + 1,
-          );
-          actions.transcriptPurgeCancellationCounts.set(sessionId, cancellationCount);
-          await store.purgeRemovedSessionTranscript(sessionId);
-        },
         completeSessionRetirementCleanup: (sessionId) =>
           store.completeSessionRetirementCleanup(sessionId),
         setSessionsLifecycleVersioned: (sessions, state) =>
@@ -915,6 +888,14 @@ async function withHarness(
         },
       },
       purgeOperationalState: async (sessionId) => {
+        const cancellationCount = actions.memoryExtractionCancellations.get(sessionId) ?? 0;
+        const previousPurgeCancellationCount =
+          actions.operationalPurgeCancellationCounts.get(sessionId) ?? 0;
+        assert.ok(
+          cancellationCount > previousPurgeCancellationCount,
+          `Session ${sessionId} operational-state purge requires a fresh Memory cancellation`,
+        );
+        actions.operationalPurgeCancellationCounts.set(sessionId, cancellationCount);
         actions.purgedOperationalState.push(sessionId);
       },
       purgeAgentGraphState: async (sessionId) => {

@@ -21,6 +21,7 @@ import {
 } from './css-test-helpers.js';
 
 const SHELL_LAYOUT = resolve(REPO_ROOT, 'apps/desktop/src/renderer/styles/shell-layout.css');
+const UI_STYLES = resolve(REPO_ROOT, 'packages/ui/src/styles.css');
 const WINDOW_STATE = resolve(REPO_ROOT, 'apps/desktop/src/main/window-state.ts');
 const MAIN_WINDOW = resolve(REPO_ROOT, 'apps/desktop/src/main/main-window.ts');
 
@@ -60,6 +61,23 @@ describe('app-region hygiene', () => {
       '.maka-workspace-top-actions',
       [/-webkit-app-region:\s*no-drag/],
       'workspace action cluster must carve no-drag',
+    );
+
+    const ui = stripCssComments(await readFile(UI_STYLES, 'utf8'));
+    assertCssRuleDecls(
+      ui,
+      '.maka-mermaid-diagram-expanded .maka-mermaid-actions',
+      [/-webkit-app-region:\s*no-drag/],
+      'fullscreen Mermaid actions must stay clickable above the titlebar drag region',
+    );
+    assertCssRuleDecls(
+      ui,
+      '.maka-mermaid-diagram-expanded .maka-mermaid-toolbar',
+      [
+        /padding-left:\s*max\([^;]*--maka-titlebar-area-x/,
+        /padding-right:\s*calc\([^;]*--maka-titlebar-overlay-right-width/,
+      ],
+      'fullscreen Mermaid toolbar must clear native window controls on both sides',
     );
   });
 

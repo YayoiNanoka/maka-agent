@@ -4,18 +4,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { RootExecutionDescriptor } from '@maka/core/agent-run';
-import { createAgentRunStore, type AdmitRootTurnInput } from '../agent-run-store.js';
+import { createSqliteAgentRunStore, type AdmitRootTurnInput } from '../agent-run-store.js';
 
 test('memory extraction root admission durably binds operation and attempt identity', async () => {
   await withTempRoot(async (root) => {
-    const store = createAgentRunStore(root);
+    const store = createSqliteAgentRunStore(root);
     const admitted = await store.admitRootTurn(admissionInput());
 
     assert.equal(admitted.kind, 'admitted');
     assert.deepEqual(admitted.admission.execution, admissionInput().execution);
     assert.equal(Object.isFrozen(admitted.admission.execution), true);
 
-    const reopened = createAgentRunStore(root);
+    const reopened = createSqliteAgentRunStore(root);
     assert.deepEqual(
       await reopened.readRootTurnAdmission('memory-session', 'memory-turn'),
       admitted.admission,
@@ -25,7 +25,7 @@ test('memory extraction root admission durably binds operation and attempt ident
 
 test('memory extraction root admission rejects malformed or expanded descriptors', async () => {
   await withTempRoot(async (root) => {
-    const store = createAgentRunStore(root);
+    const store = createSqliteAgentRunStore(root);
     for (const execution of [
       { ...admissionInput().execution, operationId: ' invalid ' },
       { ...admissionInput().execution, attemptId: '' },

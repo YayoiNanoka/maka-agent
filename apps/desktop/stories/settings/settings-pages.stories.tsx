@@ -415,7 +415,7 @@ const capabilitySnapshot: CapabilitySnapshotCollection = {
         state: 'degraded',
         source: 'runtime_probe',
         lastCheckedAt: NOW - 5 * 60_000,
-        reason: 'cua-driver 未响应握手，已回落到只读观察模式。',
+        reason: 'maka-cu 未响应握手，已回落到只读观察模式。',
       },
       osPermissions: [
         { id: 'accessibility', required: true, status: 'granted' },
@@ -501,15 +501,15 @@ const healthSignals: HealthSignal[] = [
     relatedCapabilityId: 'computer_use',
   },
   {
-    id: 'probe:cua-driver',
-    label: 'cua-driver 运行态探测',
+    id: 'probe:maka-cu',
+    label: 'maka-cu 运行态探测',
     scope: 'capability',
     layer: 'runtime_probe',
     status: 'warning',
     source: 'runtime_probe',
     checkedAt: NOW - 5 * 60_000,
     message: '探测超时，已回落到只读观察模式。',
-    detail: 'cua-driver 未在 3000ms 内完成握手；下一次探测会在功能被调用时自动触发。',
+    detail: 'maka-cu 未在 3000ms 内完成握手；下一次探测会在功能被调用时自动触发。',
     relatedCapabilityId: 'computer_use',
     blocksCapability: true,
   },
@@ -638,6 +638,54 @@ const withUsagePopulatedBridge = withScopedMakaBridge({
       patch: Parameters<typeof window.maka.settings.update>[0],
     ): Promise<UpdateAppSettingsResult> => ({
       settings: mergeSettings(usagePopulatedSettings, patch),
+    }),
+  },
+} satisfies Record<string, unknown>);
+
+const subagentStorySettings = mergeSettings(createDefaultSettings(), {
+  subagents: {
+    presets: [
+      {
+        id: 'fast-reader',
+        name: '快速代码阅读',
+        description: '适合快速、低成本地搜索并理解大型仓库。',
+        profile: 'local_read',
+        connectionSlug: 'zai-live',
+        model: 'glm-4.7',
+        enabled: true,
+      },
+      {
+        id: 'implementation-review',
+        name: '实现与验证',
+        description: '需要修改代码、运行测试并产出可合并补丁时使用。',
+        profile: 'implementation',
+        connectionSlug: 'openai-review',
+        model: 'gpt-5',
+        thinkingLevel: 'high',
+        enabled: true,
+      },
+      {
+        id: 'retired-researcher',
+        name: '旧研究配置',
+        description: '保留用于展示已停用配置。',
+        profile: 'web_research',
+        connectionSlug: 'removed-connection',
+        model: 'legacy-search-model',
+        enabled: false,
+      },
+    ],
+  },
+});
+
+const withSubagentSettingsBridge = withScopedMakaBridge({
+  ...makaBridge,
+  settings: {
+    ...makaBridge.settings,
+    get: async () => subagentStorySettings,
+    update: async (
+      patch: Parameters<typeof window.maka.settings.update>[0],
+    ): Promise<UpdateAppSettingsResult> => ({
+      settings: mergeSettings(subagentStorySettings, patch),
     }),
   },
 } satisfies Record<string, unknown>);
@@ -813,7 +861,7 @@ function assertDailyReviewSettingsBounds(
   selector: HTMLButtonElement,
 ): void {
   const time = canvasElement.querySelector<HTMLInputElement>('input[type="text"]');
-  const page = canvasElement.querySelector<HTMLElement>('.settingsFormPage');
+  const page = canvasElement.querySelector<HTMLElement>('.settingsPageStack');
   // The rows kit (#1972) retired `.settingsFormLayout`. A control now lives in
   // its row's capped end slot, so `.settingsRowEnd` is the container this
   // contract has always meant: the bound the control must not overflow.
@@ -852,6 +900,30 @@ function assertDailyReviewSettingsBounds(
 export const Models: Story = {
   decorators: [withSettingsBridge],
   render: () => <SettingsStory section="models" />,
+};
+// Real path: sidebar footer 设置 → 子 Agent, with multiple approved model routes.
+export const Subagents: Story = {
+  decorators: [withSubagentSettingsBridge],
+  render: () => <SettingsStory section="subagents" />,
+};
+
+// Real path: Settings → Subagents at the minimum supported window width.
+export const SubagentsNarrow: Story = {
+  ...Subagents,
+  parameters: { viewport: { defaultViewport: 'mobile2' } },
+};
+
+// Real path: 设置 → 子 Agent → 添加子 Agent.
+export const SubagentEditorOpen: Story = {
+  decorators: [withSubagentSettingsBridge],
+  render: () => <SettingsStory section="subagents" />,
+  play: async ({ canvasElement }) => {
+    const button = await waitForStoryButton(
+      canvasElement,
+      (candidate) => candidate.textContent?.trim() === '添加子 Agent',
+    );
+    await userEvent.click(button);
+  },
 };
 // Real path: 设置 → 通用.
 export const General: Story = {

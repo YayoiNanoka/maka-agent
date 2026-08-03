@@ -22,6 +22,8 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export const FAKE_ASK_USER_QUESTION_PROMPT = '__e2e_ask_user_question__';
 export const FAKE_ASK_SANDBOX_BOUNDARY_PROMPT = '__e2e_ask_sandbox_boundary__';
 export const FAKE_WAIT_FOR_STEERING_PROMPT = '__e2e_wait_for_steering__';
+export const FAKE_MERMAID_PROMPT = '__e2e_mermaid__';
+export const FAKE_MERMAID_HOSTILE_PROMPT = '__e2e_mermaid_hostile__';
 
 type PendingQuestion = {
   turnId: string;
@@ -69,7 +71,51 @@ export class FakeBackend implements AgentBackend {
     const messageId = randomUUID();
     const attNames = (input.attachments ?? []).map((a) => a.name);
     const attLine = attNames.length > 0 ? `\nAttachments received: ${attNames.join(', ')}` : '';
-    let text = `Fake backend received: ${input.text}${attLine}\n\nThis proves the session stream, JSONL storage, and renderer loop are connected.`;
+    let text =
+      input.text === FAKE_MERMAID_PROMPT
+        ? [
+            'Fake backend Mermaid fixture:',
+            '',
+            '```mermaid',
+            'flowchart TB',
+            'subgraph Input["1. Input layer"]',
+            '  A[User prompt] --> B{Fence settled?}',
+            '  B -->|No| C[Keep source visible]',
+            '  B -->|Yes| D[Sanitize Markdown]',
+            'end',
+            'subgraph Render["2. Render layer"]',
+            '  D --> E[Lazy-load Mermaid]',
+            '  E --> F[Render strict SVG]',
+            '  F --> G{Valid diagram?}',
+            '  G -->|No| H[Show source fallback]',
+            'end',
+            'subgraph Inspect["3. Inspect layer"]',
+            '  G -->|Yes| I[Fit to viewport]',
+            '  I --> J{User action}',
+            '  J -->|Zoom| K[Scale around pointer]',
+            '  J -->|Pan| L[Move canvas]',
+            '  J -->|Expand| M[Open fullscreen]',
+            '  K --> N[Inspect details]',
+            '  L --> N',
+            '  M --> N',
+            'end',
+            'C --> O[Continue streaming]',
+            'H --> O',
+            'N --> P[Resume task]',
+            '```',
+          ].join('\n')
+        : input.text === FAKE_MERMAID_HOSTILE_PROMPT
+          ? [
+              'Fake backend hostile Mermaid fixture:',
+              '',
+              '```mermaid',
+              '%%{init: {"securityLevel":"loose","flowchart":{"htmlLabels":true}}}%%',
+              'flowchart LR',
+              '  A["<img src=x onerror=alert(1)>"] --> B[Safe output]',
+              '  click A "javascript:alert(1)"',
+              '```',
+            ].join('\n')
+          : `Fake backend received: ${input.text}${attLine}\n\nThis proves the session stream, SQLite storage, and renderer loop are connected.`;
     // Every delta must concatenate to text_complete; `.` would silently drop
     // line terminators and make structured Markdown reflow only at completion.
     const chunks = text.match(/[\s\S]{1,9}/g) ?? [text];

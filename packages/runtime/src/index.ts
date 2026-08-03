@@ -10,9 +10,11 @@ export {
   BackendRegistry,
   SessionConfigurationRevisionConflictError,
   SessionConfigurationTransitionError,
+  RuntimeRegenerateTurnError,
   headerToSummary,
   changesBackendConfig,
 } from './session-manager.js';
+export { RuntimeContextCompactError } from './runtime-kernel.js';
 export type { ModelMessage, JSONValue } from './model-protocol.js';
 export type {
   CompactSessionInput,
@@ -22,6 +24,7 @@ export type {
   SessionConfigurationStoreUpdate,
   SessionConfigurationTransitionRequest,
   SessionConfigurationTransitionErrorCode,
+  RegenerateTurnSource,
   SessionStore,
   StrictRecoveryAgentRunStore,
   StrictRecoverySessionStore,
@@ -1193,6 +1196,8 @@ export type { ToolActivityItem, ChatItem, SessionViewModel } from './materialize
 export { AsyncEventQueue } from './async-queue.js';
 export {
   FAKE_ASK_USER_QUESTION_PROMPT,
+  FAKE_MERMAID_HOSTILE_PROMPT,
+  FAKE_MERMAID_PROMPT,
   FAKE_ASK_SANDBOX_BOUNDARY_PROMPT,
   FAKE_WAIT_FOR_STEERING_PROMPT,
   FakeBackend,
@@ -1618,6 +1623,8 @@ export {
 export type {
   GoalContinuationDeps,
   GoalContinuationScheduler,
+  GoalControlDecline,
+  GoalControlStanding,
   GoalObservedTurnStart,
   GoalObservedTurnSettler,
   GoalSessionCloseOperation,

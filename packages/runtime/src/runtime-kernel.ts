@@ -101,6 +101,7 @@ import {
 import {
   RuntimeMessageAuthorityInvariantError,
   type RuntimeMessageAuthority,
+  type RuntimeMessageRunIdentity,
   type RuntimeMessageRunOwner,
 } from './message-authority.js';
 import {
@@ -128,8 +129,12 @@ export interface RuntimeKernelLike {
     input: UserMessageInput,
     options?: TurnStartOptions,
   ): AsyncIterable<SessionEvent>;
-  resumeContinuation?(continuation: RuntimeContinuation): AsyncIterable<SessionEvent>;
+  resumeContinuation?(
+    continuation: RuntimeContinuation,
+    options?: ResumeContinuationOptions,
+  ): AsyncIterable<SessionEvent>;
   compactSession(sessionId: string, input?: CompactSessionInput): AsyncIterable<SessionEvent>;
+  preflightContextCompaction(sessionId: string): Promise<void>;
   startChildTurn(
     sessionId: string,
     input: ChildAgentTurnInput,
@@ -155,6 +160,16 @@ export interface RuntimeKernelLike {
   /** Take back every queued message (both queues) as one `\n\n`-joined string. */
   retractQueue(sessionId: string): string;
   hasActiveRuns(sessionId: string): boolean;
+  /**
+   * The turns of the runs in flight for this session. The same fact
+   * `hasActiveRuns` reports, named — which is what lets a client tell a turn
+   * that has not started yet from one that already ended.
+   *
+   * A set, not one turn: a session can carry concurrent runs, and a client
+   * asking "is anything OTHER than my own turn running" cannot answer that
+   * from an arbitrary one of them.
+   */
+  runningTurnIds?(sessionId: string): string[];
   hasActiveRun?(sessionId: string, runId: string, turnId?: string): boolean;
   updateCachedHeader(sessionId: string, header: SessionHeader): void;
   invalidateBackend(sessionId: string): Promise<void>;
@@ -167,6 +182,17 @@ export class SessionQuiescentMutationBusyError extends Error {
 
   constructor(readonly sessionIds: readonly string[]) {
     super('Session mutation cannot start while an execution claim is active');
+  }
+}
+
+export class RuntimeContextCompactError extends Error {
+  readonly name = 'RuntimeContextCompactError';
+
+  constructor(
+    readonly code: 'operation_unavailable' | 'session_busy',
+    message: string,
+  ) {
+    super(message);
   }
 }
 
@@ -183,6 +209,10 @@ export interface TurnStartOptions {
   execution?: RuntimeExecutionClaim;
   /** Trusted execution purpose for this admitted Root Run. */
   rootExecution?: RootExecutionDescriptor;
+}
+
+export interface ResumeContinuationOptions {
+  onRunStarted?: () => void | Promise<void>;
 }
 
 export interface RuntimeExecutionClaim {
@@ -703,7 +733,10 @@ export class RuntimeKernel implements RuntimeKernelLike {
     }
   }
 
-  async *resumeContinuation(continuationInput: RuntimeContinuation): AsyncIterable<SessionEvent> {
+  async *resumeContinuation(
+    continuationInput: RuntimeContinuation,
+    options: ResumeContinuationOptions = {},
+  ): AsyncIterable<SessionEvent> {
     const continuation = snapshotRuntimeContinuation(continuationInput);
     const claimKey = [
       continuation.sessionId,
@@ -720,7 +753,7 @@ export class RuntimeKernel implements RuntimeKernelLike {
     this.pendingContinuationClaims.add(claimKey);
     this.pendingContinuationSessions.add(continuation.sessionId);
     try {
-      yield* this.resumeContinuationClaimed(continuation, execution);
+      yield* this.resumeContinuationClaimed(continuation, execution, options);
     } finally {
       this.pendingContinuationClaims.delete(claimKey);
       this.pendingContinuationSessions.delete(continuation.sessionId);
@@ -731,6 +764,7 @@ export class RuntimeKernel implements RuntimeKernelLike {
   private async *resumeContinuationClaimed(
     continuation: RuntimeContinuation,
     execution: PendingExecutionClaim,
+    options: ResumeContinuationOptions,
   ): AsyncIterable<SessionEvent> {
     await this.enterExecutionClaim(execution);
     if (!this.deps.runStore || !this.deps.runtimeEventStore) {
@@ -751,11 +785,7 @@ export class RuntimeKernel implements RuntimeKernelLike {
     );
     const sourceEvents = await revalidateContinuationBoundary(continuationAuthority, continuation);
     assertContinuationSourceUnchanged(continuation, sourceRun, sourceEvents);
-    if (!this.deps.inspectContinuationSafety) {
-      throw new Error('Runtime continuation requires an authoritative safety inspector');
-    }
-    const observation = await this.deps.inspectContinuationSafety(continuation.sessionId);
-    assertContinuationSafetyUnchanged(continuation, observation);
+    await this.revalidateContinuationSafety(continuation);
 
     const userInput: UserMessageInput = {
       turnId: continuation.turnId,
@@ -892,7 +922,19 @@ export class RuntimeKernel implements RuntimeKernelLike {
     });
 
     this.attachExecutionClaim(execution, run);
-    yield* this.runAgentContinuation(continuation, run, execution, 'durable_continuation');
+    yield* this.runAgentContinuation(
+      continuation,
+      run,
+      execution,
+      'durable_continuation',
+      {
+        sessionId: continuation.sessionId,
+        turnId: continuation.turnId,
+        runId: continuation.runId,
+      },
+      options.onRunStarted,
+      () => this.revalidateContinuationSafety(continuation),
+    );
   }
 
   async *compactSession(
@@ -902,6 +944,23 @@ export class RuntimeKernel implements RuntimeKernelLike {
     const execution = this.takeExecutionClaim(sessionId);
     try {
       yield* this.compactSessionClaimed(sessionId, input, execution);
+    } finally {
+      this.releaseExecutionClaim(execution);
+    }
+  }
+
+  async preflightContextCompaction(sessionId: string): Promise<void> {
+    const execution = this.takeExecutionClaim(sessionId);
+    try {
+      await this.enterExecutionClaim(execution);
+      if (this.hasActiveRuns(sessionId)) {
+        throw new RuntimeContextCompactError(
+          'session_busy',
+          'Cannot compact while a Turn is running',
+        );
+      }
+      const header = await this.deps.store.readHeader(sessionId);
+      await this.requireContextCompactionBackend(sessionId, header, execution);
     } finally {
       this.releaseExecutionClaim(execution);
     }
@@ -920,10 +979,16 @@ export class RuntimeKernel implements RuntimeKernelLike {
       throw new Error('Runtime compaction minRecentTurns must be a non-negative safe integer');
     }
     if (!this.deps.runStore || !this.deps.runtimeEventStore) {
-      throw new Error('Runtime compaction requires AgentRunStore and RuntimeEventStore');
+      throw new RuntimeContextCompactError(
+        'operation_unavailable',
+        'Runtime compaction requires execution stores',
+      );
     }
     if (this.hasActiveRuns(sessionId)) {
-      throw new Error('Cannot compact while a turn is running; wait for the turn to finish.');
+      throw new RuntimeContextCompactError(
+        'session_busy',
+        'Cannot compact while a Turn is running',
+      );
     }
 
     const header = await this.deps.store.readHeader(sessionId);
@@ -932,6 +997,8 @@ export class RuntimeKernel implements RuntimeKernelLike {
       sessionId,
       header,
       userInput: { turnId, text: '' },
+      rootExecutionKind: 'context_compact',
+      ...(input.hostedRoot ? { runId: input.hostedRoot.runId } : {}),
       store: this.deps.store,
       runStore: this.deps.runStore,
       runtimeEventStore: this.deps.runtimeEventStore,
@@ -963,22 +1030,29 @@ export class RuntimeKernel implements RuntimeKernelLike {
     });
 
     this.attachExecutionClaim(execution, run);
+    const owners = this.createRunOwnerScope(run, execution);
     let begin: Awaited<ReturnType<typeof run.beginOperation>>;
     try {
+      if (input.hostedRoot) {
+        owners.bindMessage(this.deps.messageAuthority, {
+          sessionId,
+          turnId,
+          runId: run.runId,
+        });
+      }
       begin = await this.runBackendActivation(() => run.beginOperation());
+      await input.hostedRoot?.onRunStarted?.();
       this.settleReservedExecutionClaim(execution, run, { ok: true });
     } catch (error) {
-      this.settleReservedExecutionClaim(execution, run, { ok: false, error });
-      await run.recordFailure(error);
-      await this.finalizeExecutionClaimRun(execution, run, () => run.finalize());
-      if (run.isStopped() && isExecutionCancellation(error, execution.cancellation)) return;
-      throw error;
+      await this.finalizeFailedRunStart(owners, run, execution, error);
+      return;
     }
 
     try {
       if (run.isStopped()) return;
-      if (!begin.backend.compactHistory)
-        throw new Error(`Backend ${header.backend} does not support runtime compaction`);
+      if (!begin.backend.compactHistory) {
+        throw new Error(`Backend ${header.backend} changed runtime compaction capability`);
+      }
       this.assertRunCanDispatch(run, begin.backend);
       const result = await begin.backend.compactHistory({
         turnId: run.turnId,
@@ -1040,8 +1114,28 @@ export class RuntimeKernel implements RuntimeKernelLike {
       await run.recordFailure(error);
       throw error;
     } finally {
-      await this.finalizeExecutionClaimRun(execution, run, () => run.finalize());
+      const failures = new FailureCollector();
+      await failures.capture(() => owners.finalize());
+      await failures.capture(() => owners.releaseMessage());
+      failures.throwIfAny(`Runtime compaction cleanup failed for ${run.runId}`);
     }
+  }
+
+  private async requireContextCompactionBackend(
+    sessionId: string,
+    header: SessionHeader,
+    execution: PendingExecutionClaim,
+  ): Promise<BackendGeneration> {
+    const active = await this.runBackendActivation(() =>
+      this.ensureActive(sessionId, header, execution),
+    );
+    if (!active.backend.compactHistory) {
+      throw new RuntimeContextCompactError(
+        'operation_unavailable',
+        `Backend ${header.backend} does not support runtime compaction`,
+      );
+    }
+    return active;
   }
 
   async *startChildTurn(
@@ -1215,14 +1309,10 @@ export class RuntimeKernel implements RuntimeKernelLike {
         continuation,
       );
       assertContinuationSourceUnchanged(continuation, sourceRun, sourceEvents);
-      if (!this.deps.inspectContinuationSafety) {
-        throw new Error('Child retry continuation requires an authoritative safety inspector');
-      }
-      const safetyObservation = await this.deps.inspectContinuationSafety(sessionId);
-      assertContinuationSafetyUnchanged(continuation, {
-        ...safetyObservation,
-        availableToolNames: childTools.map((tool) => tool.name),
-      });
+      await this.revalidateContinuationSafety(
+        continuation,
+        childTools.map((tool) => tool.name),
+      );
 
       const claimedAt = this.deps.now();
       const targetRunHeader = continuationTargetRunHeaderForExecution({
@@ -1374,8 +1464,21 @@ export class RuntimeKernel implements RuntimeKernelLike {
       run,
       execution,
       input.admissionMode,
-      input.linkedSession === true,
+      input.linkedSession === true
+        ? {
+            sessionId,
+            turnId: continuation.turnId,
+            runId: continuation.runId,
+          }
+        : undefined,
       input.onRunStarted,
+      input.admissionMode === 'durable_continuation'
+        ? () =>
+            this.revalidateContinuationSafety(
+              continuation,
+              childTools.map((tool) => tool.name),
+            )
+        : undefined,
     );
   }
 
@@ -1628,8 +1731,9 @@ export class RuntimeKernel implements RuntimeKernelLike {
     run: AgentRun,
     execution: PendingExecutionClaim,
     admissionMode: ChildAgentRetryInput['admissionMode'],
-    bindHostedRoot = false,
+    messageOwner?: RuntimeMessageRunIdentity,
     onRunStarted?: () => void | Promise<void>,
+    revalidateSafety?: () => Promise<void>,
   ): AsyncIterable<SessionEvent> {
     const sessionEvents = new DeliveryAckQueue<SessionEvent>();
     const { abortController, release: releaseExecutionAbort } =
@@ -1640,14 +1744,14 @@ export class RuntimeKernel implements RuntimeKernelLike {
       | Awaited<ReturnType<AgentRun['beginContinuation']>>
       | Awaited<ReturnType<AgentRun['beginOperation']>>;
     try {
-      if (bindHostedRoot) {
-        owners.bindMessage(this.deps.messageAuthority, {
-          sessionId: continuation.sessionId,
-          turnId: continuation.turnId,
-          runId: continuation.runId,
-        });
-      }
+      if (messageOwner) owners.bindMessage(this.deps.messageAuthority, messageOwner);
       begin = await this.runBackendActivation(async () => {
+        if (admissionMode === 'durable_continuation') {
+          if (!revalidateSafety) {
+            throw new Error('Durable continuation omitted final safety revalidation');
+          }
+          await revalidateSafety();
+        }
         const started =
           admissionMode === 'durable_continuation'
             ? await run.beginContinuation(continuation)
@@ -1788,6 +1892,20 @@ export class RuntimeKernel implements RuntimeKernelLike {
         releaseExecutionAbort();
       }
     }
+  }
+
+  private async revalidateContinuationSafety(
+    continuation: RuntimeContinuation,
+    availableToolNames?: readonly string[],
+  ): Promise<void> {
+    if (!this.deps.inspectContinuationSafety) {
+      throw new Error('Runtime continuation requires an authoritative safety inspector');
+    }
+    const observation = await this.deps.inspectContinuationSafety(continuation.sessionId);
+    assertContinuationSafetyUnchanged(
+      continuation,
+      availableToolNames ? { ...observation, availableToolNames } : observation,
+    );
   }
 
   private inheritExecutionAbort(execution: PendingExecutionClaim): {
@@ -2402,6 +2520,16 @@ export class RuntimeKernel implements RuntimeKernelLike {
 
   hasActiveRuns(sessionId: string): boolean {
     return this.backendGenerationsFor(sessionId).some((active) => active.activeRuns.size > 0);
+  }
+
+  runningTurnIds(sessionId: string): string[] {
+    const turnIds: string[] = [];
+    for (const active of this.backendGenerationsFor(sessionId)) {
+      for (const run of active.activeRuns.values()) {
+        if (!turnIds.includes(run.turnId)) turnIds.push(run.turnId);
+      }
+    }
+    return turnIds;
   }
 
   hasActiveRun(sessionId: string, runId: string, turnId?: string): boolean {

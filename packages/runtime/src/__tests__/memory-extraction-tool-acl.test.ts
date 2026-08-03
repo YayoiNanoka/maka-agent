@@ -102,7 +102,7 @@ function testRuntime(
     })(),
     now: () => 1,
     getPermissionPauseTarget: () => null,
-    getCurrentRunId: () => 'run-1',
+    runId: 'run-1',
   });
 }
 
