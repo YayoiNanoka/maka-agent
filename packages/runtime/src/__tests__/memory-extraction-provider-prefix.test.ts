@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
+import type { LlmConnection } from '@maka/core';
 import { convertArrayToReadableStream, MockLanguageModelV4 } from 'ai/test';
 import { z } from 'zod';
 
 import { ModelAdapter } from '../model-adapter.js';
+import { getAIModel } from '../model-factory.js';
 import type { ModelToolSet } from '../model-protocol.js';
 import { generateProviderPrefixModelCall } from '../tool-free-model-call.js';
 
@@ -79,6 +81,7 @@ describe('Memory Extraction provider prefix', () => {
       tools,
       activeTools,
       providerOptions,
+      toolChoicePolicy: 'none',
     });
 
     const secondStream = await adapter.startStream({
@@ -139,9 +142,61 @@ describe('Memory Extraction provider prefix', () => {
         messages: [{ role: 'user', content: 'Return JSON only.' }],
         tools: { Read: { description: 'Read', inputSchema: z.object({}).strict() } },
         activeTools: ['Read'],
+        toolChoicePolicy: 'none',
       }),
       /Provider returned a disabled Tool Call/,
     );
+  });
+
+  test('keeps Tool schemas on the Anthropic wire while Runtime owns call rejection', async () => {
+    let body: Record<string, unknown> | undefined;
+    const connection: LlmConnection = {
+      slug: 'anthropic-memory-test',
+      name: 'Anthropic memory test',
+      providerType: 'anthropic',
+      baseUrl: 'https://anthropic.invalid',
+      defaultModel: 'claude-sonnet-4-6',
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const model = getAIModel({
+      connection,
+      apiKey: 'test-key',
+      modelId: connection.defaultModel,
+      fetch: async (_input, init) => {
+        body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({
+            id: 'msg_memory',
+            type: 'message',
+            role: 'assistant',
+            model: connection.defaultModel,
+            content: [{ type: 'text', text: '{}' }],
+            stop_reason: 'end_turn',
+            stop_sequence: null,
+            usage: { input_tokens: 4, output_tokens: 1 },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    });
+
+    await generateProviderPrefixModelCall({
+      model,
+      system: 'source system',
+      messages: [{ role: 'user', content: 'Extract memory.' }],
+      tools: { Read: { description: 'Read', inputSchema: z.object({ path: z.string() }) } },
+      activeTools: ['Read'],
+      toolChoicePolicy: 'omit',
+    });
+
+    assert.ok(body);
+    assert.deepEqual(
+      (body.tools as Array<{ name: string }>).map(({ name }) => name),
+      ['Read'],
+    );
+    assert.deepEqual(body?.tool_choice, { type: 'auto' });
   });
 });
 

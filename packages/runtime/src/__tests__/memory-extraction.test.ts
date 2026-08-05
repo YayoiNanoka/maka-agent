@@ -80,6 +80,19 @@ describe('bounded Memory Extraction', () => {
     assert.equal(
       parseMemoryProposal(
         JSON.stringify({
+          status: 'search_required',
+          coverageStatus: 'unprocessed',
+          requestedStatus: 'unresolved',
+          requestedItems: [],
+          incidentalItems: [],
+          search: { terms: ['earlier'] },
+        }),
+      ),
+      undefined,
+    );
+    assert.equal(
+      parseMemoryProposal(
+        JSON.stringify({
           ...JSON.parse(valid),
           requestedStatus: 'resolved',
           requestedItems: [],

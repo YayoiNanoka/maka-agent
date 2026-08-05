@@ -81,6 +81,43 @@ import { createTestAiSdkBackend } from './execution-boundary-test-helpers.js';
 import type { MemoryExtractionSourceSnapshot } from '../memory-extraction.js';
 
 describe('AiSdkBackend Memory Extraction triggers', () => {
+  test('does not expose Memory triggers on the native OpenAI Responses lane', async () => {
+    const model = completionModel();
+    let memoryCalled = false;
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: { ...connection(), providerType: 'openai' },
+      apiKey: 'sk-test',
+      modelId: 'gpt-5.4',
+      modelFactory: () => model,
+      tools: [],
+      memoryExtraction: {
+        gate: async () => ({ allowed: true }),
+        remember: async () => {
+          memoryCalled = true;
+          return { status: 'unavailable', requestedItems: [] };
+        },
+        extract: () => {
+          memoryCalled = true;
+        },
+      },
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    await drain(backend.send({ turnId: 'turn-1', text: 'hello', context: [] }));
+
+    assert.equal(
+      model.doStreamCalls[0]?.tools?.some(
+        (tool) => tool.name === 'memory_remember' || tool.name === 'memory_extract',
+      ) ?? false,
+      false,
+    );
+    assert.equal(memoryCalled, false);
+  });
+
   test('runs memory_remember synchronously and returns the persisted requested Item to the next step', async () => {
     let modelCalls = 0;
     let snapshot: MemoryExtractionSourceSnapshot | undefined;
@@ -154,6 +191,11 @@ describe('AiSdkBackend Memory Extraction triggers', () => {
 
     assert.equal(snapshot?.trigger, 'remember');
     assert.equal(snapshot?.toolCallId, 'remember-call');
+    const sourceUserEvent = durable.ledger.find(
+      (event) => event.role === 'user' && event.content?.kind === 'text',
+    );
+    assert.ok(sourceUserEvent);
+    assert.deepEqual(snapshot?.sourceEventMessagePositions?.[sourceUserEvent.id], [0]);
     assert.match(JSON.stringify(model.doStreamCalls[1]?.prompt), /User prefers concise Chinese/);
   });
 

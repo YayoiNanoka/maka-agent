@@ -5,7 +5,7 @@ import {
   type ProviderRuntimeAdapter,
   type ProviderType,
 } from '@maka/core/llm-connections';
-import { lookupModelProviderOverride } from '@maka/core/model-metadata';
+import { lookupModelProviderOverride, openAiAdapterApiProtocol } from '@maka/core/model-metadata';
 
 export interface ResolvedModelRuntime {
   adapter: ProviderRuntimeAdapter;
@@ -68,6 +68,39 @@ export function resolveModelRuntime(
         : resolvedBaseUrl,
     ...(apiProtocol ? { apiProtocol } : {}),
   };
+}
+
+export function modelUsesAnthropicMessages(
+  connection: ModelRuntimeConnection,
+  modelId: string,
+): boolean {
+  const { adapter, apiProtocol } = resolveModelRuntime(connection, modelId);
+  return (
+    adapter.kind === 'anthropic' ||
+    adapter.kind === 'claude-subscription' ||
+    (adapter.kind === 'github-copilot' && apiProtocol === 'anthropic-messages')
+  );
+}
+
+export function modelUsesOpenAiResponses(
+  connection: ModelRuntimeConnection,
+  modelId: string,
+): boolean {
+  const runtime = resolveModelRuntime(connection, modelId);
+  if (runtime.adapter.kind !== 'openai') return false;
+  return (
+    runtime.adapter.apiProtocol === 'openai-responses' ||
+    runtime.apiProtocol === 'openai-responses' ||
+    openAiAdapterApiProtocol(modelId, connection.providerType) === 'openai-responses'
+  );
+}
+
+/** Native OpenAI lanes keep mutable WebSocket continuation state inside ModelAdapter. */
+export function modelUsesNativeOpenAiResponses(
+  connection: ModelRuntimeConnection,
+  modelId: string,
+): boolean {
+  return connection.providerType === 'openai' && modelUsesOpenAiResponses(connection, modelId);
 }
 
 function kimiOpenAiBaseUrl(baseUrl: string): string {

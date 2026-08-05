@@ -35,12 +35,17 @@ export function planMemoryCoverage(input: {
   readonly boundaryOrdinal: number;
   readonly priorityEvidence?: readonly MemoryExtractionEvidence[];
   readonly maxEvidenceJsonChars?: number;
+  readonly sourceEventMessagePositions?: Readonly<Record<string, readonly number[]>>;
 }): MemoryCoveragePlan | undefined {
   const limit = Math.min(input.pendingEntries.length, MAX_COVERAGE_EVENTS);
   const unsafeRanges = toolUnsafeRanges(toolCallIntervals(input.allEntries), input.boundaryOrdinal);
   const priority = input.priorityEvidence ?? [];
   const budget = input.maxEvidenceJsonChars ?? MAX_MEMORY_EVIDENCE_JSON_CHARS;
-  const fittedPriority = fitMemoryExtractionEvidence(priority, budget);
+  const fittedPriority = fitMemoryExtractionEvidence(
+    priority,
+    budget,
+    input.sourceEventMessagePositions,
+  );
   if (!fittedPriority) return undefined;
   let selected: MemoryCoveragePlan | undefined;
   const candidateCounts: number[] = [];
@@ -59,10 +64,48 @@ export function planMemoryCoverage(input: {
   }
 
   for (const count of candidateCounts) {
-    const entries = input.pendingEntries.slice(0, count);
-    const coverage = projectMemoryExtractionEvidence(entries.map(({ event }) => event));
-    const evidence = fitCoverageAroundPriority(fittedPriority, coverage, budget);
-    if (evidence) selected = { entries, evidence };
+    const candidateEntries = input.pendingEntries.slice(0, count);
+    const coverage = projectMemoryExtractionEvidence(candidateEntries.map(({ event }) => event));
+    const fitted = fitCoverageAroundPriority(
+      fittedPriority,
+      coverage,
+      budget,
+      input.sourceEventMessagePositions,
+    );
+    if (!fitted) continue;
+
+    const fittedRefs = new Set(fitted.map(({ sourceRef }) => sourceRef));
+    const firstOmitted = coverage.find(({ sourceRef }) => !fittedRefs.has(sourceRef));
+    if (!firstOmitted) {
+      selected = { entries: candidateEntries, evidence: fitted };
+      continue;
+    }
+
+    const firstOmittedOrdinal = Math.min(
+      ...firstOmitted.events.map(
+        (event) =>
+          input.pendingEntries.find((entry) => entry.event.id === event.id)?.ordinal ?? Infinity,
+      ),
+    );
+    const safeCount = candidateCounts
+      .filter(
+        (candidateCount) =>
+          candidateCount < count &&
+          input.pendingEntries[candidateCount - 1]!.ordinal < firstOmittedOrdinal,
+      )
+      .at(-1);
+    if (!safeCount) continue;
+    const entries = input.pendingEntries.slice(0, safeCount);
+    const includedEventIds = new Set(entries.map(({ event }) => event.id));
+    const priorityRefs = new Set(fittedPriority.map(({ sourceRef }) => sourceRef));
+    selected = {
+      entries,
+      evidence: fitted.filter(
+        (entry) =>
+          priorityRefs.has(entry.sourceRef) ||
+          entry.events.every((event) => includedEventIds.has(event.id)),
+      ),
+    };
   }
   return selected;
 }
@@ -130,9 +173,12 @@ export function projectMemoryExtractionEvidence(
 export function fitMemoryExtractionEvidence(
   evidence: readonly MemoryExtractionEvidence[],
   maxJsonChars = MAX_MEMORY_EVIDENCE_JSON_CHARS,
+  sourceEventMessagePositions?: Readonly<Record<string, readonly number[]>>,
 ): readonly MemoryExtractionEvidence[] | undefined {
   if (!Number.isSafeInteger(maxJsonChars) || maxJsonChars < 1) return undefined;
-  if (memoryExtractionEvidenceJsonSize(evidence) <= maxJsonChars) return evidence;
+  if (memoryExtractionEvidenceJsonSize(evidence, sourceEventMessagePositions) <= maxJsonChars) {
+    return evidence;
+  }
   let low = MIN_EVIDENCE_TEXT_CHARS;
   let high = MAX_EVIDENCE_TEXT_CHARS;
   let best: readonly MemoryExtractionEvidence[] | undefined;
@@ -142,7 +188,7 @@ export function fitMemoryExtractionEvidence(
       ...entry,
       text: sliceCodePoints(entry.text, cap),
     }));
-    if (memoryExtractionEvidenceJsonSize(candidate) <= maxJsonChars) {
+    if (memoryExtractionEvidenceJsonSize(candidate, sourceEventMessagePositions) <= maxJsonChars) {
       best = candidate;
       low = cap + 1;
     } else {
@@ -154,17 +200,30 @@ export function fitMemoryExtractionEvidence(
 
 export function memoryExtractionEvidenceJsonSize(
   evidence: readonly MemoryExtractionEvidence[],
+  sourceEventMessagePositions?: Readonly<Record<string, readonly number[]>>,
 ): number {
-  return JSON.stringify(renderMemoryExtractionEvidence(evidence)).length;
+  return JSON.stringify(renderMemoryExtractionEvidence(evidence, sourceEventMessagePositions))
+    .length;
 }
 
-export function renderMemoryExtractionEvidence(evidence: readonly MemoryExtractionEvidence[]) {
-  return evidence.map(({ sourceRef, type, text, events }) => ({
-    sourceRef,
-    type,
-    observedAt: minuteTimestamp(Math.max(0, ...events.map((event) => event.ts))),
-    text,
-  }));
+export function renderMemoryExtractionEvidence(
+  evidence: readonly MemoryExtractionEvidence[],
+  sourceEventMessagePositions?: Readonly<Record<string, readonly number[]>>,
+) {
+  return evidence.map(({ sourceRef, type, text, events }) => {
+    const messagePositions = uniqueSorted(
+      events.flatMap((event) => sourceEventMessagePositions?.[event.id] ?? []),
+    );
+    const everyEventIndexed =
+      sourceEventMessagePositions !== undefined &&
+      events.every((event) => (sourceEventMessagePositions[event.id]?.length ?? 0) > 0);
+    return {
+      sourceRef,
+      type,
+      observedAt: minuteTimestamp(Math.max(0, ...events.map((event) => event.ts))),
+      ...(everyEventIndexed ? { messagePositions } : { text }),
+    };
+  });
 }
 
 /** Preserve requested evidence once fitted; only coverage text may shrink. */
@@ -172,11 +231,14 @@ function fitCoverageAroundPriority(
   priority: readonly MemoryExtractionEvidence[],
   coverage: readonly MemoryExtractionEvidence[],
   maxJsonChars: number,
+  sourceEventMessagePositions?: Readonly<Record<string, readonly number[]>>,
 ): readonly MemoryExtractionEvidence[] | undefined {
   const priorityRefs = new Set(priority.map(({ sourceRef }) => sourceRef));
   const remaining = coverage.filter(({ sourceRef }) => !priorityRefs.has(sourceRef));
   const merged = [...priority, ...remaining];
-  if (memoryExtractionEvidenceJsonSize(merged) <= maxJsonChars) return merged;
+  if (memoryExtractionEvidenceJsonSize(merged, sourceEventMessagePositions) <= maxJsonChars) {
+    return merged;
+  }
   if (remaining.length === 0) return undefined;
 
   const fit = (entries: readonly MemoryExtractionEvidence[]) => {
@@ -189,7 +251,9 @@ function fitCoverageAroundPriority(
         ...priority,
         ...entries.map((entry) => ({ ...entry, text: sliceCodePoints(entry.text, cap) })),
       ];
-      if (memoryExtractionEvidenceJsonSize(candidate) <= maxJsonChars) {
+      if (
+        memoryExtractionEvidenceJsonSize(candidate, sourceEventMessagePositions) <= maxJsonChars
+      ) {
         best = candidate;
         low = cap + 1;
       } else {
@@ -202,28 +266,21 @@ function fitCoverageAroundPriority(
   const fitted = fit(remaining);
   if (fitted) return fitted;
 
-  // Tool evidence is supplemental to the conversation transcript. A single
-  // oversized parallel Tool episode is indivisible at the Cursor boundary;
-  // drop trailing manifests deterministically instead of permanently blocking
-  // every later memory extraction in the Session.
-  const toolCount = remaining.filter(({ type }) => type === 'tool_exchange').length;
+  // Keep only a continuous evidence prefix. If a record no longer fits, later
+  // records must not remain visible while the Cursor silently consumes the
+  // omitted Event. planMemoryCoverage moves the Cursor to the preceding safe
+  // boundary and leaves the remainder for the next extraction.
   let low = 0;
-  let high = toolCount - 1;
+  let high = remaining.length - 1;
   let best: readonly MemoryExtractionEvidence[] | undefined;
   while (low <= high) {
-    const keepTools = Math.floor((low + high) / 2);
-    let seenTools = 0;
-    const degraded = remaining.filter((entry) => {
-      if (entry.type !== 'tool_exchange') return true;
-      seenTools += 1;
-      return seenTools <= keepTools;
-    });
-    const candidate = fit(degraded);
+    const keepCount = Math.floor((low + high) / 2);
+    const candidate = fit(remaining.slice(0, keepCount));
     if (candidate) {
       best = candidate;
-      low = keepTools + 1;
+      low = keepCount + 1;
     } else {
-      high = keepTools - 1;
+      high = keepCount - 1;
     }
   }
   return best;
@@ -403,6 +460,10 @@ function isMemoryEvent(event: RuntimeEvent): boolean {
 
 function sliceCodePoints(value: string, maximum: number): string {
   return Array.from(value).slice(0, maximum).join('');
+}
+
+function uniqueSorted(values: readonly number[]): number[] {
+  return [...new Set(values)].sort((left, right) => left - right);
 }
 
 function toolExchangeKey(event: RuntimeEvent, toolCallId: string): string {

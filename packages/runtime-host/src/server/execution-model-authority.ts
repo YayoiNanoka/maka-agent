@@ -14,6 +14,7 @@ import {
   createProxiedFetchTransport,
   generateToolFreeModelCall,
   generateProviderPrefixModelCall,
+  modelUsesAnthropicMessages,
   getAIModel,
   llmCallUsageFields,
   recordLlmCallStrict,
@@ -460,6 +461,9 @@ async function runHostAuxiliaryModelCall(
           ? generateProviderPrefixModelCall({
               model,
               ...request,
+              toolChoicePolicy: modelUsesAnthropicMessages(target.connection, target.model)
+                ? 'omit'
+                : 'none',
               abortSignal: input.abortSignal,
             })
           : generateToolFreeModelCall({

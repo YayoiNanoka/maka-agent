@@ -186,6 +186,7 @@ import {
   type MemoryExtractionSourceSnapshot,
   type MemoryExtractionTrigger,
 } from './memory-extraction.js';
+import { modelUsesNativeOpenAiResponses } from './model-runtime.js';
 import {
   applyRuntimeEventContextBudget,
   buildContextBudgetDiagnosticShell,
@@ -734,6 +735,7 @@ class TurnScope {
   injectedSteeringMessages: ModelMessage[] = [];
   memoryExtractRequested = false;
   memorySourceMessages: readonly ModelMessage[] | undefined;
+  memorySourceEventMessagePositions: Readonly<Record<string, readonly number[]>> | undefined;
   memorySourceSystemPrompt: string | undefined;
   memorySourceTools: ModelToolSet | undefined;
   memorySourceActiveTools: readonly string[] | undefined;
@@ -784,6 +786,7 @@ export class AiSdkBackend implements AgentBackend {
   private readonly compaction: AiSdkCompaction;
   /** Session-scoped running total, deliberately accumulated across turns. */
   private cumulativeUsageCheckpoint: NormalizedAiSdkUsage | undefined;
+  private readonly memoryReplayMessageEvents = new WeakMap<ModelMessage, readonly string[]>();
   constructor(input: AiSdkBackendInput) {
     this.input = input;
     this.sessionId = input.sessionId;
@@ -821,19 +824,20 @@ export class AiSdkBackend implements AgentBackend {
     ) {
       throw new Error('Long-term Memory trigger tool names are reserved by Runtime');
     }
-    const memoryTools = input.memoryExtraction
-      ? buildMemoryExtractionTriggerTools({
-          capabilities: input.memoryExtraction,
-          snapshot: (trigger, context) => this.memorySourceSnapshot(trigger, context),
-          markExtractRequested: (context) => {
-            const scope = [...this.activeTurns].find(
-              (candidate) =>
-                candidate.turnId === context.turnId && candidate.runId === context.runId,
-            );
-            if (scope) scope.memoryExtractRequested = true;
-          },
-        })
-      : [];
+    const memoryTools =
+      input.memoryExtraction && !modelUsesNativeOpenAiResponses(input.connection, input.modelId)
+        ? buildMemoryExtractionTriggerTools({
+            capabilities: input.memoryExtraction,
+            snapshot: (trigger, context) => this.memorySourceSnapshot(trigger, context),
+            markExtractRequested: (context) => {
+              const scope = [...this.activeTurns].find(
+                (candidate) =>
+                  candidate.turnId === context.turnId && candidate.runId === context.runId,
+              );
+              if (scope) scope.memoryExtractRequested = true;
+            },
+          })
+        : [];
     this.toolAvailabilityRuntime = new ToolAvailabilityRuntime(
       [...input.tools, ...memoryTools],
       input.toolAvailability,
@@ -888,6 +892,11 @@ export class AiSdkBackend implements AgentBackend {
         ? { sourceSystemPrompt: scope.memorySourceSystemPrompt }
         : {}),
       sourceMessages: structuredClone(sourceMessages),
+      ...(scope.memorySourceEventMessagePositions
+        ? {
+            sourceEventMessagePositions: structuredClone(scope.memorySourceEventMessagePositions),
+          }
+        : {}),
       sourceTools: { ...scope.memorySourceTools },
       sourceActiveTools: [...scope.memorySourceActiveTools],
       ...(this.input.providerOptions
@@ -1661,6 +1670,8 @@ export class AiSdkBackend implements AgentBackend {
             stepSignature === undefined;
           for (;;) {
             scope.memorySourceMessages = [...attemptMessages];
+            scope.memorySourceEventMessagePositions =
+              this.memoryEventMessagePositions(attemptMessages);
             scope.memorySourceSystemPrompt = requestSystemPrompt;
             scope.memorySourceTools = modelTools;
             scope.memorySourceActiveTools = [...activeToolsForRequest];
@@ -3024,6 +3035,10 @@ export class AiSdkBackend implements AgentBackend {
       providerOptions?: NonNullable<ModelMessage['providerOptions']>;
     };
     const out: ModelMessage[] = [];
+    const push = (message: ModelMessage, eventIds: readonly string[]) => {
+      out.push(message);
+      this.memoryReplayMessageEvents.set(message, [...new Set(eventIds)]);
+    };
     let bufferedCalls: ToolCallItem[] = [];
     const results = new Map<string, ToolResultItem>();
     const reasoningByStep = new Map<string, ThinkingItem[]>();
@@ -3098,17 +3113,20 @@ export class AiSdkBackend implements AgentBackend {
         const result = results.get(call.toolCallId);
         if (!result || result.providerExecuted === true) continue;
         results.delete(call.toolCallId);
-        out.push({
-          role: 'tool',
-          content: [
-            {
-              type: 'tool-result',
-              toolCallId: result.toolCallId,
-              toolName: result.toolName,
-              output: await materializeReplayToolResult(result),
-            },
-          ],
-        });
+        push(
+          {
+            role: 'tool',
+            content: [
+              {
+                type: 'tool-result',
+                toolCallId: result.toolCallId,
+                toolName: result.toolName,
+                output: await materializeReplayToolResult(result),
+              },
+            ],
+          },
+          [result.eventId],
+        );
       }
     };
     // Emit one assistant message for a step, preserving the distinct client-
@@ -3119,6 +3137,11 @@ export class AiSdkBackend implements AgentBackend {
       calls: readonly ToolCallItem[],
     ) => {
       const content: unknown[] = [];
+      const eventIds = [
+        ...(reasoning ?? []).map((item) => item.eventId),
+        ...(text ? [text.eventId] : []),
+        ...calls.map((call) => call.eventId),
+      ];
       const replayReasoning = reasoning
         ?.map(reasoningReplay)
         .filter((item): item is ReplayReasoning => item !== undefined);
@@ -3142,6 +3165,7 @@ export class AiSdkBackend implements AgentBackend {
         const result = results.get(call.toolCallId);
         if (!result || result.providerExecuted !== true) continue;
         results.delete(call.toolCallId);
+        eventIds.push(result.eventId);
         content.push({
           type: 'tool-result',
           toolCallId: result.toolCallId,
@@ -3173,11 +3197,14 @@ export class AiSdkBackend implements AgentBackend {
         (item) => item.providerOptions !== undefined,
       )?.providerOptions;
       if (content.length > 0 || replayProviderOptions) {
-        out.push({
-          role: 'assistant',
-          content,
-          ...(replayProviderOptions ? { providerOptions: replayProviderOptions } : {}),
-        } as ModelMessage);
+        push(
+          {
+            role: 'assistant',
+            content,
+            ...(replayProviderOptions ? { providerOptions: replayProviderOptions } : {}),
+          } as ModelMessage,
+          eventIds,
+        );
       }
       await pushClientToolResults(calls);
     };
@@ -3246,20 +3273,23 @@ export class AiSdkBackend implements AgentBackend {
             await flushPendingSteps();
             const replayReasoning = reasoningReplay(item);
             if (replayReasoning) {
-              out.push({
-                role: 'assistant',
-                content: replayReasoning.part ? [replayReasoning.part] : [],
-                ...(replayReasoning.providerOptions
-                  ? { providerOptions: replayReasoning.providerOptions }
-                  : {}),
-              } as ModelMessage);
+              push(
+                {
+                  role: 'assistant',
+                  content: replayReasoning.part ? [replayReasoning.part] : [],
+                  ...(replayReasoning.providerOptions
+                    ? { providerOptions: replayReasoning.providerOptions }
+                    : {}),
+                } as ModelMessage,
+                [item.eventId],
+              );
             }
           }
           break;
         case 'text':
           if (item.role !== 'assistant') {
             await flushPendingSteps();
-            out.push(await this.materializeRuntimeReplayItem(budget, item));
+            push(await this.materializeRuntimeReplayItem(budget, item), [item.eventId]);
             break;
           }
           if (item.stepId !== undefined) {
@@ -3282,13 +3312,16 @@ export class AiSdkBackend implements AgentBackend {
           } else {
             // Legacy per-turn assistant text: standalone after any tool block.
             await flushPendingSteps();
-            out.push({
-              role: 'assistant',
-              content: item.content,
-              ...(item.providerOptions !== undefined
-                ? { providerOptions: item.providerOptions }
-                : {}),
-            });
+            push(
+              {
+                role: 'assistant',
+                content: item.content,
+                ...(item.providerOptions !== undefined
+                  ? { providerOptions: item.providerOptions }
+                  : {}),
+              },
+              [item.eventId],
+            );
           }
           break;
       }
@@ -3304,9 +3337,34 @@ export class AiSdkBackend implements AgentBackend {
     const messages: ModelMessage[] = [];
     for (const item of plan.items) {
       if (item.kind === 'text')
-        messages.push(await this.materializeRuntimeReplayItem(budget, item));
+        this.pushMemoryIndexedMessage(
+          messages,
+          await this.materializeRuntimeReplayItem(budget, item),
+          [item.eventId],
+        );
     }
     return messages;
+  }
+
+  private pushMemoryIndexedMessage(
+    messages: ModelMessage[],
+    message: ModelMessage,
+    eventIds: readonly string[],
+  ): void {
+    messages.push(message);
+    this.memoryReplayMessageEvents.set(message, [...new Set(eventIds)]);
+  }
+
+  private memoryEventMessagePositions(
+    messages: readonly ModelMessage[],
+  ): Readonly<Record<string, readonly number[]>> | undefined {
+    const positions: Record<string, number[]> = {};
+    for (const [position, message] of messages.entries()) {
+      for (const eventId of this.memoryReplayMessageEvents.get(message) ?? []) {
+        (positions[eventId] ??= []).push(position);
+      }
+    }
+    return Object.keys(positions).length > 0 ? positions : undefined;
   }
 
   private async materializeRuntimeReplayItem(

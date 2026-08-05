@@ -1587,6 +1587,7 @@ export type {
   ToolFreeModelCallInput,
   ToolFreeModelCallResult,
 } from './tool-free-model-call.js';
+export { modelUsesAnthropicMessages } from './model-runtime.js';
 export {
   MemoryExtractionEngine,
   type MemoryExtractionEnginePorts,

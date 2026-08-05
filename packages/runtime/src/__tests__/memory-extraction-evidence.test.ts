@@ -32,8 +32,8 @@ describe('Memory Extraction evidence planning', () => {
     });
     assert.deepEqual(
       narrow?.entries.map(({ ordinal }) => ordinal),
-      [1, 2, 3, 4, 5, 6, 7],
-      'bounded degradation may omit Tool manifests but never cuts inside an episode',
+      [1],
+      'the Cursor stops before the first evidence record omitted from the model view',
     );
     assert.deepEqual(
       narrow?.evidence.map(({ sourceRef }) => sourceRef),
@@ -122,7 +122,7 @@ describe('Memory Extraction evidence planning', () => {
     assert.equal(plan.evidence[0]?.text, requestedText);
     assert.equal(plan.evidence[1]?.sourceRef, 'event:coverage');
     assert.ok(memoryExtractionEvidenceJsonSize(plan.evidence) <= 1_800);
-    assert.equal(renderMemoryExtractionEvidence(plan.evidence)[0]?.text, requestedText);
+    assert.match(JSON.stringify(renderMemoryExtractionEvidence(plan.evidence)[0]), /Remember this/);
   });
 
   test('does not guess text positions and returns a bounded hit-centered history snippet', () => {
@@ -221,7 +221,7 @@ describe('Memory Extraction evidence planning', () => {
     );
   });
 
-  test('advances through one Tool episode larger than the ordinary Event bound', () => {
+  test('does not consume an indivisible Tool episode whose evidence cannot fit', () => {
     const calls = Array.from({ length: 61 }, (_, index) =>
       callEvent(`large-call-${index}`, `large-id-${index}`, 'Read'),
     );
@@ -238,9 +238,23 @@ describe('Memory Extraction evidence planning', () => {
       maxEvidenceJsonChars: 800,
     });
 
-    assert.equal(plan?.entries.at(-1)?.ordinal, 122);
-    assert.ok(memoryExtractionEvidenceJsonSize(plan!.evidence) <= 800);
-    assert.ok(plan!.evidence.some(({ type }) => type === 'tool_exchange'));
+    assert.equal(plan, undefined);
+  });
+
+  test('renders indexed Provider-prefix evidence without duplicating its text', () => {
+    const event = textEvent('indexed-user', 'user', 'This text already exists in the prefix.');
+    const evidence = projectMemoryExtractionEvidence([event]);
+    const rendered = renderMemoryExtractionEvidence(evidence, { 'indexed-user': [3] });
+
+    assert.deepEqual(rendered, [
+      {
+        sourceRef: 'event:indexed-user',
+        type: 'user_message',
+        observedAt: 0,
+        messagePositions: [3],
+      },
+    ]);
+    assert.equal(JSON.stringify(rendered).includes('already exists'), false);
   });
 });
 

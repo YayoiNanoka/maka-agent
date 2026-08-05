@@ -41,6 +41,8 @@ export interface MemoryExtractionSourceSnapshot {
   readonly sourceHeader: Pick<SessionHeader, 'llmConnectionSlug' | 'model' | 'thinkingLevel'>;
   readonly sourceSystemPrompt?: string;
   readonly sourceMessages: readonly ModelMessage[];
+  /** Exact RuntimeEvent-to-message positions carried beside the frozen Provider prefix. */
+  readonly sourceEventMessagePositions?: Readonly<Record<string, readonly number[]>>;
   readonly sourceTools: ModelToolSet;
   readonly sourceActiveTools: readonly string[];
   readonly sourceProviderOptions?: Record<string, unknown>;
@@ -147,7 +149,11 @@ export class MemoryExtractionEngine {
 
     const cursor = await this.ports.readCursor(snapshot.sessionId);
     const expectedCursorOrdinal = cursor?.processedOrdinal ?? 0;
-    if (expectedCursorOrdinal >= boundary.ordinal) return unavailableMemoryResult();
+    if (expectedCursorOrdinal >= boundary.ordinal) {
+      return snapshot.trigger === 'remember'
+        ? { status: 'not_applicable', requestedItems: [] }
+        : unavailableMemoryResult();
+    }
     const pendingEntries = entries.filter(
       ({ ordinal }) => ordinal > expectedCursorOrdinal && ordinal <= boundary.ordinal,
     );
@@ -170,6 +176,7 @@ export class MemoryExtractionEngine {
       allEntries: entries,
       boundaryOrdinal: boundary.ordinal,
       priorityEvidence,
+      sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
     });
     if (!coverage || coverage.entries.length === 0) return unavailableMemoryResult();
 
@@ -180,6 +187,7 @@ export class MemoryExtractionEngine {
         trigger: snapshot.trigger,
         now: this.now(),
         evidence: coverage.evidence,
+        sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
       }),
       'proposal',
     );
@@ -198,7 +206,7 @@ export class MemoryExtractionEngine {
     let requestedStatus = first.requestedStatus;
     let requestedAdmissionEvidence = coverage.evidence;
     if (first.status === 'search_required') {
-      if (snapshot.trigger !== 'remember' || first.coverageStatus !== 'processed') {
+      if (snapshot.trigger !== 'remember') {
         return unavailableMemoryResult();
       }
       if (!(await this.allowed(snapshot.sessionId))) return unavailableMemoryResult();
@@ -213,13 +221,19 @@ export class MemoryExtractionEngine {
           localizedEntries.map(({ event }) => event),
           { snippetTerms: first.search.terms },
         ),
+        undefined,
+        snapshot.sourceEventMessagePositions,
       );
       if (!localizedEvidence || !(await this.allowed(snapshot.sessionId))) {
         return unavailableMemoryResult();
       }
       const localizedRaw = await this.callModel(
         snapshot,
-        buildLocalizedMemoryProposalPrompt({ now: this.now(), evidence: localizedEvidence }),
+        buildLocalizedMemoryProposalPrompt({
+          now: this.now(),
+          evidence: localizedEvidence,
+          sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
+        }),
         'localized',
       );
       const localized = parseLocalizedMemoryProposal(localizedRaw);
@@ -231,7 +245,7 @@ export class MemoryExtractionEngine {
       return unavailableMemoryResult();
     }
 
-    if (first.coverageStatus !== 'processed' || requestedStatus === 'unresolved') {
+    if (requestedStatus === 'unresolved') {
       return unavailableMemoryResult();
     }
     const requestedEvidenceByRef = new Map(
@@ -253,9 +267,9 @@ export class MemoryExtractionEngine {
           proposal,
           requested ? requestedEvidenceByRef : coverageEvidenceByRef,
         );
-        if (!admitted) return unavailableMemoryResult();
+        if (!admitted) continue;
         if (!requested && admitted.citedEvents.some((event) => !coverageEventIds.has(event.id))) {
-          return unavailableMemoryResult();
+          continue;
         }
         if (requested) requestedItemIndexes.push(writes.length);
         writes.push(memoryItemWrite(snapshot, admitted, requested));

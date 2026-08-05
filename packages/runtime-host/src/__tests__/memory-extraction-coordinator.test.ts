@@ -39,7 +39,13 @@ describe('HostMemoryExtractionCoordinator', () => {
         },
         { ordinal: 2, event: toolCallEvent('event-call-1', 'run-1', 'turn-1', 'call-1') },
       );
-      const firstSnapshot = snapshot('run-1', 'turn-1', 'call-1', 'Prefer concise Chinese.');
+      const firstSnapshot = snapshot(
+        'run-1',
+        'turn-1',
+        'call-1',
+        'Prefer concise Chinese.',
+        'event-user-1',
+      );
       const first = await coordinator.sourceCapabilities().remember(firstSnapshot);
       assert.equal(first.status, 'remembered');
       assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 1);
@@ -76,8 +82,8 @@ describe('HostMemoryExtractionCoordinator', () => {
       assert.equal(observed.length, 2, 'receipt replay must not call the provider');
       assert.deepEqual(Object.keys(observed[0]!.snapshot.sourceTools), ['memory_remember']);
       assert.deepEqual(observed[0]!.snapshot.sourceActiveTools, ['memory_remember']);
-      assert.match(observed[0]!.prompt, /Prefer concise Chinese\./);
-      assert.doesNotMatch(observed[0]!.prompt, /"messagePositions":\[0\]/);
+      assert.doesNotMatch(observed[0]!.prompt, /Prefer concise Chinese\./);
+      assert.match(observed[0]!.prompt, /"messagePositions":\[0\]/);
       await coordinator.close();
     });
   });
@@ -108,6 +114,79 @@ describe('HostMemoryExtractionCoordinator', () => {
         await writer.searchByKeys({ terms: ['response preference'], match: 'exact' }),
         [],
       );
+      await coordinator.close();
+    });
+  });
+
+  test('drops invalid Items individually while committing valid requested Items and the Cursor', async () => {
+    await withMemoryWriter(async (writer) => {
+      const entries = [
+        { ordinal: 1, event: textEvent('event-user-1', 'run-1', 'turn-1', 'Prefer Rust.') },
+        { ordinal: 2, event: toolCallEvent('event-call-1', 'run-1', 'turn-1', 'call-1') },
+      ];
+      const valid = proposalItem('The user prefers Rust.', 'global', 'event-user-1');
+      const invalid = {
+        ...proposalItem('Invalid incidental memory.', 'global', 'missing-event', 'missing'),
+        kind: 'note',
+      };
+      const coordinator = createCoordinator({
+        writer,
+        entries,
+        outputs: [
+          JSON.stringify({
+            status: 'complete',
+            coverageStatus: 'processed',
+            requestedStatus: 'resolved',
+            requestedItems: [valid],
+            incidentalItems: [invalid],
+          }),
+        ],
+      });
+
+      const result = await coordinator
+        .sourceCapabilities()
+        .remember(snapshot('run-1', 'turn-1', 'call-1', 'Prefer Rust.'));
+
+      assert.equal(result.status, 'remembered');
+      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 1);
+      const stored = await writer.searchByKeys({ terms: ['response preference'], match: 'exact' });
+      assert.deepEqual(
+        stored.map(({ item }) => item.content),
+        ['The user prefers Rust.'],
+      );
+      await coordinator.close();
+    });
+  });
+
+  test('treats a second memory_remember at an already processed boundary as a no-op', async () => {
+    await withMemoryWriter(async (writer) => {
+      const entries = [
+        { ordinal: 1, event: textEvent('event-user-1', 'run-1', 'turn-1', 'Prefer Rust.') },
+        { ordinal: 2, event: toolCallEvent('event-call-1', 'run-1', 'turn-1', 'call-1') },
+      ];
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const coordinator = createCoordinator({
+        writer,
+        entries,
+        outputs: [proposal('The user prefers Rust.', 'global', 'event-user-1')],
+        observed,
+      });
+
+      await coordinator
+        .sourceCapabilities()
+        .remember(snapshot('run-1', 'turn-1', 'call-1', 'Prefer Rust.'));
+      entries.push({
+        ordinal: 3,
+        event: toolCallEvent('event-call-2', 'run-1', 'turn-1', 'call-2'),
+      });
+
+      assert.deepEqual(
+        await coordinator
+          .sourceCapabilities()
+          .remember(snapshot('run-1', 'turn-1', 'call-2', 'Prefer Rust.')),
+        { status: 'not_applicable', requestedItems: [] },
+      );
+      assert.equal(observed.length, 1);
       await coordinator.close();
     });
   });
@@ -322,12 +401,14 @@ function snapshot(
   turnId: string,
   toolCallId: string,
   text: string,
+  indexedEventId?: string,
 ): MemoryExtractionSourceSnapshot {
   return {
     trigger: 'remember',
     sourceHeader: header(),
     sourceSystemPrompt: 'original system',
     sourceMessages: [{ role: 'user', content: text }],
+    ...(indexedEventId ? { sourceEventMessagePositions: { [indexedEventId]: [0] } } : {}),
     sourceTools: {
       memory_remember: { description: 'Remember', inputSchema: {} },
     },

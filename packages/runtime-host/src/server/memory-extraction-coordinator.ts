@@ -74,7 +74,11 @@ export class HostMemoryExtractionCoordinator {
   private async remember(snapshot: MemoryExtractionSourceSnapshot): Promise<MemoryRememberResult> {
     if (snapshot.trigger !== 'remember' || this.#draining) return unavailable();
     try {
-      return await this.input.lane.run(snapshot.sessionId, () => this.#engine.execute(snapshot));
+      return await this.input.lane.run(
+        snapshot.sessionId,
+        () => this.#engine.execute(snapshot),
+        'foreground',
+      );
     } catch {
       return unavailable();
     }
@@ -86,9 +90,13 @@ export class HostMemoryExtractionCoordinator {
     if (this.#background.has(key)) return;
     const residency = this.input.acquireResidency();
     const task = this.input.lane
-      .run(snapshot.sessionId, async () => {
-        await this.#engine.execute(snapshot);
-      })
+      .run(
+        snapshot.sessionId,
+        async () => {
+          await this.#engine.execute(snapshot);
+        },
+        'background',
+      )
       .catch(() => undefined)
       .finally(() => {
         this.#background.delete(key);

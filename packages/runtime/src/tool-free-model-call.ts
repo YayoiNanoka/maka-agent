@@ -36,6 +36,8 @@ export interface ProviderPrefixModelCallInput {
   readonly providerOptions?: unknown;
   readonly abortSignal?: AbortSignal;
   readonly maxOutputTokens?: number;
+  /** Anthropic omits Tool schemas when AI SDK receives `none`; omit there and fail closed below. */
+  readonly toolChoicePolicy: 'none' | 'omit';
 }
 
 export type ProviderPrefixModelCallResult = ToolFreeModelCallResult;
@@ -58,10 +60,11 @@ export async function generateProviderPrefixModelCall(
     messages: lowerNativeAudioMessages(input.messages),
     tools: lowerModelTools(input.tools),
     activeTools: input.activeTools,
-    // Preserve the source request's Tool schema for Provider cache reuse while
-    // granting this auxiliary call no Tool authority. This option is local to
-    // this request and cannot leak into a later Agent step.
-    toolChoice: 'none',
+    // Preserve the source request's Tool schema for Provider cache reuse. Most
+    // adapters can disable calls while retaining schemas; Anthropic cannot, so
+    // its request keeps the source default and the result is rejected below if
+    // the model nevertheless chooses a Tool.
+    ...(input.toolChoicePolicy === 'none' ? { toolChoice: 'none' } : {}),
     ...(input.abortSignal === undefined ? {} : { abortSignal: input.abortSignal }),
     ...(input.providerOptions === undefined ? {} : { providerOptions: input.providerOptions }),
     ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),

@@ -5,7 +5,7 @@ import {
   providerAuthRequiresSecret,
   type RuntimeExecutionConnection,
 } from '@maka/core/llm-connections';
-import { lookupModelMetadata, openAiAdapterApiProtocol } from '@maka/core/model-metadata';
+import { lookupModelMetadata } from '@maka/core/model-metadata';
 import { generalizedErrorMessage } from '@maka/core/redaction';
 import type { CacheMissInputSource } from '@maka/core/usage-stats/types';
 import { rawFinishReasonString } from './model-protocol.js';
@@ -34,7 +34,12 @@ export type {
   ModelToolSet,
 } from './model-protocol.js';
 
-import { resolveModelRuntime } from './model-runtime.js';
+import {
+  modelUsesAnthropicMessages,
+  modelUsesNativeOpenAiResponses,
+  modelUsesOpenAiResponses,
+  resolveModelRuntime,
+} from './model-runtime.js';
 import {
   classifyError,
   errorPresentationFromClass,
@@ -156,9 +161,9 @@ export class ModelAdapter {
     return {
       toolCalls: true,
       toolResults: true,
-      signedThinking: usesAnthropicMessages(this.input.connection, this.input.modelId),
+      signedThinking: modelUsesAnthropicMessages(this.input.connection, this.input.modelId),
       unsignedThinking: usesKimiOpenAiChat(this.input.connection, this.input.modelId),
-      openAiResponsesThinking: usesOpenAiResponses(this.input.connection, this.input.modelId),
+      openAiResponsesThinking: modelUsesOpenAiResponses(this.input.connection, this.input.modelId),
     };
   }
 
@@ -173,7 +178,7 @@ export class ModelAdapter {
       ...(usesKimiOpenAiChat(this.input.connection, this.input.modelId)
         ? { kimiOpenAiTransportState: this.kimiOpenAiTransportState }
         : {}),
-      ...(usesNativeOpenAiResponses(this.input.connection, this.input.modelId)
+      ...(modelUsesNativeOpenAiResponses(this.input.connection, this.input.modelId)
         ? { openAiResponsesTransportState: this.openAiResponsesTransportState }
         : {}),
     });
@@ -221,7 +226,8 @@ export class ModelAdapter {
     const sdkTools = lowerModelTools(input.tools);
     const fullMessages = lowerNativeAudioMessages(input.messages);
     const responsesLane =
-      input.continuationKey && usesNativeOpenAiResponses(this.input.connection, this.input.modelId)
+      input.continuationKey &&
+      modelUsesNativeOpenAiResponses(this.input.connection, this.input.modelId)
         ? input.continuationKey
         : undefined;
     const continuation = responsesLane
@@ -230,7 +236,10 @@ export class ModelAdapter {
           this.openAiResponsesTransportState.semanticBaseline(responsesLane),
         )
       : { messages: fullMessages };
-    const providerOptions = usesNativeOpenAiResponses(this.input.connection, this.input.modelId)
+    const providerOptions = modelUsesNativeOpenAiResponses(
+      this.input.connection,
+      this.input.modelId,
+    )
       ? mergeOpenAiResponsesProviderOptions(
           this.input.providerOptions,
           this.input.sessionId ?? this.input.connection.slug,
@@ -485,7 +494,7 @@ function selectedModelMaxOutputTokens(
   modelId: string,
   providerOptions: Record<string, unknown> | undefined,
 ): number | undefined {
-  const anthropicMessages = usesAnthropicMessages(connection, modelId);
+  const anthropicMessages = modelUsesAnthropicMessages(connection, modelId);
   const kimiOpenAiChat = usesKimiOpenAiChat(connection, modelId);
   if (!anthropicMessages && !kimiOpenAiChat) return undefined;
   const wireOutputLimit =
@@ -497,37 +506,11 @@ function selectedModelMaxOutputTokens(
     : wireOutputLimit;
 }
 
-function usesAnthropicMessages(connection: RuntimeExecutionConnection, modelId: string): boolean {
-  const { adapter, apiProtocol } = resolveModelRuntime(connection, modelId);
-  return (
-    adapter.kind === 'anthropic' ||
-    adapter.kind === 'claude-subscription' ||
-    (adapter.kind === 'github-copilot' && apiProtocol === 'anthropic-messages')
-  );
-}
-
 function usesKimiOpenAiChat(connection: RuntimeExecutionConnection, modelId: string): boolean {
   return (
     connection.providerType === 'kimi-coding-plan' &&
     resolveModelRuntime(connection, modelId).apiProtocol === 'openai-chat'
   );
-}
-
-function usesOpenAiResponses(connection: RuntimeExecutionConnection, modelId: string): boolean {
-  const runtime = resolveModelRuntime(connection, modelId);
-  if (runtime.adapter.kind !== 'openai') return false;
-  return (
-    runtime.adapter.apiProtocol === 'openai-responses' ||
-    runtime.apiProtocol === 'openai-responses' ||
-    openAiAdapterApiProtocol(modelId, connection.providerType) === 'openai-responses'
-  );
-}
-
-function usesNativeOpenAiResponses(
-  connection: RuntimeExecutionConnection,
-  modelId: string,
-): boolean {
-  return connection.providerType === 'openai' && usesOpenAiResponses(connection, modelId);
 }
 
 function fixedAnthropicThinkingBudget(
