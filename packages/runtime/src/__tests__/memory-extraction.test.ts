@@ -10,7 +10,7 @@ import {
 } from '../memory-extraction-proposal.js';
 
 describe('bounded Memory Extraction', () => {
-  test('projects user, assistant, and successful Tool evidence without thinking or failed tools', () => {
+  test('projects only user text, excluding Assistant, Thinking, and every Tool event', () => {
     const evidence = projectMemoryExtractionEvidence([
       event('user-1', 'user', { kind: 'text', text: 'Use concise Chinese answers.' }),
       event('thinking-1', 'model', { kind: 'thinking', text: 'private reasoning' }),
@@ -44,11 +44,7 @@ describe('bounded Memory Extraction', () => {
 
     assert.deepEqual(
       evidence.map(({ sourceRef, type }) => ({ sourceRef, type })),
-      [
-        { sourceRef: 'event:user-1', type: 'user_message' },
-        { sourceRef: 'event:assistant-1', type: 'assistant_message' },
-        { sourceRef: 'tool:tool-call-1', type: 'tool_exchange' },
-      ],
+      [{ sourceRef: 'event:user-1', type: 'user_message' }],
     );
     assert.equal(
       evidence.some(({ text }) => text.includes('private reasoning')),

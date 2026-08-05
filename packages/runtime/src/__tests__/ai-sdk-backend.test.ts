@@ -199,6 +199,108 @@ describe('AiSdkBackend Memory Extraction triggers', () => {
     assert.match(JSON.stringify(model.doStreamCalls[1]?.prompt), /User prefers concise Chinese/);
   });
 
+  test('keeps only user-authored messages in the frozen Memory evidence prefix', async () => {
+    let modelCalls = 0;
+    let snapshot: MemoryExtractionSourceSnapshot | undefined;
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        modelCalls += 1;
+        const chunks: LanguageModelV4StreamPart[] =
+          modelCalls === 1
+            ? [
+                { type: 'stream-start', warnings: [] },
+                {
+                  type: 'tool-call',
+                  toolCallId: 'read-call',
+                  toolName: 'Read',
+                  input: JSON.stringify({ path: 'volatile.json' }),
+                },
+                {
+                  type: 'finish',
+                  finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+                  usage: emptyUsage(),
+                },
+              ]
+            : modelCalls === 2
+              ? [
+                  { type: 'stream-start', warnings: [] },
+                  {
+                    type: 'tool-call',
+                    toolCallId: 'remember-call',
+                    toolName: 'memory_remember',
+                    input: '{}',
+                  },
+                  {
+                    type: 'finish',
+                    finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+                    usage: emptyUsage(),
+                  },
+                ]
+              : [
+                  { type: 'stream-start', warnings: [] },
+                  { type: 'text-start', id: 'text-1' },
+                  { type: 'text-delta', id: 'text-1', delta: 'Remembered.' },
+                  { type: 'text-end', id: 'text-1' },
+                  {
+                    type: 'finish',
+                    finishReason: { unified: 'stop', raw: 'stop' },
+                    usage: emptyUsage(),
+                  },
+                ];
+        return {
+          stream: simulateReadableStream({
+            chunks,
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
+      },
+    });
+    const durable = durableTurnHarness('turn-memory-tool', 'Remember only what I explicitly said.');
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      tools: [
+        {
+          name: 'Read',
+          description: 'read volatile data',
+          parameters: z.object({ path: z.string() }),
+          impl: async () => ({ value: 'TOOL-ONLY-SECRET' }),
+        },
+      ],
+      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+      memoryExtraction: {
+        gate: async () => ({ allowed: true }),
+        remember: async (value) => {
+          snapshot = value;
+          return { status: 'not_applicable', requestedItems: [] };
+        },
+        extract: () => {},
+      },
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    await drainDurably(
+      backend.send(durable.input({ runId: 'run-1', invocationId: 'invocation-1' })),
+      durable,
+    );
+
+    assert.ok(snapshot);
+    const messagesJson = JSON.stringify(snapshot.sourceMessages);
+    assert.doesNotMatch(messagesJson, /TOOL-ONLY-SECRET|read-call|volatile\.json/);
+    assert.equal(
+      snapshot.sourceMessages.every((message) => message.role === 'user'),
+      true,
+    );
+    assert.ok(snapshot.sourceTools.Read, 'Tool schemas remain available for provider-prefix reuse');
+  });
+
   test('dispatches memory_extract only after the terminal Event is durably consumed', async () => {
     let modelCalls = 0;
     let extractionSnapshot: MemoryExtractionSourceSnapshot | undefined;

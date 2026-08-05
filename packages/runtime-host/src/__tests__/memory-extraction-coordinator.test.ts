@@ -22,7 +22,7 @@ import { HostMemoryExtractionCoordinator } from '../server/memory-extraction-coo
 import { MemoryExtractionSessionLane } from '../server/memory-extraction-session-lane.js';
 
 describe('HostMemoryExtractionCoordinator', () => {
-  test('crosses Runs with a Session Cursor, preserves the provider prefix, appends changes, and replays exactly', async () => {
+  test('crosses Runs with a Session Cursor, preserves provider configuration, appends changes, and replays exactly', async () => {
     await withMemoryWriter(async (writer) => {
       const entries: Array<{ ordinal: number; event: RuntimeEvent }> = [];
       const outputs = [
@@ -122,12 +122,30 @@ describe('HostMemoryExtractionCoordinator', () => {
     await withMemoryWriter(async (writer) => {
       const entries = [
         { ordinal: 1, event: textEvent('event-user-1', 'run-1', 'turn-1', 'Prefer Rust.') },
-        { ordinal: 2, event: toolCallEvent('event-call-1', 'run-1', 'turn-1', 'call-1') },
+        {
+          ordinal: 2,
+          event: modelTextEvent(
+            'event-assistant-1',
+            'run-1',
+            'turn-1',
+            'The volatile Tool result says the account balance is 42.',
+          ),
+        },
+        { ordinal: 3, event: toolCallEvent('event-call-1', 'run-1', 'turn-1', 'call-1') },
       ];
       const valid = proposalItem('The user prefers Rust.', 'global', 'event-user-1');
       const invalid = {
         ...proposalItem('Invalid incidental memory.', 'global', 'missing-event', 'missing'),
         kind: 'note',
+      };
+      const unconfirmedAssistant = {
+        ...proposalItem(
+          'The account balance is 42.',
+          'workspace',
+          'event-assistant-1',
+          'account balance is 42',
+        ),
+        kind: 'knowledge',
       };
       const coordinator = createCoordinator({
         writer,
@@ -138,7 +156,7 @@ describe('HostMemoryExtractionCoordinator', () => {
             coverageStatus: 'processed',
             requestedStatus: 'resolved',
             requestedItems: [valid],
-            incidentalItems: [invalid],
+            incidentalItems: [invalid, unconfirmedAssistant],
           }),
         ],
       });
@@ -148,7 +166,7 @@ describe('HostMemoryExtractionCoordinator', () => {
         .remember(snapshot('run-1', 'turn-1', 'call-1', 'Prefer Rust.'));
 
       assert.equal(result.status, 'remembered');
-      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 1);
+      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 2);
       const stored = await writer.searchByKeys({ terms: ['response preference'], match: 'exact' });
       assert.deepEqual(
         stored.map(({ item }) => item.content),
@@ -187,6 +205,89 @@ describe('HostMemoryExtractionCoordinator', () => {
         { status: 'not_applicable', requestedItems: [] },
       );
       assert.equal(observed.length, 1);
+      await coordinator.close();
+    });
+  });
+
+  test('drains every bounded batch through a frozen boundary before receipting the trigger', async () => {
+    await withMemoryWriter(async (writer) => {
+      const entries: Array<{ ordinal: number; event: RuntimeEvent }> = Array.from(
+        { length: 120 },
+        (_, index) => ({
+          ordinal: index + 1,
+          event: textEvent(`e${index + 1}`, 'run-old', `turn-old-${index + 1}`, `old${index + 1}`),
+        }),
+      );
+      entries.push(
+        {
+          ordinal: 121,
+          event: textEvent(
+            'event-trigger',
+            'run-current',
+            'turn-current',
+            'Remember that I prefer concise Chinese.',
+          ),
+        },
+        {
+          ordinal: 122,
+          event: toolCallEvent('event-memory-call', 'run-current', 'turn-current', 'memory-call'),
+        },
+      );
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const coordinator = createCoordinator({
+        writer,
+        entries,
+        outputs: [
+          JSON.stringify({
+            status: 'complete',
+            coverageStatus: 'processed',
+            requestedStatus: 'not_applicable',
+            requestedItems: [],
+            incidentalItems: [
+              {
+                ...proposalItem('Historical detail one.', 'global', 'e1', 'old1'),
+                kind: 'note',
+              },
+            ],
+          }),
+          new Error('provider unavailable'),
+          proposal('The user prefers concise Chinese.', 'global', 'event-trigger'),
+        ],
+        observed,
+      });
+      const source = snapshot(
+        'run-current',
+        'turn-current',
+        'memory-call',
+        'Remember that I prefer concise Chinese.',
+        'event-trigger',
+      );
+
+      const failed = await coordinator.sourceCapabilities().remember(source);
+
+      assert.equal(failed.status, 'unavailable');
+      assert.equal(observed.length, 2, 'the failed final batch was reached once');
+      assert.doesNotMatch(observed[0]!.prompt, /event:event-trigger/);
+      assert.match(observed[1]!.prompt, /event:event-trigger/);
+      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 120);
+
+      const result = await coordinator.sourceCapabilities().remember(source);
+
+      assert.equal(result.status, 'remembered');
+      assert.equal(observed.length, 3, 'retry resumes at the failed batch');
+      assert.match(observed[2]!.prompt, /event:event-trigger/);
+      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 121);
+      const stored = await writer.searchByKeys({
+        terms: ['response preference'],
+        match: 'exact',
+      });
+      assert.deepEqual(
+        stored.map(({ item }) => item.content),
+        ['The user prefers concise Chinese.', 'Historical detail one.'],
+      );
+
+      assert.deepEqual(await coordinator.sourceCapabilities().remember(source), result);
+      assert.equal(observed.length, 3, 'the final trigger receipt must replay exactly');
       await coordinator.close();
     });
   });
@@ -492,6 +593,14 @@ function textEvent(id: string, runId: string, turnId: string, text: string): Run
     role: 'user',
     author: 'user',
     content: { kind: 'text', text },
+  };
+}
+
+function modelTextEvent(id: string, runId: string, turnId: string, text: string): RuntimeEvent {
+  return {
+    ...textEvent(id, runId, turnId, text),
+    role: 'model',
+    author: 'agent',
   };
 }
 

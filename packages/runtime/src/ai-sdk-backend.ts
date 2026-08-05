@@ -885,16 +885,20 @@ export class AiSdkBackend implements AgentBackend {
             } as ModelMessage,
           ]
         : scope.memorySourceMessages;
+    const memoryProjection = projectMemoryConversationPrefix(
+      sourceMessages,
+      scope.memorySourceEventMessagePositions,
+    );
     return {
       ...boundary,
       sourceHeader: memoryExtractionModelHeader(this.input.header),
       ...(scope.memorySourceSystemPrompt
         ? { sourceSystemPrompt: scope.memorySourceSystemPrompt }
         : {}),
-      sourceMessages: structuredClone(sourceMessages),
-      ...(scope.memorySourceEventMessagePositions
+      sourceMessages: structuredClone(memoryProjection.messages),
+      ...(memoryProjection.eventMessagePositions
         ? {
-            sourceEventMessagePositions: structuredClone(scope.memorySourceEventMessagePositions),
+            sourceEventMessagePositions: structuredClone(memoryProjection.eventMessagePositions),
           }
         : {}),
       sourceTools: { ...scope.memorySourceTools },
@@ -4070,6 +4074,43 @@ function buildHistoryCompactCheckpointFailOpenContext(
   ).fits
     ? replayEvents
     : [...retainedCandidates];
+}
+
+function projectMemoryConversationPrefix(
+  messages: readonly ModelMessage[],
+  eventMessagePositions?: Readonly<Record<string, readonly number[]>>,
+): {
+  messages: ModelMessage[];
+  eventMessagePositions?: Readonly<Record<string, readonly number[]>>;
+} {
+  const projected: ModelMessage[] = [];
+  const remappedPositions = new Map<number, number>();
+  for (const [sourceIndex, message] of messages.entries()) {
+    const conversationMessage = projectMemoryConversationMessage(message);
+    if (!conversationMessage) continue;
+    remappedPositions.set(sourceIndex, projected.length);
+    projected.push(conversationMessage);
+  }
+  if (!eventMessagePositions) return { messages: projected };
+
+  const projectedEventPositions: Record<string, number[]> = {};
+  for (const [eventId, positions] of Object.entries(eventMessagePositions)) {
+    const remapped = [
+      ...new Set(
+        positions.flatMap((position) => {
+          const projectedPosition = remappedPositions.get(position);
+          return projectedPosition === undefined ? [] : [projectedPosition];
+        }),
+      ),
+    ].sort((left, right) => left - right);
+    if (remapped.length > 0) projectedEventPositions[eventId] = remapped;
+  }
+  return { messages: projected, eventMessagePositions: projectedEventPositions };
+}
+
+function projectMemoryConversationMessage(message: ModelMessage): ModelMessage | undefined {
+  if (message.role === 'user') return message;
+  return undefined;
 }
 
 function memoryExtractionModelHeader(

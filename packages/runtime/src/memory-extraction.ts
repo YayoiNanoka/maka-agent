@@ -14,6 +14,7 @@ import {
   projectMemoryExtractionEvidence,
   searchSameSessionMemoryHistory,
   type MemoryExtractionEventEntry,
+  type MemoryCoveragePlan,
 } from './memory-extraction-evidence.js';
 import {
   admitMemoryProposalItem,
@@ -24,6 +25,7 @@ import {
   parseLocalizedMemoryProposal,
   parseMemoryProposal,
   type AdmittedProposalFields,
+  type MemoryProposalItem,
 } from './memory-extraction-proposal.js';
 import type { ModelMessage, ModelToolSet } from './model-protocol.js';
 import type { MakaTool, MakaToolContext } from './tool-runtime.js';
@@ -35,13 +37,13 @@ export type MemoryExtractionGate =
   | { readonly allowed: true }
   | { readonly allowed: false; readonly reason: 'disabled' | 'incognito' | 'unavailable' };
 
-/** Exact Provider prefix frozen by AiSdkBackend at the source Tool/terminal boundary. */
+/** User-only projection frozen from the source request at the Tool/terminal boundary. */
 export interface MemoryExtractionSourceSnapshot {
   readonly trigger: MemoryExtractionTrigger;
   readonly sourceHeader: Pick<SessionHeader, 'llmConnectionSlug' | 'model' | 'thinkingLevel'>;
   readonly sourceSystemPrompt?: string;
   readonly sourceMessages: readonly ModelMessage[];
-  /** Exact RuntimeEvent-to-message positions carried beside the frozen Provider prefix. */
+  /** RuntimeEvent-to-message positions remapped onto the user-only projection. */
   readonly sourceEventMessagePositions?: Readonly<Record<string, readonly number[]>>;
   readonly sourceTools: ModelToolSet;
   readonly sourceActiveTools: readonly string[];
@@ -148,16 +150,12 @@ export class MemoryExtractionEngine {
     if (!boundary || !(await this.allowed(snapshot.sessionId))) return unavailableMemoryResult();
 
     const cursor = await this.ports.readCursor(snapshot.sessionId);
-    const expectedCursorOrdinal = cursor?.processedOrdinal ?? 0;
+    let expectedCursorOrdinal = cursor?.processedOrdinal ?? 0;
     if (expectedCursorOrdinal >= boundary.ordinal) {
       return snapshot.trigger === 'remember'
         ? { status: 'not_applicable', requestedItems: [] }
         : unavailableMemoryResult();
     }
-    const pendingEntries = entries.filter(
-      ({ ordinal }) => ordinal > expectedCursorOrdinal && ordinal <= boundary.ordinal,
-    );
-
     const priorityEvidence =
       snapshot.trigger === 'remember'
         ? projectMemoryExtractionEvidence(
@@ -171,83 +169,135 @@ export class MemoryExtractionEngine {
               .map(({ event }) => event),
           )
         : [];
-    const coverage = planMemoryCoverage({
-      pendingEntries,
-      allEntries: entries,
-      boundaryOrdinal: boundary.ordinal,
-      priorityEvidence,
-      sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
-    });
-    if (!coverage || coverage.entries.length === 0) return unavailableMemoryResult();
-
-    if (!(await this.allowed(snapshot.sessionId))) return unavailableMemoryResult();
-    const firstRaw = await this.callModel(
-      snapshot,
-      buildFirstMemoryProposalPrompt({
-        trigger: snapshot.trigger,
-        now: this.now(),
-        evidence: coverage.evidence,
+    while (expectedCursorOrdinal < boundary.ordinal) {
+      const pendingEntries = entries.filter(
+        ({ ordinal }) => ordinal > expectedCursorOrdinal && ordinal <= boundary.ordinal,
+      );
+      let coverage = planMemoryCoverage({
+        pendingEntries,
         sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
-      }),
-      'proposal',
-    );
-    const first = parseMemoryProposal(firstRaw);
-    if (!first) return unavailableMemoryResult();
-    if (
-      snapshot.trigger === 'extract' &&
-      (first.status !== 'complete' ||
-        first.requestedStatus !== 'not_applicable' ||
-        first.requestedItems.length > 0)
-    ) {
-      return unavailableMemoryResult();
-    }
+      });
+      if (!coverage || coverage.entries.length === 0) return unavailableMemoryResult();
 
-    let requestedItems = first.requestedItems;
-    let requestedStatus = first.requestedStatus;
-    let requestedAdmissionEvidence = coverage.evidence;
-    if (first.status === 'search_required') {
-      if (snapshot.trigger !== 'remember') {
-        return unavailableMemoryResult();
+      let finalBatch = coverage.entries.at(-1)!.ordinal === boundary.ordinal;
+      if (finalBatch && snapshot.trigger === 'remember') {
+        const prioritized = planMemoryCoverage({
+          pendingEntries,
+          priorityEvidence,
+          sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
+        });
+        if (!prioritized || prioritized.entries.length === 0) return unavailableMemoryResult();
+        if (prioritized.entries.at(-1)!.ordinal === boundary.ordinal) {
+          coverage = prioritized;
+        } else {
+          coverage =
+            planMemoryCoverage({
+              pendingEntries: pendingEntries.slice(0, prioritized.entries.length),
+              sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
+            }) ?? prioritized;
+          finalBatch = false;
+        }
       }
-      if (!(await this.allowed(snapshot.sessionId))) return unavailableMemoryResult();
-      const localizedEntries = searchSameSessionMemoryHistory(
-        entries,
-        boundary.ordinal,
-        first.search,
-      );
-      if (localizedEntries.length === 0) return unavailableMemoryResult();
-      const localizedEvidence = fitMemoryExtractionEvidence(
-        projectMemoryExtractionEvidence(
-          localizedEntries.map(({ event }) => event),
-          { snippetTerms: first.search.terms },
-        ),
-        undefined,
-        snapshot.sourceEventMessagePositions,
-      );
-      if (!localizedEvidence || !(await this.allowed(snapshot.sessionId))) {
-        return unavailableMemoryResult();
-      }
-      const localizedRaw = await this.callModel(
+
+      const batchTrigger = finalBatch ? snapshot.trigger : 'extract';
+      const nextCursorOrdinal = coverage.entries.at(-1)!.ordinal;
+      const batchOperationId = finalBatch
+        ? operationId
+        : memoryExtractionBatchOperationId(operationId, expectedCursorOrdinal, nextCursorOrdinal);
+      const committed = await this.processCoverageBatch({
         snapshot,
-        buildLocalizedMemoryProposalPrompt({
+        trigger: batchTrigger,
+        operationId: batchOperationId,
+        expectedCursorOrdinal,
+        coverage,
+        entries,
+        boundaryOrdinal: boundary.ordinal,
+      });
+      if (!committed) return unavailableMemoryResult();
+      expectedCursorOrdinal = nextCursorOrdinal;
+      if (finalBatch) return rememberResultFromReceipt(snapshot.trigger, committed.receipt);
+    }
+    return unavailableMemoryResult();
+  }
+
+  private async processCoverageBatch(input: {
+    readonly snapshot: MemoryExtractionSourceSnapshot;
+    readonly trigger: MemoryExtractionTrigger;
+    readonly operationId: string;
+    readonly expectedCursorOrdinal: number;
+    readonly coverage: MemoryCoveragePlan;
+    readonly entries: readonly MemoryExtractionEventEntry[];
+    readonly boundaryOrdinal: number;
+  }): Promise<{ readonly receipt: MemoryExtractionReceipt } | undefined> {
+    const { snapshot, trigger, coverage } = input;
+    let requestedItems: readonly MemoryProposalItem[] = [];
+    let incidentalItems: readonly MemoryProposalItem[] = [];
+    let requestedStatus: 'resolved' | 'not_applicable' | 'unresolved' = 'not_applicable';
+    let requestedAdmissionEvidence = coverage.evidence;
+
+    if (coverage.evidence.length > 0 || trigger === 'remember') {
+      if (!(await this.allowed(snapshot.sessionId))) return undefined;
+      const firstRaw = await this.callModel(
+        snapshot,
+        buildFirstMemoryProposalPrompt({
+          trigger,
           now: this.now(),
-          evidence: localizedEvidence,
+          evidence: coverage.evidence,
           sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
         }),
-        'localized',
+        'proposal',
       );
-      const localized = parseLocalizedMemoryProposal(localizedRaw);
-      if (!localized || localized.status === 'cannot_resolve') return unavailableMemoryResult();
-      requestedItems = localized.requestedItems;
-      requestedStatus = localized.status;
-      requestedAdmissionEvidence = localizedEvidence;
-    } else if (first.status === 'cannot_resolve') {
-      return unavailableMemoryResult();
+      const first = parseMemoryProposal(firstRaw);
+      if (!first) return undefined;
+      if (
+        trigger === 'extract' &&
+        (first.status !== 'complete' ||
+          first.requestedStatus !== 'not_applicable' ||
+          first.requestedItems.length > 0)
+      ) {
+        return undefined;
+      }
+      requestedItems = first.requestedItems;
+      incidentalItems = first.incidentalItems;
+      requestedStatus = first.requestedStatus;
+
+      if (first.status === 'search_required') {
+        if (trigger !== 'remember' || !(await this.allowed(snapshot.sessionId))) return undefined;
+        const localizedEntries = searchSameSessionMemoryHistory(
+          input.entries,
+          input.boundaryOrdinal,
+          first.search,
+        );
+        if (localizedEntries.length === 0) return undefined;
+        const localizedEvidence = fitMemoryExtractionEvidence(
+          projectMemoryExtractionEvidence(
+            localizedEntries.map(({ event }) => event),
+            { snippetTerms: first.search.terms },
+          ),
+          undefined,
+          snapshot.sourceEventMessagePositions,
+        );
+        if (!localizedEvidence || !(await this.allowed(snapshot.sessionId))) return undefined;
+        const localizedRaw = await this.callModel(
+          snapshot,
+          buildLocalizedMemoryProposalPrompt({
+            now: this.now(),
+            evidence: localizedEvidence,
+            sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
+          }),
+          'localized',
+        );
+        const localized = parseLocalizedMemoryProposal(localizedRaw);
+        if (!localized || localized.status === 'cannot_resolve') return undefined;
+        requestedItems = localized.requestedItems;
+        requestedStatus = localized.status;
+        requestedAdmissionEvidence = localizedEvidence;
+      } else if (first.status === 'cannot_resolve') {
+        return undefined;
+      }
     }
 
-    if (requestedStatus === 'unresolved') {
-      return unavailableMemoryResult();
-    }
+    if (requestedStatus === 'unresolved') return undefined;
     const requestedEvidenceByRef = new Map(
       requestedAdmissionEvidence.map((entry) => [entry.sourceRef, entry]),
     );
@@ -259,7 +309,7 @@ export class MemoryExtractionEngine {
     const requestedItemIndexes: number[] = [];
     for (const [requested, proposals] of [
       [true, requestedItems],
-      [false, first.incidentalItems],
+      [false, incidentalItems],
     ] as const) {
       for (const proposal of proposals) {
         if (deterministicMemoryPolicyRejection(proposal)) continue;
@@ -276,17 +326,16 @@ export class MemoryExtractionEngine {
       }
     }
 
-    if (!(await this.allowed(snapshot.sessionId))) return unavailableMemoryResult();
-    const committed = await this.ports.commit({
-      operationId,
+    if (!(await this.allowed(snapshot.sessionId))) return undefined;
+    return this.ports.commit({
+      operationId: input.operationId,
       sessionId: snapshot.sessionId,
-      expectedCursorOrdinal,
+      expectedCursorOrdinal: input.expectedCursorOrdinal,
       nextCursorOrdinal: coverage.entries.at(-1)!.ordinal,
       items: writes,
       requestedItemIndexes,
-      trigger: snapshot.trigger,
+      trigger,
     });
-    return rememberResultFromReceipt(snapshot.trigger, committed.receipt);
   }
 
   private async callModel(
@@ -324,6 +373,23 @@ function memoryExtractionOperationId(snapshot: MemoryExtractionSourceSnapshot): 
         turnId: snapshot.turnId,
         trigger: snapshot.trigger,
         stableBoundary,
+      }),
+    )
+    .digest('hex')}`;
+}
+
+function memoryExtractionBatchOperationId(
+  operationId: string,
+  expectedCursorOrdinal: number,
+  nextCursorOrdinal: number,
+): string {
+  return `memory_${createHash('sha256')
+    .update(
+      JSON.stringify({
+        operationId,
+        expectedCursorOrdinal,
+        nextCursorOrdinal,
+        kind: 'coverage_batch',
       }),
     )
     .digest('hex')}`;

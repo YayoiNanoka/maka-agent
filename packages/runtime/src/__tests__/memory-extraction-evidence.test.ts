@@ -12,7 +12,7 @@ import {
 } from '../memory-extraction-evidence.js';
 
 describe('Memory Extraction evidence planning', () => {
-  test('never cuts overlapping Tool episodes and omits failed or empty results', () => {
+  test('excludes Tool events from evidence while allowing the Cursor to cross them', () => {
     const entries = withOrdinals([
       textEvent('user', 'user', 'Remember the durable result.'),
       callEvent('call-event-1', 'call-1', 'Read'),
@@ -26,14 +26,12 @@ describe('Memory Extraction evidence planning', () => {
     const userEvidence = projectMemoryExtractionEvidence([entries[0]!.event]);
     const narrow = planMemoryCoverage({
       pendingEntries: entries,
-      allEntries: entries,
-      boundaryOrdinal: 8,
       maxEvidenceJsonChars: memoryExtractionEvidenceJsonSize(userEvidence) + 10,
     });
     assert.deepEqual(
       narrow?.entries.map(({ ordinal }) => ordinal),
-      [1],
-      'the Cursor stops before the first evidence record omitted from the model view',
+      [1, 2, 3, 4, 5, 6, 7, 8],
+      'Tool events consume Cursor range without entering the Memory evidence domain',
     );
     assert.deepEqual(
       narrow?.evidence.map(({ sourceRef }) => sourceRef),
@@ -42,64 +40,11 @@ describe('Memory Extraction evidence planning', () => {
 
     const complete = planMemoryCoverage({
       pendingEntries: entries,
-      allEntries: entries,
-      boundaryOrdinal: 8,
     });
     assert.equal(complete?.entries.at(-1)?.ordinal, 8);
     assert.deepEqual(
       complete?.evidence.map(({ sourceRef }) => sourceRef),
-      ['event:user', 'tool:call-event-1', 'event:next'],
-    );
-  });
-
-  test('blocks an unresolved Tool Call until its own Run is terminal', () => {
-    const call = withOrdinals([callEvent('call-event', 'call-1', 'Read')]);
-    const laterResult = {
-      ordinal: 2,
-      event: resultEvent('result-event', 'call-1', 'Read', { text: 'late' }),
-    };
-    assert.equal(
-      planMemoryCoverage({
-        pendingEntries: call,
-        allEntries: [...call, laterResult],
-        boundaryOrdinal: 1,
-      }),
-      undefined,
-      'a response beyond the frozen boundary still makes the cut unsafe',
-    );
-    assert.equal(
-      planMemoryCoverage({
-        pendingEntries: call,
-        allEntries: call,
-        boundaryOrdinal: 1,
-      }),
-      undefined,
-    );
-
-    const terminal = { ordinal: 2, event: terminalEvent('terminal-event') };
-    assert.equal(
-      planMemoryCoverage({
-        pendingEntries: [...call, terminal],
-        allEntries: [...call, terminal],
-        boundaryOrdinal: 2,
-      })?.entries.at(-1)?.ordinal,
-      2,
-    );
-
-    const actionTerminal = {
-      ordinal: 2,
-      event: {
-        ...event('action-terminal', 'system', { kind: 'text', text: '' }),
-        actions: { endInvocation: true },
-      },
-    };
-    assert.equal(
-      planMemoryCoverage({
-        pendingEntries: [...call, actionTerminal],
-        allEntries: [...call, actionTerminal],
-        boundaryOrdinal: 2,
-      })?.entries.at(-1)?.ordinal,
-      2,
+      ['event:user'],
     );
   });
 
@@ -108,12 +53,10 @@ describe('Memory Extraction evidence planning', () => {
     const requested = textEvent('requested', 'user', requestedText);
     const priority = projectMemoryExtractionEvidence([requested]);
     const pending = withOrdinals([
-      textEvent('coverage', 'model', `Reusable detail ${'x'.repeat(8_000)}.`),
+      textEvent('coverage', 'user', `Reusable detail ${'x'.repeat(8_000)}.`),
     ]);
     const plan = planMemoryCoverage({
       pendingEntries: pending,
-      allEntries: pending,
-      boundaryOrdinal: 1,
       priorityEvidence: priority,
       maxEvidenceJsonChars: 1_800,
     });
@@ -156,89 +99,9 @@ describe('Memory Extraction evidence planning', () => {
     ]);
     const toolHits = searchSameSessionMemoryHistory(toolEntries, 2, {
       terms: ['TAIL_TOOL_MEMORY_KEYWORD'],
-      roles: ['tool'],
+      roles: ['user'],
     });
-    const toolEvidence = projectMemoryExtractionEvidence(
-      toolHits.map(({ event }) => event),
-      { snippetTerms: ['TAIL_TOOL_MEMORY_KEYWORD'] },
-    );
-    assert.match(toolEvidence[0]!.text, /TAIL_TOOL_MEMORY_KEYWORD/);
-    assert.ok(Array.from(toolEvidence[0]!.text).length <= 4_000);
-  });
-
-  test('pairs Tool evidence within one invocation when call ids repeat', () => {
-    const firstCall = withIdentity(callEvent('call-1a', 'shared', 'Read'), 'invocation-a', 'run-a');
-    const firstResult = withIdentity(
-      resultEvent('result-1a', 'shared', 'Read', { value: 'first' }),
-      'invocation-a',
-      'run-a',
-    );
-    const secondCall = withIdentity(
-      callEvent('call-1b', 'shared', 'Read'),
-      'invocation-b',
-      'run-b',
-    );
-    const secondResult = withIdentity(
-      resultEvent('result-1b', 'shared', 'Read', { value: 'second' }),
-      'invocation-b',
-      'run-b',
-    );
-    const evidence = projectMemoryExtractionEvidence([
-      firstCall,
-      secondCall,
-      firstResult,
-      secondResult,
-    ]);
-    assert.equal(evidence.length, 2);
-    assert.match(evidence[0]!.text, /first/);
-    assert.match(evidence[1]!.text, /second/);
-
-    const entries = withOrdinals([firstCall, secondCall, firstResult, secondResult]);
-    assert.equal(
-      planMemoryCoverage({
-        pendingEntries: entries.slice(0, 3),
-        allEntries: entries,
-        boundaryOrdinal: 3,
-      }),
-      undefined,
-      'the first invocation result must not close the second invocation call',
-    );
-
-    const continuedCall = withIdentity(
-      callEvent('continued-call', 'continued-id', 'Read'),
-      'invocation-continued',
-      'run-before',
-    );
-    const continuedResult = withIdentity(
-      resultEvent('continued-result', 'continued-id', 'Read', { value: 'continued' }),
-      'invocation-continued',
-      'run-after',
-    );
-    assert.match(
-      projectMemoryExtractionEvidence([continuedCall, continuedResult])[0]!.text,
-      /continued/,
-      'Maka Tool identity is invocationId plus provider toolCallId',
-    );
-  });
-
-  test('does not consume an indivisible Tool episode whose evidence cannot fit', () => {
-    const calls = Array.from({ length: 61 }, (_, index) =>
-      callEvent(`large-call-${index}`, `large-id-${index}`, 'Read'),
-    );
-    const results = Array.from({ length: 61 }, (_, index) =>
-      resultEvent(`large-result-${index}`, `large-id-${index}`, 'Read', {
-        text: `result-${index}-${'x'.repeat(4_000)}`,
-      }),
-    );
-    const entries = withOrdinals([...calls, ...results]);
-    const plan = planMemoryCoverage({
-      pendingEntries: entries,
-      allEntries: entries,
-      boundaryOrdinal: entries.length,
-      maxEvidenceJsonChars: 800,
-    });
-
-    assert.equal(plan, undefined);
+    assert.deepEqual(toolHits, []);
   });
 
   test('renders indexed Provider-prefix evidence without duplicating its text', () => {
@@ -303,12 +166,4 @@ function event(
     author: role === 'user' ? 'user' : role === 'tool' ? 'tool' : 'agent',
     content,
   };
-}
-
-function terminalEvent(id: string): RuntimeEvent {
-  return { ...event(id, 'system', { kind: 'text', text: '' }), status: 'completed' };
-}
-
-function withIdentity(eventValue: RuntimeEvent, invocationId: string, runId: string): RuntimeEvent {
-  return { ...eventValue, invocationId, runId, turnId: `${runId}-turn` };
 }

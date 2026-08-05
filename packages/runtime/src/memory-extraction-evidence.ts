@@ -1,4 +1,4 @@
-import { isTerminalRuntimeEvent, type RuntimeEvent } from '@maka/core/runtime-event';
+import type { RuntimeEvent } from '@maka/core/runtime-event';
 
 export interface MemoryExtractionEventEntry {
   readonly ordinal: number;
@@ -7,7 +7,7 @@ export interface MemoryExtractionEventEntry {
 
 export interface MemoryExtractionEvidence {
   readonly sourceRef: string;
-  readonly type: 'user_message' | 'assistant_message' | 'tool_exchange';
+  readonly type: 'user_message';
   /** Exact bounded text shown to the model and used for admission. */
   readonly text: string;
   readonly events: readonly RuntimeEvent[];
@@ -25,20 +25,18 @@ const MIN_EVIDENCE_TEXT_CHARS = 64;
 const MAX_LOCALIZED_TURNS = 7;
 
 /**
- * Select the largest bounded, continuous Event prefix whose Cursor boundary
- * cannot split a Tool Call/Result episode. Overlapping call intervals naturally
- * cover parallel sequences such as C1,C2,R1,R2.
+ * Select the largest bounded, continuous Event prefix whose user-authored
+ * evidence fits. Tool and Runtime-control Events deliberately produce no
+ * evidence, but remain in the selected prefix so the Session Cursor crosses
+ * them instead of repeatedly reconsidering them.
  */
 export function planMemoryCoverage(input: {
   readonly pendingEntries: readonly MemoryExtractionEventEntry[];
-  readonly allEntries: readonly MemoryExtractionEventEntry[];
-  readonly boundaryOrdinal: number;
   readonly priorityEvidence?: readonly MemoryExtractionEvidence[];
   readonly maxEvidenceJsonChars?: number;
   readonly sourceEventMessagePositions?: Readonly<Record<string, readonly number[]>>;
 }): MemoryCoveragePlan | undefined {
   const limit = Math.min(input.pendingEntries.length, MAX_COVERAGE_EVENTS);
-  const unsafeRanges = toolUnsafeRanges(toolCallIntervals(input.allEntries), input.boundaryOrdinal);
   const priority = input.priorityEvidence ?? [];
   const budget = input.maxEvidenceJsonChars ?? MAX_MEMORY_EVIDENCE_JSON_CHARS;
   const fittedPriority = fitMemoryExtractionEvidence(
@@ -49,19 +47,7 @@ export function planMemoryCoverage(input: {
   if (!fittedPriority) return undefined;
   let selected: MemoryCoveragePlan | undefined;
   const candidateCounts: number[] = [];
-  let unsafeRangeIndex = 0;
-
-  for (let count = 1; count <= input.pendingEntries.length; count += 1) {
-    const ordinal = input.pendingEntries[count - 1]!.ordinal;
-    while (unsafeRanges[unsafeRangeIndex]?.end < ordinal) unsafeRangeIndex += 1;
-    const unsafeRange = unsafeRanges[unsafeRangeIndex];
-    if (unsafeRange && unsafeRange.start <= ordinal && ordinal <= unsafeRange.end) continue;
-    candidateCounts.push(count);
-    // Ordinary batches stop at the configured bound. If that bound falls
-    // inside one indivisible Tool episode, continue only until its next safe
-    // Cursor cut so the Session cannot deadlock behind that episode forever.
-    if (count >= limit) break;
-  }
+  for (let count = 1; count <= limit; count += 1) candidateCounts.push(count);
 
   for (const count of candidateCounts) {
     const candidateEntries = input.pendingEntries.slice(0, count);
@@ -110,7 +96,7 @@ export function planMemoryCoverage(input: {
   return selected;
 }
 
-/** Projects evidence without thinking, partial Events, failed/empty Tools, or raw results. */
+/** Projects only stable user-authored text into Memory evidence. */
 export function projectMemoryExtractionEvidence(
   events: readonly RuntimeEvent[],
   options: {
@@ -118,49 +104,20 @@ export function projectMemoryExtractionEvidence(
   } = {},
 ): readonly MemoryExtractionEvidence[] {
   const stable = events.filter((event) => !event.partial);
-  const responses = new Map<string, RuntimeEvent>();
-  for (const event of stable) {
-    if (event.content?.kind === 'function_response') {
-      responses.set(toolExchangeKey(event, event.content.id), event);
-    }
-  }
-
   const projected: MemoryExtractionEvidence[] = [];
   for (const event of stable) {
     const content = event.content;
     if (!content) continue;
-    if (content.kind === 'text' && (event.role === 'user' || event.role === 'model')) {
+    if (content.kind === 'text' && event.role === 'user') {
       const fullText = normalizeEvidenceText(content.text);
       if (!fullText) continue;
       projected.push({
         sourceRef: `event:${event.id}`,
-        type: event.role === 'user' ? 'user_message' : 'assistant_message',
+        type: 'user_message',
         text: boundedEvidenceText(fullText, options.snippetTerms),
         events: [event],
       });
-      continue;
     }
-    if (content.kind !== 'function_call' || isMemoryToolName(content.name)) continue;
-    const response = responses.get(toolExchangeKey(event, content.id));
-    if (
-      !response ||
-      response.content?.kind !== 'function_response' ||
-      response.content.name !== content.name ||
-      response.content.isError ||
-      isEmptyToolResult(response.content.result)
-    ) {
-      continue;
-    }
-    const text = normalizeEvidenceText(
-      `Tool ${content.name}\nArguments: ${boundedJson(content.args, options.snippetTerms)}\nResult: ${boundedJson(response.content.result, options.snippetTerms)}`,
-    );
-    if (!text) continue;
-    projected.push({
-      sourceRef: `tool:${event.id}`,
-      type: 'tool_exchange',
-      text: boundedEvidenceText(text, options.snippetTerms),
-      events: [event, response],
-    });
   }
   return projected;
 }
@@ -293,7 +250,11 @@ export function searchSameSessionMemoryHistory(
   search: { readonly terms: readonly string[]; readonly roles?: readonly string[] },
 ): readonly MemoryExtractionEventEntry[] {
   const eligible = entries.filter(
-    ({ ordinal, event }) => ordinal <= throughOrdinal && !event.partial && !isMemoryEvent(event),
+    ({ ordinal, event }) =>
+      ordinal <= throughOrdinal &&
+      !event.partial &&
+      event.content?.kind === 'text' &&
+      event.role === 'user',
   );
   const turns: Array<{ key: string; entries: MemoryExtractionEventEntry[] }> = [];
   for (const entry of eligible) {
@@ -311,7 +272,9 @@ export function searchSameSessionMemoryHistory(
       score: terms.filter((term) =>
         turn.entries.some(({ event }) => {
           if (allowedRoles && !allowedRoles.has(historyRole(event))) return false;
-          return normalizeEvidenceText(safeJson(event.content)).toLowerCase().includes(term);
+          return normalizeEvidenceText(event.content?.kind === 'text' ? event.content.text : '')
+            .toLowerCase()
+            .includes(term);
         }),
       ).length,
     }))
@@ -334,73 +297,6 @@ export function searchSameSessionMemoryHistory(
 
 export function isMemoryToolName(name: string): boolean {
   return name === 'memory_remember' || name === 'memory_extract';
-}
-
-function toolCallIntervals(
-  entries: readonly MemoryExtractionEventEntry[],
-): ReadonlyArray<{ callOrdinal: number; responseOrdinal?: number; terminalOrdinal?: number }> {
-  const responses = new Map<string, Array<{ ordinal: number; name: string }>>();
-  const terminals = new Map<string, number[]>();
-  for (const { ordinal, event } of entries) {
-    if (event.partial) continue;
-    if (isTerminalRuntimeEvent(event)) {
-      const ordinals = terminals.get(event.invocationId) ?? [];
-      ordinals.push(ordinal);
-      terminals.set(event.invocationId, ordinals);
-    }
-    if (event.content?.kind === 'function_response') {
-      const key = toolExchangeKey(event, event.content.id);
-      const matches = responses.get(key) ?? [];
-      matches.push({ ordinal, name: event.content.name });
-      responses.set(key, matches);
-    }
-  }
-  return entries.flatMap(({ ordinal, event }) => {
-    if (
-      event.partial ||
-      event.content?.kind !== 'function_call' ||
-      isMemoryToolName(event.content.name)
-    ) {
-      return [];
-    }
-    const callName = event.content.name;
-    const responseOrdinal = responses
-      .get(toolExchangeKey(event, event.content.id))
-      ?.find((candidate) => candidate.ordinal > ordinal && candidate.name === callName)?.ordinal;
-    const terminalOrdinal = terminals
-      .get(event.invocationId)
-      ?.find((candidate) => candidate >= ordinal);
-    return [
-      {
-        callOrdinal: ordinal,
-        ...(responseOrdinal ? { responseOrdinal } : {}),
-        ...(terminalOrdinal ? { terminalOrdinal } : {}),
-      },
-    ];
-  });
-}
-
-function toolUnsafeRanges(
-  intervals: ReadonlyArray<{
-    callOrdinal: number;
-    responseOrdinal?: number;
-    terminalOrdinal?: number;
-  }>,
-  boundaryOrdinal: number,
-): Array<{ start: number; end: number }> {
-  const ranges: Array<{ start: number; end: number }> = [];
-  for (const interval of intervals) {
-    const closedAt = interval.responseOrdinal ?? interval.terminalOrdinal;
-    const end = Math.min(boundaryOrdinal, (closedAt ?? boundaryOrdinal + 1) - 1);
-    if (end < interval.callOrdinal) continue;
-    const previous = ranges.at(-1);
-    if (previous && interval.callOrdinal <= previous.end + 1) {
-      previous.end = Math.max(previous.end, end);
-    } else {
-      ranges.push({ start: interval.callOrdinal, end });
-    }
-  }
-  return ranges;
 }
 
 function boundedEvidenceText(value: string, terms: readonly string[] | undefined): string {
@@ -428,34 +324,8 @@ function minuteTimestamp(value: number): number {
   return Math.floor(value / 60_000) * 60_000;
 }
 
-function boundedJson(value: unknown, terms: readonly string[] | undefined): string {
-  return boundedEvidenceText(safeJson(value) || '[empty]', terms);
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value) ?? '';
-  } catch {
-    return '[unserializable]';
-  }
-}
-
-function isEmptyToolResult(value: unknown): boolean {
-  if (value === undefined || value === null || value === '') return true;
-  if (Array.isArray(value)) return value.length === 0;
-  if (typeof value === 'object') return Object.keys(value as object).length === 0;
-  return false;
-}
-
-function historyRole(event: RuntimeEvent): 'user' | 'model' | 'tool' {
-  return event.role === 'user' ? 'user' : event.role === 'tool' ? 'tool' : 'model';
-}
-
-function isMemoryEvent(event: RuntimeEvent): boolean {
-  return (
-    (event.content?.kind === 'function_call' || event.content?.kind === 'function_response') &&
-    isMemoryToolName(event.content.name)
-  );
+function historyRole(_event: RuntimeEvent): 'user' {
+  return 'user';
 }
 
 function sliceCodePoints(value: string, maximum: number): string {
@@ -464,8 +334,4 @@ function sliceCodePoints(value: string, maximum: number): string {
 
 function uniqueSorted(values: readonly number[]): number[] {
   return [...new Set(values)].sort((left, right) => left - right);
-}
-
-function toolExchangeKey(event: RuntimeEvent, toolCallId: string): string {
-  return `${event.invocationId}\0${toolCallId}`;
 }
