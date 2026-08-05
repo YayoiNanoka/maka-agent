@@ -127,9 +127,6 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
       committed_at INTEGER NOT NULL CHECK (committed_at >= 0),
       FOREIGN KEY (operation_id) REFERENCES memory_write_operations(operation_id) ON DELETE CASCADE
     );
-
-    CREATE INDEX memory_extraction_receipts_by_session
-      ON memory_extraction_receipts(session_id, committed_at, operation_id);
   `,
   ],
 ]);

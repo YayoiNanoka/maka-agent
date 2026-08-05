@@ -179,7 +179,6 @@ export interface ExecutionRuntimeEventReader {
   ): Promise<BoundedEvidenceReadResult<RuntimeEvent>>;
   readImmutableRuntimeEvents(sessionId: string, runId: string): Promise<RuntimeEvent[]>;
   readSessionRuntimeEvents(sessionId: string): Promise<RuntimeEvent[]>;
-  readSessionRuntimeEventEntries(sessionId: string): Promise<SessionRuntimeEventEntry[]>;
 }
 
 interface ExecutionStoresReaderBase<K extends StorageRootKind> {
@@ -579,8 +578,6 @@ async function openExecutionStoresForRead<K extends StorageRootKind, E extends o
         run(() => runtimeEventStore.readImmutableRuntimeEvents(sessionId, runId)),
       readSessionRuntimeEvents: (sessionId) =>
         run(() => runtimeEventStore.readSessionRuntimeEvents(sessionId)),
-      readSessionRuntimeEventEntries: (sessionId) =>
-        run(() => runtimeEventStore.readSessionRuntimeEventEntries(sessionId)),
     },
   };
   freezeExecutionStoresFacade(stores);

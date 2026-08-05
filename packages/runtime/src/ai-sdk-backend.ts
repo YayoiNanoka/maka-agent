@@ -844,24 +844,49 @@ export class AiSdkBackend implements AgentBackend {
     trigger: MemoryExtractionTrigger,
     context: MakaToolContext,
   ): MemoryExtractionSourceSnapshot | undefined {
+    if (trigger !== 'remember') return undefined;
     const scope = [...this.activeTurns].find(
       (candidate) => candidate.turnId === context.turnId && candidate.runId === context.runId,
     );
+    return scope
+      ? this.memorySourceSnapshotFromScope(scope, {
+          trigger: 'remember',
+          toolCallId: context.toolCallId,
+        })
+      : undefined;
+  }
+
+  private memorySourceSnapshotFromScope(
+    scope: TurnScope,
+    boundary:
+      | { readonly trigger: 'remember'; readonly toolCallId: string }
+      | { readonly trigger: 'extract'; readonly terminalEventId: string },
+  ): MemoryExtractionSourceSnapshot | undefined {
     if (
-      !scope?.runId ||
+      !scope.runId ||
       !scope.memorySourceMessages ||
       !scope.memorySourceTools ||
       !scope.memorySourceActiveTools
     ) {
       return undefined;
     }
+    const sourceMessages =
+      boundary.trigger === 'extract' && scope.finalAssistantText
+        ? [
+            ...scope.memorySourceMessages,
+            {
+              role: 'assistant' as const,
+              content: [{ type: 'text' as const, text: scope.finalAssistantText }],
+            } as ModelMessage,
+          ]
+        : scope.memorySourceMessages;
     return {
-      trigger,
+      ...boundary,
       sourceHeader: memoryExtractionModelHeader(this.input.header),
       ...(scope.memorySourceSystemPrompt
         ? { sourceSystemPrompt: scope.memorySourceSystemPrompt }
         : {}),
-      sourceMessages: structuredClone(scope.memorySourceMessages),
+      sourceMessages: structuredClone(sourceMessages),
       sourceTools: { ...scope.memorySourceTools },
       sourceActiveTools: [...scope.memorySourceActiveTools],
       ...(this.input.providerOptions
@@ -874,7 +899,6 @@ export class AiSdkBackend implements AgentBackend {
       runId: scope.runId,
       turnId: scope.turnId,
       workspaceKey: this.input.header.workspaceRoot,
-      toolCallId: context.toolCallId,
     };
   }
 
@@ -2215,48 +2239,17 @@ export class AiSdkBackend implements AgentBackend {
           stopReason,
         } satisfies CompleteEvent;
         queue.push(completeEvent);
-        if (
-          scope.memoryExtractRequested &&
-          this.input.memoryExtraction &&
-          scope.runId &&
-          scope.memorySourceMessages &&
-          scope.memorySourceTools &&
-          scope.memorySourceActiveTools
-        ) {
-          const sourceMessages = scope.finalAssistantText
-            ? [
-                ...scope.memorySourceMessages,
-                {
-                  role: 'assistant' as const,
-                  content: [{ type: 'text' as const, text: scope.finalAssistantText }],
-                } as ModelMessage,
-              ]
-            : [...scope.memorySourceMessages];
-          const snapshot: MemoryExtractionSourceSnapshot = {
+        if (scope.memoryExtractRequested && this.input.memoryExtraction) {
+          const snapshot = this.memorySourceSnapshotFromScope(scope, {
             trigger: 'extract',
-            sourceHeader: memoryExtractionModelHeader(this.input.header),
-            ...(scope.memorySourceSystemPrompt
-              ? { sourceSystemPrompt: scope.memorySourceSystemPrompt }
-              : {}),
-            sourceMessages: structuredClone(sourceMessages),
-            sourceTools: { ...scope.memorySourceTools! },
-            sourceActiveTools: [...scope.memorySourceActiveTools!],
-            ...(this.input.providerOptions
-              ? { sourceProviderOptions: structuredClone(this.input.providerOptions) }
-              : {}),
-            ...(this.modelAdapter.maxOutputTokens() !== undefined
-              ? { sourceMaxOutputTokens: this.modelAdapter.maxOutputTokens() }
-              : {}),
-            sessionId: this.sessionId,
-            runId: scope.runId,
-            turnId,
-            workspaceKey: this.input.header.workspaceRoot,
             terminalEventId: completeEvent.id,
-          };
-          void queue
-            .waitUntilConsumedThroughCurrent()
-            .then(() => this.input.memoryExtraction?.extract(snapshot))
-            .catch(() => undefined);
+          });
+          if (snapshot) {
+            void queue
+              .waitUntilConsumedThroughCurrent()
+              .then(() => this.input.memoryExtraction?.extract(snapshot))
+              .catch(() => undefined);
+          }
         }
       } catch (err) {
         streamStatus = scope.aborted ? 'aborted' : 'error';
