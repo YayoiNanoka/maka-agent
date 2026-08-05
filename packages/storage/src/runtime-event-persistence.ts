@@ -1,7 +1,11 @@
 import { join } from 'node:path';
 import type { RuntimeEvent } from '@maka/core';
 import type { BoundedEvidenceReadResult, EvidenceReadBudget } from './agent-run-store.js';
-import { createSqliteRuntimeStore, type SqliteRuntimeStore } from './sqlite-runtime-store.js';
+import {
+  createSqliteRuntimeStore,
+  type SessionRuntimeEventEntry,
+  type SqliteRuntimeStore,
+} from './sqlite-runtime-store.js';
 import {
   acquireOperationalStateDatabase,
   OPERATIONAL_STATE_DATABASE_NAME,
@@ -29,6 +33,7 @@ export interface RuntimeEventReadStore {
   ): Promise<BoundedEvidenceReadResult<RuntimeEvent>>;
   readImmutableRuntimeEvents(sessionId: string, runId: string): Promise<RuntimeEvent[]>;
   readSessionRuntimeEvents(sessionId: string): Promise<RuntimeEvent[]>;
+  readSessionRuntimeEventEntries(sessionId: string): Promise<SessionRuntimeEventEntry[]>;
 }
 
 export async function openRuntimeEventPersistence(input: {
@@ -67,6 +72,8 @@ export async function openRuntimeEventReadPersistence(input: {
       readImmutableRuntimeEvents: (sessionId: string, runId: string) =>
         store.readImmutableRuntimeEvents(sessionId, runId),
       readSessionRuntimeEvents: (sessionId: string) => store.readSessionRuntimeEvents(sessionId),
+      readSessionRuntimeEventEntries: (sessionId: string) =>
+        store.readSessionRuntimeEventEntries(sessionId),
     }),
     close: () => store.close(),
   };

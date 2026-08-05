@@ -162,6 +162,14 @@ export class ModelAdapter {
     });
   }
 
+  maxOutputTokens(): number | undefined {
+    return selectedModelMaxOutputTokens(
+      this.input.connection,
+      this.input.modelId,
+      this.input.providerOptions,
+    );
+  }
+
   async startStream(input: ModelAdapterStreamInput): Promise<ModelStreamResult> {
     const ai = await import('ai').catch((err) => {
       throw new Error(
@@ -193,19 +201,7 @@ export class ModelAdapter {
           },
         })
       : input.model;
-    const sdkTools = Object.fromEntries(
-      Object.entries(input.tools).map(([name, definition]) => [
-        name,
-        definition.kind === 'provider'
-          ? compileProviderTool(definition.providerTool)
-          : {
-              ...(definition.description !== undefined
-                ? { description: definition.description }
-                : {}),
-              inputSchema: definition.inputSchema,
-            },
-      ]),
-    );
+    const sdkTools = lowerModelTools(input.tools);
     const sdkResult = streamText({
       model: trackedModel,
       messages: lowerNativeAudioMessages(input.messages),
@@ -691,6 +687,22 @@ function parseProviderExecutedToolInput(input: unknown): unknown {
   } catch {
     return input;
   }
+}
+
+export function lowerModelTools(tools: ModelToolSet): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(tools).map(([name, definition]) => [
+      name,
+      definition.kind === 'provider'
+        ? compileProviderTool(definition.providerTool)
+        : {
+            ...(definition.description !== undefined
+              ? { description: definition.description }
+              : {}),
+            inputSchema: definition.inputSchema,
+          },
+    ]),
+  );
 }
 
 function compileProviderTool(

@@ -81,6 +81,7 @@ import {
 } from './oauth-execution-authority.js';
 import type { HostChildAgentBackendCapabilities } from './child-agent-composition.js';
 import type { HostExecutionArtifactServices } from './execution-artifacts.js';
+import type { HostMemoryExtractionCoordinator } from './memory-extraction-coordinator.js';
 import { readDuringBackendCreation, resolveExecutionTarget } from './execution-model-authority.js';
 import { toRuntimePolicyProxy } from './runtime-policy-proxy.js';
 
@@ -262,6 +263,7 @@ export interface HostAiSdkBackendInput {
   readonly claudeDeviceId: string;
   readonly skills: HostSkillCatalogCoordinator;
   readonly memory: HostMemoryCoordinator;
+  readonly memoryExtraction?: HostMemoryExtractionCoordinator;
   readonly taskLedger: TaskLedgerStore;
   readonly artifacts: InteractiveArtifactStoreWriter;
   readonly executionArtifacts: HostExecutionArtifactServices;
@@ -580,6 +582,12 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
         recordToolArtifacts: input.executionArtifacts.recordToolArtifacts,
         archiveToolResult: input.executionArtifacts.archiveToolResult,
         readToolResultArchive: input.executionArtifacts.readToolResultArchive,
+        ...(!input.context.tools &&
+        !input.context.header.subagentParent &&
+        input.context.header.collaborationMode !== 'plan' &&
+        input.memoryExtraction
+          ? { memoryExtraction: input.memoryExtraction.sourceCapabilities() }
+          : {}),
         loadHistoryCompactCheckpoint: input.context.loadHistoryCompactCheckpoint,
         summarizeHistoryCompact: buildLlmHistorySummarizer({
           resolveModel: () =>

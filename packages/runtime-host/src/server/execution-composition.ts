@@ -77,6 +77,7 @@ import {
 import {
   createHostGoalEvaluator,
   createHostDailyReviewModel,
+  createHostMemoryExtractionModel,
   createHostSessionEffectModel,
 } from './execution-model-authority.js';
 import { HostExecutionInspectCoordinator } from './execution-inspect-coordinator.js';
@@ -84,8 +85,10 @@ import { HostGoalCoordinator } from './goal-coordinator.js';
 import type { RuntimeHostComposition, RuntimeHostCompositionContext } from './host-kernel.js';
 import { HostInteractionCoordinator } from './interaction-coordinator.js';
 import { HostMemoryCoordinator } from './memory-coordinator.js';
-import { HostNetworkProxyCoordinator } from './network-proxy-coordinator.js';
+import { HostMemoryExtractionCoordinator } from './memory-extraction-coordinator.js';
+import { MemoryExtractionSessionLane } from './memory-extraction-session-lane.js';
 import { type HostMessageRootPort, HostMessageCoordinator } from './message-coordinator.js';
+import { HostNetworkProxyCoordinator } from './network-proxy-coordinator.js';
 import { HostOAuthExecutionAuthority } from './oauth-execution-authority.js';
 import { HostOAuthCoordinator } from './oauth-coordinator.js';
 import { HostPlanCoordinator } from './plan-coordinator.js';
@@ -159,6 +162,7 @@ export async function createExecutionRuntimeHostComposition(
     | undefined;
   let graphClient: HostAgentGraphCoordinator | undefined;
   let sessionEffects: HostSessionEffectCoordinator | undefined;
+  let memoryExtraction: HostMemoryExtractionCoordinator | undefined;
   let unsubscribeTaskLedger: (() => void) | undefined;
   let managedWorkspaceOwner: ManagedWorkspaceOwner | undefined;
   let workspaceExecution: RuntimeHostWorkspaceExecutionComposition | undefined;
@@ -198,6 +202,7 @@ export async function createExecutionRuntimeHostComposition(
     backends.register('fake', (backendContext) => new FakeBackend(backendContext));
     const runtimePolicyActivation = new RuntimePolicyActivationGate();
     const sessionAdmission = new SessionAdmissionGate();
+    const memoryExtractionLane = new MemoryExtractionSessionLane();
     let runtimeResources: HostRuntimeResourceCoordinator | undefined;
     let manager: SessionManager | undefined;
     let graphCoordinator: AgentGraphCoordinator | undefined;
@@ -411,6 +416,7 @@ export async function createExecutionRuntimeHostComposition(
       sessionEffects?.beginDrain();
       skills.beginDrain();
       memory?.beginDrain();
+      memoryExtraction?.beginDrain();
       oauth?.beginDrain();
       clientCapabilities?.beginDrain();
     };
@@ -443,6 +449,26 @@ export async function createExecutionRuntimeHostComposition(
       activation: runtimePolicyActivation,
       requestDrain: context.requestDrain,
     });
+    memoryExtraction = new HostMemoryExtractionCoordinator({
+      store: longTermMemoryStore,
+      policy: runtimePolicyStores.runtimePolicy,
+      sessions: {
+        readHeader: (sessionId) => stores.sessionStore.readHeaderSnapshot(sessionId),
+      },
+      runtimeEvents: {
+        readSessionRuntimeEventEntries: (sessionId) =>
+          stores.runtimeEventStore.readSessionRuntimeEventEntries(sessionId),
+      },
+      model: createHostMemoryExtractionModel({
+        runtimePolicy: runtimePolicyStores,
+        oauthCredentials,
+        claudeDeviceId: context.owner.capability.rootId,
+        usage: openedUsageStores,
+        requestDrain: context.requestDrain,
+      }),
+      lane: memoryExtractionLane,
+      acquireResidency: context.acquireResidency,
+    });
     backends.register('ai-sdk', (backendContext) =>
       createHostAiSdkBackend({
         context: backendContext,
@@ -451,6 +477,7 @@ export async function createExecutionRuntimeHostComposition(
         claudeDeviceId: context.owner.capability.rootId,
         skills,
         memory: requireMemory(memory),
+        memoryExtraction,
         taskLedger,
         artifacts: openedArtifactStore,
         executionArtifacts,
@@ -899,6 +926,7 @@ export async function createExecutionRuntimeHostComposition(
       },
       worktrees: worktreeChildExecutor,
       requestDrain: context.requestDrain,
+      memoryExtractionLane,
     });
     const handlers = {
       ...coordinator.handlers,
@@ -1073,6 +1101,11 @@ export async function createExecutionRuntimeHostComposition(
           errors.push(error);
         }
         try {
+          await memoryExtraction?.close();
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
           await memory?.close();
         } catch (error) {
           errors.push(error);
@@ -1216,6 +1249,11 @@ export async function createExecutionRuntimeHostComposition(
     }
     try {
       shellRunStore?.close();
+    } catch (closeError) {
+      errors.push(closeError);
+    }
+    try {
+      await memoryExtraction?.close();
     } catch (closeError) {
       errors.push(closeError);
     }

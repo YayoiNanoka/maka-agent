@@ -764,6 +764,8 @@ test('production Host executes a canonical ai-sdk Session against a real provide
       'Write',
       'WriteStdin',
       'load_tools',
+      'memory_extract',
+      'memory_remember',
       'task_create',
       'task_get',
       'task_list',

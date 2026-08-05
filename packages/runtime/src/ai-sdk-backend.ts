@@ -179,6 +179,14 @@ import { ToolAvailabilityRuntime, type ToolAvailabilityConfig } from './tool-ava
 import { renderSwarmModePrompt } from './swarm-mode.js';
 import { renderGraphModePrompt } from './graph-mode.js';
 import {
+  MEMORY_EXTRACT_TOOL_NAME,
+  MEMORY_REMEMBER_TOOL_NAME,
+  buildMemoryExtractionTriggerTools,
+  type MemoryExtractionSourceCapabilities,
+  type MemoryExtractionSourceSnapshot,
+  type MemoryExtractionTrigger,
+} from './memory-extraction.js';
+import {
   applyRuntimeEventContextBudget,
   buildContextBudgetDiagnosticShell,
   buildHistoryCompactBlockFromSummary,
@@ -602,6 +610,8 @@ export interface AiSdkBackendInput extends AiSdkCompactionCapabilities {
    * the current model request only.
    */
   readToolResultArchive?: ToolResultArchiveReader;
+  /** Host-owned bounded long-term-memory extraction. Source tools are Runtime-reserved. */
+  memoryExtraction?: MemoryExtractionSourceCapabilities;
 }
 
 export interface SystemPromptContext {
@@ -722,6 +732,12 @@ class TurnScope {
    * so a provider request never carries an unpersisted steering directive.
    */
   injectedSteeringMessages: ModelMessage[] = [];
+  memoryExtractRequested = false;
+  memorySourceMessages: readonly ModelMessage[] | undefined;
+  memorySourceSystemPrompt: string | undefined;
+  memorySourceTools: ModelToolSet | undefined;
+  memorySourceActiveTools: readonly string[] | undefined;
+  finalAssistantText: string | undefined;
 
   constructor(
     readonly turnId: string,
@@ -797,11 +813,69 @@ export class AiSdkBackend implements AgentBackend {
       appendTurnTailPrompt: (content, turnTailPrompt) =>
         this.appendTurnTailPrompt(content, turnTailPrompt),
     });
+    if (
+      input.tools.some(
+        (tool) => tool.name === MEMORY_REMEMBER_TOOL_NAME || tool.name === MEMORY_EXTRACT_TOOL_NAME,
+      )
+    ) {
+      throw new Error('Long-term Memory trigger tool names are reserved by Runtime');
+    }
+    const memoryTools = input.memoryExtraction
+      ? buildMemoryExtractionTriggerTools({
+          capabilities: input.memoryExtraction,
+          snapshot: (trigger, context) => this.memorySourceSnapshot(trigger, context),
+          markExtractRequested: (context) => {
+            const scope = [...this.activeTurns].find(
+              (candidate) =>
+                candidate.turnId === context.turnId && candidate.runId === context.runId,
+            );
+            if (scope) scope.memoryExtractRequested = true;
+          },
+        })
+      : [];
     this.toolAvailabilityRuntime = new ToolAvailabilityRuntime(
-      input.tools,
+      [...input.tools, ...memoryTools],
       input.toolAvailability,
       buildInvalidMakaTool(),
     );
+  }
+
+  private memorySourceSnapshot(
+    trigger: MemoryExtractionTrigger,
+    context: MakaToolContext,
+  ): MemoryExtractionSourceSnapshot | undefined {
+    const scope = [...this.activeTurns].find(
+      (candidate) => candidate.turnId === context.turnId && candidate.runId === context.runId,
+    );
+    if (
+      !scope?.runId ||
+      !scope.memorySourceMessages ||
+      !scope.memorySourceTools ||
+      !scope.memorySourceActiveTools
+    ) {
+      return undefined;
+    }
+    return {
+      trigger,
+      sourceHeader: memoryExtractionModelHeader(this.input.header),
+      ...(scope.memorySourceSystemPrompt
+        ? { sourceSystemPrompt: scope.memorySourceSystemPrompt }
+        : {}),
+      sourceMessages: structuredClone(scope.memorySourceMessages),
+      sourceTools: { ...scope.memorySourceTools },
+      sourceActiveTools: [...scope.memorySourceActiveTools],
+      ...(this.input.providerOptions
+        ? { sourceProviderOptions: structuredClone(this.input.providerOptions) }
+        : {}),
+      ...(this.modelAdapter.maxOutputTokens() !== undefined
+        ? { sourceMaxOutputTokens: this.modelAdapter.maxOutputTokens() }
+        : {}),
+      sessionId: this.sessionId,
+      runId: scope.runId,
+      turnId: scope.turnId,
+      workspaceKey: this.input.header.workspaceRoot,
+      toolCallId: context.toolCallId,
+    };
   }
 
   /**
@@ -1015,6 +1089,7 @@ export class AiSdkBackend implements AgentBackend {
           ? { providerOptions: stepTextProviderOptions }
           : {}),
       } satisfies TextCompleteEvent);
+      scope.finalAssistantText = stepText.length > 0 ? stepText : undefined;
       stepText = '';
       stepTextProviderOptions = undefined;
       stepTextPartStartOffset = 0;
@@ -1560,6 +1635,11 @@ export class AiSdkBackend implements AgentBackend {
             stepThinking.length === 0 &&
             stepSignature === undefined;
           for (;;) {
+            scope.memorySourceMessages = [...attemptMessages];
+            scope.memorySourceSystemPrompt = requestSystemPrompt;
+            scope.memorySourceTools = modelTools;
+            scope.memorySourceActiveTools = [...activeToolsForRequest];
+            scope.finalAssistantText = undefined;
             result = await this.modelAdapter.startStream({
               model,
               messages: attemptMessages,
@@ -2127,13 +2207,57 @@ export class AiSdkBackend implements AgentBackend {
             ? 'step_limit'
             : this.mapFinishReason(finishReason));
         trace.modelStreamCompleted(stopReason);
-        queue.push({
+        const completeEvent = {
           type: 'complete',
           id: this.newId(),
           turnId,
           ts: this.now(),
           stopReason,
-        } satisfies CompleteEvent);
+        } satisfies CompleteEvent;
+        queue.push(completeEvent);
+        if (
+          scope.memoryExtractRequested &&
+          this.input.memoryExtraction &&
+          scope.runId &&
+          scope.memorySourceMessages &&
+          scope.memorySourceTools &&
+          scope.memorySourceActiveTools
+        ) {
+          const sourceMessages = scope.finalAssistantText
+            ? [
+                ...scope.memorySourceMessages,
+                {
+                  role: 'assistant' as const,
+                  content: [{ type: 'text' as const, text: scope.finalAssistantText }],
+                } as ModelMessage,
+              ]
+            : [...scope.memorySourceMessages];
+          const snapshot: MemoryExtractionSourceSnapshot = {
+            trigger: 'extract',
+            sourceHeader: memoryExtractionModelHeader(this.input.header),
+            ...(scope.memorySourceSystemPrompt
+              ? { sourceSystemPrompt: scope.memorySourceSystemPrompt }
+              : {}),
+            sourceMessages: structuredClone(sourceMessages),
+            sourceTools: { ...scope.memorySourceTools! },
+            sourceActiveTools: [...scope.memorySourceActiveTools!],
+            ...(this.input.providerOptions
+              ? { sourceProviderOptions: structuredClone(this.input.providerOptions) }
+              : {}),
+            ...(this.modelAdapter.maxOutputTokens() !== undefined
+              ? { sourceMaxOutputTokens: this.modelAdapter.maxOutputTokens() }
+              : {}),
+            sessionId: this.sessionId,
+            runId: scope.runId,
+            turnId,
+            workspaceKey: this.input.header.workspaceRoot,
+            terminalEventId: completeEvent.id,
+          };
+          void queue
+            .waitUntilConsumedThroughCurrent()
+            .then(() => this.input.memoryExtraction?.extract(snapshot))
+            .catch(() => undefined);
+        }
       } catch (err) {
         streamStatus = scope.aborted ? 'aborted' : 'error';
         streamErrorClass = this.modelAdapter.classifyError(watchdogTimeoutError ?? err);
@@ -3891,4 +4015,14 @@ function buildHistoryCompactCheckpointFailOpenContext(
   ).fits
     ? replayEvents
     : [...retainedCandidates];
+}
+
+function memoryExtractionModelHeader(
+  header: SessionHeader,
+): MemoryExtractionSourceSnapshot['sourceHeader'] {
+  return {
+    llmConnectionSlug: header.llmConnectionSlug,
+    model: header.model,
+    ...(header.thinkingLevel !== undefined ? { thinkingLevel: header.thinkingLevel } : {}),
+  };
 }

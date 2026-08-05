@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import type {
   ApplyMemoryMutationsRequest,
+  CommitMemoryExtractionRequest,
   MemoryItemStore,
   MemoryItemWrite,
   SearchMemoryItemsByKeyRequest,
@@ -113,6 +114,12 @@ function createWriterFacade(
       const snapshot = snapshotApplyRequest(request);
       return run(() => store.applyMutations(snapshot));
     },
+    commitExtraction: (request) => {
+      const snapshot = snapshotCommitExtractionRequest(request);
+      return run(() => store.commitExtraction(snapshot));
+    },
+    readExtractionCursor: (sessionId) => run(() => store.readExtractionCursor(sessionId)),
+    readExtractionReceipt: (operationId) => run(() => store.readExtractionReceipt(operationId)),
     readItem: (itemId) => run(() => store.readItem(itemId)),
     searchByKeys: (request) => {
       const snapshot = snapshotSearchRequest(request);
@@ -128,6 +135,20 @@ function createWriterFacade(
     },
   };
   return Object.freeze(writer);
+}
+
+function snapshotCommitExtractionRequest(
+  request: CommitMemoryExtractionRequest,
+): CommitMemoryExtractionRequest {
+  return Object.freeze({
+    operationId: request.operationId,
+    sessionId: request.sessionId,
+    expectedCursorOrdinal: request.expectedCursorOrdinal,
+    nextCursorOrdinal: request.nextCursorOrdinal,
+    items: Object.freeze(request.items.map(snapshotItemWrite)),
+    requestedItemIndexes: Object.freeze([...request.requestedItemIndexes]),
+    trigger: request.trigger,
+  });
 }
 
 function snapshotApplyRequest(request: ApplyMemoryMutationsRequest): ApplyMemoryMutationsRequest {

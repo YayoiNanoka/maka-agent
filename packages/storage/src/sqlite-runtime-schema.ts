@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_RUNTIME_SCHEMA_VERSION = 10;
+export const SQLITE_RUNTIME_SCHEMA_VERSION = 11;
 export const RUNTIME_RECOVERY_AUTHORITY_CAPABILITY = 'runtime_recovery_authority';
 export const RUNTIME_RECOVERY_AUTHORITY_CAPABILITY_VERSION = 1;
 export const RUNTIME_CONTINUATION_AUTHORITY_CAPABILITY = 'runtime_continuation_authority';
@@ -277,7 +277,29 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
         REFERENCES runtime_partial_snapshots(stream_key)
         ON DELETE CASCADE
     );
-    `,
+  `,
+  ],
+  [
+    11,
+    `
+    CREATE TABLE runtime_session_event_ordinals (
+      session_id TEXT NOT NULL,
+      ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+      event_id TEXT NOT NULL UNIQUE,
+      PRIMARY KEY (session_id, ordinal),
+      FOREIGN KEY (event_id) REFERENCES runtime_events(event_id) ON DELETE CASCADE
+    ) WITHOUT ROWID;
+
+    INSERT INTO runtime_session_event_ordinals(session_id, ordinal, event_id)
+    SELECT
+      session_id,
+      ROW_NUMBER() OVER (
+        PARTITION BY session_id
+        ORDER BY rowid ASC
+      ),
+      event_id
+    FROM runtime_events;
+  `,
   ],
 ]);
 

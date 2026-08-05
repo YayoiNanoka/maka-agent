@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 1;
+export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 2;
 
 const SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS = 5_000;
 const SQLITE_INITIALIZATION_RETRY_DELAY_MS = 10;
@@ -70,9 +70,6 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
     CREATE INDEX memory_items_by_scope_and_lifecycle
       ON memory_items(scope_type, scope_key, lifecycle_state, updated_at DESC, item_id);
 
-    CREATE INDEX memory_items_by_active_hash
-      ON memory_items(lifecycle_state, scope_type, scope_key, content_hash, item_id);
-
     CREATE TABLE memory_item_keys (
       item_id TEXT NOT NULL,
       key_text TEXT NOT NULL CHECK (length(key_text) > 0),
@@ -113,6 +110,28 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
     );
   `,
   ],
+  [
+    2,
+    `
+    CREATE TABLE memory_extraction_cursors (
+      session_id TEXT PRIMARY KEY CHECK (length(session_id) > 0),
+      processed_ordinal INTEGER NOT NULL CHECK (processed_ordinal > 0),
+      updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+    );
+
+    CREATE TABLE memory_extraction_receipts (
+      operation_id TEXT PRIMARY KEY CHECK (length(operation_id) > 0),
+      session_id TEXT NOT NULL CHECK (length(session_id) > 0),
+      request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+      result_json TEXT NOT NULL,
+      committed_at INTEGER NOT NULL CHECK (committed_at >= 0),
+      FOREIGN KEY (operation_id) REFERENCES memory_write_operations(operation_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX memory_extraction_receipts_by_session
+      ON memory_extraction_receipts(session_id, committed_at, operation_id);
+  `,
+  ],
 ]);
 
 interface MinimumTableShape {
@@ -133,58 +152,80 @@ interface MinimumSchemaShape {
 
 // Each entry describes the complete minimum shape required by that schema version. Extra
 // columns and indexes are allowed so additive migrations do not fail exact-DDL validation.
+const VERSION_1_MINIMUM_SCHEMA_SHAPE: MinimumSchemaShape = {
+  tables: [
+    {
+      name: 'memory_items',
+      requiredColumns: [
+        'item_id',
+        'version',
+        'content',
+        'kind',
+        'statement_type',
+        'temporal_type',
+        'scope_type',
+        'scope_key',
+        'event_started_at',
+        'event_ended_at',
+        'observed_at',
+        'lifecycle_state',
+        'origin',
+        'content_hash',
+        'created_at',
+        'updated_at',
+      ],
+    },
+    {
+      name: 'memory_item_keys',
+      requiredColumns: ['item_id', 'key_text', 'normalized_key', 'key_type', 'key_origin'],
+    },
+    {
+      name: 'memory_item_sources',
+      requiredColumns: ['item_id', 'session_id', 'run_id', 'turn_id', 'event_id'],
+    },
+    {
+      name: 'memory_write_operations',
+      requiredColumns: [
+        'operation_id',
+        'operation_type',
+        'request_hash',
+        'result_json',
+        'committed_at',
+      ],
+    },
+  ],
+  indexes: [
+    {
+      name: 'memory_item_keys_by_normalized_key',
+      tableName: 'memory_item_keys',
+      requiredColumnPrefix: ['normalized_key', 'item_id'],
+    },
+  ],
+};
+
 const MINIMUM_SCHEMA_SHAPES: ReadonlyMap<number, MinimumSchemaShape> = new Map([
+  [1, VERSION_1_MINIMUM_SCHEMA_SHAPE],
   [
-    1,
+    2,
     {
       tables: [
+        ...VERSION_1_MINIMUM_SCHEMA_SHAPE.tables,
         {
-          name: 'memory_items',
-          requiredColumns: [
-            'item_id',
-            'version',
-            'content',
-            'kind',
-            'statement_type',
-            'temporal_type',
-            'scope_type',
-            'scope_key',
-            'event_started_at',
-            'event_ended_at',
-            'observed_at',
-            'lifecycle_state',
-            'origin',
-            'content_hash',
-            'created_at',
-            'updated_at',
-          ],
+          name: 'memory_extraction_cursors',
+          requiredColumns: ['session_id', 'processed_ordinal', 'updated_at'],
         },
         {
-          name: 'memory_item_keys',
-          requiredColumns: ['item_id', 'key_text', 'normalized_key', 'key_type', 'key_origin'],
-        },
-        {
-          name: 'memory_item_sources',
-          requiredColumns: ['item_id', 'session_id', 'run_id', 'turn_id', 'event_id'],
-        },
-        {
-          name: 'memory_write_operations',
+          name: 'memory_extraction_receipts',
           requiredColumns: [
             'operation_id',
-            'operation_type',
+            'session_id',
             'request_hash',
             'result_json',
             'committed_at',
           ],
         },
       ],
-      indexes: [
-        {
-          name: 'memory_item_keys_by_normalized_key',
-          tableName: 'memory_item_keys',
-          requiredColumnPrefix: ['normalized_key', 'item_id'],
-        },
-      ],
+      indexes: VERSION_1_MINIMUM_SCHEMA_SHAPE.indexes,
     },
   ],
 ]);

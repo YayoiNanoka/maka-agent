@@ -14,6 +14,7 @@ import {
 } from '../server/automation-coordinator.js';
 import type { ConnectionContext } from '../server/operation-dispatcher.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
+import { MemoryExtractionSessionLane } from '../server/memory-extraction-session-lane.js';
 import { HostSessionRetirementCoordinator } from '../server/session-retirement-coordinator.js';
 
 const CONNECTION_CONTEXT: ConnectionContext = {
@@ -633,6 +634,39 @@ describe('Host Session retirement coordinator', () => {
       assert.equal(harness.actions.automationCommits, 1);
     });
   });
+
+  test('waits for an in-flight Memory Extraction before retiring its Session family', async () => {
+    await withHarness(async (harness) => {
+      let releaseExtraction!: () => void;
+      let markExtractionStarted!: () => void;
+      const extractionStarted = new Promise<void>((resolve) => {
+        markExtractionStarted = resolve;
+      });
+      const extractionRelease = new Promise<void>((resolve) => {
+        releaseExtraction = resolve;
+      });
+      const extraction = harness.memoryExtractionLane.run(harness.rootId, async () => {
+        markExtractionStarted();
+        await extractionRelease;
+      });
+      await extractionStarted;
+
+      const target = await harness.store.readHeaderRecordSnapshot(harness.revisionId);
+      const retirement = harness.coordinator.handlers['session.remove'](
+        { sessionId: harness.revisionId, expectedRevision: target.revision },
+        CONNECTION_CONTEXT,
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepEqual(harness.actions.disposed, []);
+
+      releaseExtraction();
+      await extraction;
+      assert.deepEqual(await retirement, {
+        ok: true,
+        result: { kind: 'removed', sessionId: harness.revisionId },
+      });
+    });
+  });
 });
 
 interface RetirementActions {
@@ -703,6 +737,7 @@ async function withHarness(
       graphWake: new Set<string>(),
       automation: new Set<string>(),
     };
+    const memoryExtractionLane = new MemoryExtractionSessionLane();
     const harness: RetirementHarness = {
       workspaceRoot: root,
       store,
@@ -712,6 +747,7 @@ async function withHarness(
       familyIds: [rootSession.id, revision.id],
       actions,
       blockers,
+      memoryExtractionLane,
       failRemoveCommit: false,
       failRemovalPublication: false,
       failArtifactCleanup: false,
@@ -753,6 +789,7 @@ async function withHarness(
         },
       },
       admission: new SessionAdmissionGate(),
+      memoryExtractionLane,
       root: {
         readRootState: (sessionId) =>
           blockers.root.has(sessionId)
@@ -883,6 +920,7 @@ interface RetirementHarness {
     readonly graphWake: Set<string>;
     readonly automation: Set<string>;
   };
+  readonly memoryExtractionLane: MemoryExtractionSessionLane;
   coordinator: HostSessionRetirementCoordinator;
   failRemoveCommit: boolean;
   failRemovalPublication: boolean;

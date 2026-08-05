@@ -35,6 +35,7 @@ import type { SessionContinuityCoordinator } from './session-continuity-coordina
 import type { RootTurnCoordinator } from './root-turn-coordinator.js';
 import type { HostRuntimeResourceCoordinator } from './runtime-resource-coordinator.js';
 import { purgeSessionSidecars } from './session-sidecar-purge.js';
+import type { MemoryExtractionSessionLane } from './memory-extraction-session-lane.js';
 
 const FAMILY_STABILIZATION_ATTEMPTS = 4;
 
@@ -102,6 +103,7 @@ export interface HostSessionRetirementCoordinatorOptions {
   readonly purgeAgentGraphState: (sessionId: string) => Promise<void>;
   readonly worktrees?: Pick<SubagentWorktreeExecutor, 'retire'>;
   readonly requestDrain: () => void;
+  readonly memoryExtractionLane: MemoryExtractionSessionLane;
 }
 
 interface StableFamily {
@@ -154,6 +156,7 @@ export class HostSessionRetirementCoordinator {
   readonly #purgeAgentGraphState: HostSessionRetirementCoordinatorOptions['purgeAgentGraphState'];
   readonly #worktrees: HostSessionRetirementCoordinatorOptions['worktrees'];
   readonly #requestDrain: () => void;
+  readonly #memoryExtractionLane: MemoryExtractionSessionLane;
   readonly #cleanupQueue = new Set<string>();
   readonly #retiredWorktrees = new Map<string, SubagentWorkspaceBinding>();
   #cleanupWorker: Promise<void> | null = null;
@@ -180,6 +183,7 @@ export class HostSessionRetirementCoordinator {
     this.#purgeAgentGraphState = options.purgeAgentGraphState;
     this.#worktrees = options.worktrees;
     this.#requestDrain = options.requestDrain;
+    this.#memoryExtractionLane = options.memoryExtractionLane;
   }
 
   async recover(): Promise<void> {
@@ -328,18 +332,20 @@ export class HostSessionRetirementCoordinator {
     let sessionIds = await this.#readFamilySessionIds(sessionId);
     for (let attempt = 0; attempt < FAMILY_STABILIZATION_ATTEMPTS; attempt += 1) {
       try {
-        return await this.#admission.runMany(sessionIds, async (admission) => {
-          const stableIds = await this.#readFamilySessionIds(sessionId);
-          if (!sameIds(sessionIds, stableIds)) throw new RetryFamilyResolution(stableIds);
-          const snapshots = await Promise.all(
-            stableIds.map((id) => this.#stores.readHeaderRecordSnapshot(id)),
-          );
-          return operation({
-            sessionIds: stableIds,
-            records: new Map(stableIds.map((id, index) => [id, snapshots[index]!])),
-            admission,
-          });
-        });
+        return await this.#memoryExtractionLane.runMany(sessionIds, () =>
+          this.#admission.runMany(sessionIds, async (admission) => {
+            const stableIds = await this.#readFamilySessionIds(sessionId);
+            if (!sameIds(sessionIds, stableIds)) throw new RetryFamilyResolution(stableIds);
+            const snapshots = await Promise.all(
+              stableIds.map((id) => this.#stores.readHeaderRecordSnapshot(id)),
+            );
+            return operation({
+              sessionIds: stableIds,
+              records: new Map(stableIds.map((id, index) => [id, snapshots[index]!])),
+              admission,
+            });
+          }),
+        );
       } catch (error) {
         if (!(error instanceof RetryFamilyResolution)) throw error;
         sessionIds = [...error.sessionIds];

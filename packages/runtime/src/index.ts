@@ -1576,12 +1576,25 @@ export type {
   GoalEvaluatorDeps,
   GoalEvaluatorResource,
 } from './goal-evaluator.js';
-export { generateToolFreeModelCall } from './tool-free-model-call.js';
+export {
+  generateProviderPrefixModelCall,
+  generateToolFreeModelCall,
+} from './tool-free-model-call.js';
 export type {
+  ProviderPrefixModelCallInput,
+  ProviderPrefixModelCallResult,
   ToolFreeModelCallContent,
   ToolFreeModelCallInput,
   ToolFreeModelCallResult,
 } from './tool-free-model-call.js';
+export {
+  MemoryExtractionEngine,
+  type MemoryExtractionEnginePorts,
+  type MemoryExtractionGate,
+  type MemoryExtractionSourceCapabilities,
+  type MemoryExtractionSourceSnapshot,
+  type MemoryRememberResult,
+} from './memory-extraction.js';
 export {
   buildSessionRecapMessages,
   cleanSessionRecapText,

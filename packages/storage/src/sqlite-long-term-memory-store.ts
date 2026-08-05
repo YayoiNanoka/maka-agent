@@ -22,6 +22,10 @@ import {
   normalizeLongTermMemoryContent,
   validateMemoryTemporalBounds,
   type ApplyMemoryMutationsRequest,
+  type CommitMemoryExtractionRequest,
+  type MemoryExtractionCommitResult,
+  type MemoryExtractionCursor,
+  type MemoryExtractionReceipt,
   type MemoryItem,
   type MemoryItemKey,
   type MemoryItemKeyInput,
@@ -57,6 +61,7 @@ export type SqliteMemoryItemStoreFailpoint =
   | 'after_item_write'
   | 'after_keys_write'
   | 'after_sources_write'
+  | 'after_cursor_write'
   | 'before_operation_write'
   | 'after_commit';
 
@@ -130,6 +135,20 @@ interface MemorySourceRow {
 interface MemoryOperationRow {
   operation_id: unknown;
   operation_type: unknown;
+  request_hash: unknown;
+  result_json: unknown;
+  committed_at: unknown;
+}
+
+interface MemoryExtractionCursorRow {
+  session_id: unknown;
+  processed_ordinal: unknown;
+  updated_at: unknown;
+}
+
+interface MemoryExtractionReceiptRow {
+  operation_id: unknown;
+  session_id: unknown;
   request_hash: unknown;
   result_json: unknown;
   committed_at: unknown;
@@ -212,11 +231,9 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       validateObservedAtForCommit(mutations, committedAt);
 
       const results: MemoryMutationResult[] = [];
-      const transientItemIds = new Set<string>();
       for (let index = 0; index < mutations.length; index += 1) {
-        const result = this.#applyMutation(mutations[index]!, index, committedAt, transientItemIds);
+        const result = this.#applyMutation(mutations[index]!, index, committedAt);
         results.push(result);
-        if (result.outcome !== 'noop') transientItemIds.add(result.itemId);
       }
 
       this.#options.failpoint?.('before_operation_write');
@@ -234,6 +251,178 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       rollback(this.#database);
       throw error;
     }
+  }
+
+  async commitExtraction(
+    request: CommitMemoryExtractionRequest,
+  ): Promise<MemoryExtractionCommitResult> {
+    this.#assertOpen();
+    const committedAt = normalizeTimestamp((this.#options.now ?? Date.now)(), 'current time');
+    const operationId = normalizeIdentifier(request.operationId, 'operationId');
+    const sessionId = normalizeIdentifier(request.sessionId, 'sessionId');
+    const expectedCursorOrdinal = normalizeCursorOrdinal(
+      request.expectedCursorOrdinal,
+      'expectedCursorOrdinal',
+      true,
+    );
+    const nextCursorOrdinal = normalizeCursorOrdinal(
+      request.nextCursorOrdinal,
+      'nextCursorOrdinal',
+      false,
+    );
+    if (nextCursorOrdinal <= expectedCursorOrdinal) {
+      throw new Error('Memory extraction Cursor must advance');
+    }
+    const items = normalizeExtractionItems(request.items);
+    const requestedItemIndexes = normalizeRequestedItemIndexes(
+      request.requestedItemIndexes,
+      items.length,
+    );
+    if (request.trigger !== 'remember' && request.trigger !== 'extract') {
+      throw new Error('Memory extraction trigger is invalid');
+    }
+    if (request.trigger === 'extract' && requestedItemIndexes.length > 0) {
+      throw new Error('Incidental extraction cannot expose requested Items');
+    }
+    validateExtractionObservedAtForCommit(items, committedAt);
+    const requestHash = hashCanonical({
+      kind: 'memory_extraction',
+      sessionId,
+      expectedCursorOrdinal,
+      nextCursorOrdinal,
+      items,
+      requestedItemIndexes,
+      trigger: request.trigger,
+    });
+
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const existingReceipt = this.#readExtractionReceiptRow(operationId);
+      if (existingReceipt) {
+        if (requiredHash(existingReceipt.request_hash, 'request_hash') !== requestHash) {
+          throw new MemoryItemStoreConflictError(
+            'operation_reused',
+            `Memory operation ${operationId} was already used for a different request`,
+          );
+        }
+        const existing = this.#readOperationRow(operationId);
+        if (!existing) throw new Error(`Memory extraction ${operationId} is missing its operation`);
+        const decoded = decodeOperation(existing);
+        const receipt = decodeExtractionReceipt(existingReceipt);
+        this.#database.exec('COMMIT');
+        return {
+          ...decoded,
+          replayed: true,
+          cursor: {
+            sessionId,
+            processedOrdinal: nextCursorOrdinal,
+            updatedAt: decoded.committedAt,
+          },
+          receipt,
+        };
+      }
+
+      const currentCursor = this.#readExtractionCursorRow(sessionId);
+      const currentOrdinal = currentCursor
+        ? requiredPositiveInteger(currentCursor.processed_ordinal, 'processed_ordinal')
+        : 0;
+      if (currentOrdinal !== expectedCursorOrdinal) {
+        throw new MemoryItemStoreConflictError(
+          'cursor_conflict',
+          `Memory extraction Cursor for Session ${sessionId} is ${currentOrdinal}, expected ${expectedCursorOrdinal}`,
+        );
+      }
+
+      const results = items.map((item, index) => this.#createItem(item, index, committedAt));
+      const requestedItems = requestedItemIndexes.map((index) => {
+        const result = results[index]!;
+        return { itemId: result.itemId, content: items[index]!.content };
+      });
+      const receipt: MemoryExtractionReceipt = {
+        operationId,
+        sessionId,
+        status:
+          request.trigger === 'extract'
+            ? 'extracted'
+            : requestedItems.length > 0
+              ? 'remembered'
+              : 'not_applicable',
+        requestedItems,
+        committedAt,
+      };
+
+      if (currentCursor) {
+        const updated = this.#database
+          .prepare(
+            `UPDATE memory_extraction_cursors
+             SET processed_ordinal = ?, updated_at = ?
+             WHERE session_id = ? AND processed_ordinal = ?`,
+          )
+          .run(nextCursorOrdinal, committedAt, sessionId, expectedCursorOrdinal);
+        if (updated.changes !== 1) {
+          throw new MemoryItemStoreConflictError(
+            'cursor_conflict',
+            `Memory extraction Cursor for Session ${sessionId} changed during commit`,
+          );
+        }
+      } else {
+        this.#database
+          .prepare(
+            `INSERT INTO memory_extraction_cursors(session_id, processed_ordinal, updated_at)
+             VALUES (?, ?, ?)`,
+          )
+          .run(sessionId, nextCursorOrdinal, committedAt);
+      }
+      this.#options.failpoint?.('after_cursor_write');
+
+      this.#options.failpoint?.('before_operation_write');
+      this.#database
+        .prepare(
+          `INSERT INTO memory_write_operations(
+             operation_id, operation_type, request_hash, result_json, committed_at
+           ) VALUES (?, 'batch', ?, ?, ?)`,
+        )
+        .run(operationId, requestHash, JSON.stringify(results), committedAt);
+      this.#database
+        .prepare(
+          `INSERT INTO memory_extraction_receipts(
+             operation_id, session_id, request_hash, result_json, committed_at
+           ) VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(operationId, sessionId, requestHash, JSON.stringify(receipt), committedAt);
+      this.#database.exec('COMMIT');
+      this.#options.failpoint?.('after_commit');
+      return {
+        operationId,
+        operationType: 'batch',
+        replayed: false,
+        committedAt,
+        results,
+        cursor: { sessionId, processedOrdinal: nextCursorOrdinal, updatedAt: committedAt },
+        receipt,
+      };
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
+  async readExtractionCursor(sessionId: string): Promise<MemoryExtractionCursor | undefined> {
+    this.#assertOpen();
+    const normalizedSessionId = normalizeIdentifier(sessionId, 'sessionId');
+    return this.#readSnapshot(() => {
+      const row = this.#readExtractionCursorRow(normalizedSessionId);
+      return row ? decodeExtractionCursor(row) : undefined;
+    });
+  }
+
+  async readExtractionReceipt(operationId: string): Promise<MemoryExtractionReceipt | undefined> {
+    this.#assertOpen();
+    const normalizedOperationId = normalizeIdentifier(operationId, 'operationId');
+    return this.#readSnapshot(() => {
+      const row = this.#readExtractionReceiptRow(normalizedOperationId);
+      return row ? decodeExtractionReceipt(row) : undefined;
+    });
   }
 
   async readItem(itemId: string): Promise<MemoryItemRecord | undefined> {
@@ -302,29 +491,16 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
     mutation: NormalizedMutation,
     mutationIndex: number,
     committedAt: number,
-    transientItemIds: ReadonlySet<string>,
   ): MemoryMutationResult {
     switch (mutation.type) {
       case 'create':
-        return this.#createItem(mutation.item, mutationIndex, committedAt, transientItemIds);
+        return this.#createItem(mutation.item, mutationIndex, committedAt);
       case 'update':
-        return this.#updateItem(mutation, mutationIndex, committedAt, transientItemIds);
+        return this.#updateItem(mutation, mutationIndex, committedAt);
       case 'archive':
-        return this.#changeLifecycle(
-          mutation,
-          mutationIndex,
-          committedAt,
-          'archived',
-          transientItemIds,
-        );
+        return this.#changeLifecycle(mutation, mutationIndex, committedAt, 'archived');
       case 'restore':
-        return this.#changeLifecycle(
-          mutation,
-          mutationIndex,
-          committedAt,
-          'active',
-          transientItemIds,
-        );
+        return this.#changeLifecycle(mutation, mutationIndex, committedAt, 'active');
     }
   }
 
@@ -332,13 +508,7 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
     write: NormalizedMemoryWrite,
     mutationIndex: number,
     committedAt: number,
-    transientItemIds: ReadonlySet<string>,
   ): MemoryMutationResult {
-    const duplicate = this.#findActiveFactDuplicate(write);
-    if (duplicate) {
-      this.#throwDuplicateConflict(duplicate, transientItemIds, undefined, 'Creating this Item');
-    }
-
     const itemId = normalizeIdentifier(
       (this.#options.idFactory ?? randomUUID)(),
       'generated itemId',
@@ -379,23 +549,12 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
     mutation: Extract<NormalizedMutation, { type: 'update' }>,
     mutationIndex: number,
     committedAt: number,
-    transientItemIds: ReadonlySet<string>,
   ): MemoryMutationResult {
     const current = this.#requireVersion(mutation.itemId, mutation.expectedVersion);
     const currentRecord = this.#requireItemRecord(mutation.itemId);
     if (recordMatchesWrite(currentRecord, mutation.item)) {
       return mutationResult(mutationIndex, 'update', current, 'noop');
     }
-    const duplicate = this.#findActiveFactDuplicate(mutation.item, mutation.itemId);
-    if (duplicate) {
-      this.#throwDuplicateConflict(
-        duplicate,
-        transientItemIds,
-        mutation.itemId,
-        `Updating Memory Item ${mutation.itemId}`,
-      );
-    }
-
     const updatedAt = Math.max(committedAt, current.updatedAt);
     const result = this.#database
       .prepare(
@@ -441,7 +600,6 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
     mutationIndex: number,
     committedAt: number,
     target: MemoryItem['lifecycleState'],
-    transientItemIds: ReadonlySet<string>,
   ): MemoryMutationResult {
     const current = this.#requireVersion(mutation.itemId, mutation.expectedVersion);
     const expected = target === 'archived' ? 'active' : 'archived';
@@ -452,21 +610,6 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
         mutation.itemId,
       );
     }
-    if (target === 'active') {
-      const duplicate = this.#findActiveFactDuplicate(
-        writeFromRecord(this.#requireItemRecord(mutation.itemId)),
-        mutation.itemId,
-      );
-      if (duplicate) {
-        this.#throwDuplicateConflict(
-          duplicate,
-          transientItemIds,
-          mutation.itemId,
-          `Restoring Memory Item ${mutation.itemId}`,
-        );
-      }
-    }
-
     const updatedAt = Math.max(committedAt, current.updatedAt);
     const result = this.#database
       .prepare(
@@ -502,61 +645,6 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       );
     }
     return record.item;
-  }
-
-  /**
-   * Enforce one active row per exact normalized fact identity.
-   * Evidence and retrieval-key merging remain caller policy: this guard only
-   * reports the conflicting Item so a trusted extraction layer can CAS-update it.
-   */
-  #findActiveFactDuplicate(
-    write: NormalizedMemoryWrite,
-    excludedItemId?: string,
-  ): MemoryItem | undefined {
-    const scopeClause = write.scopeType === 'global' ? 'scope_key IS NULL' : 'scope_key = ?';
-    const parameters: string[] = [write.scopeType];
-    if (write.scopeType === 'workspace') parameters.push(write.scopeKey!);
-    parameters.push(write.contentHash);
-    const rows = this.#database
-      .prepare(
-        `SELECT item_id FROM memory_items
-         WHERE lifecycle_state = 'active'
-           AND scope_type = ?
-           AND ${scopeClause}
-           AND content_hash = ?
-         ORDER BY item_id ASC`,
-      )
-      .all(...parameters) as Array<{ item_id?: unknown }>;
-    for (const row of rows) {
-      const itemId = requiredIdentifierString(row.item_id, 'item_id');
-      const record = this.#readItemRecord(itemId);
-      if (!record) throw new Error(`Memory Item ${itemId} disappeared during duplicate check`);
-      if (itemId !== excludedItemId && factIdentityMatchesWrite(record.item, write)) {
-        return record.item;
-      }
-    }
-    return undefined;
-  }
-
-  #throwDuplicateConflict(
-    duplicate: MemoryItem,
-    transientItemIds: ReadonlySet<string>,
-    itemId: string | undefined,
-    action: string,
-  ): never {
-    if (transientItemIds.has(duplicate.itemId)) {
-      throw new MemoryItemStoreConflictError(
-        'duplicate_within_batch',
-        `${action} would duplicate a fact changed earlier in the same batch; split or normalize the batch before retrying`,
-        itemId,
-      );
-    }
-    throw new MemoryItemStoreConflictError(
-      'duplicate_active',
-      `${action} would duplicate active Item ${duplicate.itemId}; merge current keys and sources with the new evidence before updating it`,
-      itemId,
-      duplicate.itemId,
-    );
   }
 
   #replaceKeys(itemId: string, keys: readonly MemoryItemKey[]): void {
@@ -622,6 +710,24 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
          FROM memory_write_operations WHERE operation_id = ?`,
       )
       .get(operationId) as MemoryOperationRow | undefined;
+  }
+
+  #readExtractionCursorRow(sessionId: string): MemoryExtractionCursorRow | undefined {
+    return this.#database
+      .prepare(
+        `SELECT session_id, processed_ordinal, updated_at
+         FROM memory_extraction_cursors WHERE session_id = ?`,
+      )
+      .get(sessionId) as MemoryExtractionCursorRow | undefined;
+  }
+
+  #readExtractionReceiptRow(operationId: string): MemoryExtractionReceiptRow | undefined {
+    return this.#database
+      .prepare(
+        `SELECT operation_id, session_id, request_hash, result_json, committed_at
+         FROM memory_extraction_receipts WHERE operation_id = ?`,
+      )
+      .get(operationId) as MemoryExtractionReceiptRow | undefined;
   }
 
   #assertOpen(): void {
@@ -735,6 +841,16 @@ function normalizeMutations(
   });
 }
 
+function normalizeExtractionItems(
+  items: readonly MemoryItemWrite[],
+): readonly NormalizedMemoryWrite[] {
+  if (!Array.isArray(items)) throw new Error('Memory extraction items must be an array');
+  if (items.length > MAX_MUTATIONS_PER_OPERATION) {
+    throw new Error(`Memory extraction accepts at most ${MAX_MUTATIONS_PER_OPERATION} Items`);
+  }
+  return items.map(normalizeWrite);
+}
+
 function assertChildCardinality(child: 'keys' | 'sources', count: number, maximum: number): void {
   if (count < 1 || count > maximum) {
     throw new Error(
@@ -752,6 +868,17 @@ function validateObservedAtForCommit(
       (mutation.type === 'create' || mutation.type === 'update') &&
       mutation.item.observedAt > committedAt
     ) {
+      throw new Error('observedAt cannot be later than commit time');
+    }
+  }
+}
+
+function validateExtractionObservedAtForCommit(
+  items: readonly NormalizedMemoryWrite[],
+  committedAt: number,
+): void {
+  for (const item of items) {
+    if (item.observedAt > committedAt) {
       throw new Error('observedAt cannot be later than commit time');
     }
   }
@@ -909,6 +1036,24 @@ function normalizeVersion(value: unknown): number {
   return value as number;
 }
 
+function normalizeCursorOrdinal(value: unknown, name: string, allowZero: boolean): number {
+  if (!Number.isSafeInteger(value) || (value as number) < (allowZero ? 0 : 1)) {
+    throw new Error(`${name} must be ${allowZero ? 'a non-negative' : 'a positive'} safe integer`);
+  }
+  return value as number;
+}
+
+function normalizeRequestedItemIndexes(value: unknown, itemCount: number): number[] {
+  if (!Array.isArray(value)) throw new Error('requestedItemIndexes must be an array');
+  const indexes = [...new Set(value)];
+  for (const index of indexes) {
+    if (!Number.isSafeInteger(index) || (index as number) < 0 || (index as number) >= itemCount) {
+      throw new Error('requestedItemIndexes contains an out-of-range index');
+    }
+  }
+  return (indexes as number[]).sort((left, right) => left - right);
+}
+
 function normalizeTimestamp(value: unknown, name: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new Error(`${name} must be a non-negative integer UTC millisecond timestamp`);
@@ -947,19 +1092,6 @@ function writeFromRecord(record: MemoryItemRecord): NormalizedMemoryWrite {
     keys: record.keys,
     sources: record.sources,
   };
-}
-
-function factIdentityMatchesWrite(item: MemoryItem, write: NormalizedMemoryWrite): boolean {
-  return (
-    item.content === write.content &&
-    item.kind === write.kind &&
-    item.statementType === write.statementType &&
-    item.temporalType === write.temporalType &&
-    item.scopeType === write.scopeType &&
-    item.scopeKey === write.scopeKey &&
-    item.eventStartedAt === write.eventStartedAt &&
-    item.eventEndedAt === write.eventEndedAt
-  );
 }
 
 function mutationResult(
@@ -1057,6 +1189,70 @@ function decodeSource(row: MemorySourceRow): MemoryItemSource {
   };
 }
 
+function decodeExtractionCursor(row: MemoryExtractionCursorRow): MemoryExtractionCursor {
+  return {
+    sessionId: requiredIdentifierString(row.session_id, 'session_id'),
+    processedOrdinal: requiredPositiveInteger(row.processed_ordinal, 'processed_ordinal'),
+    updatedAt: requiredNonNegativeInteger(row.updated_at, 'updated_at'),
+  };
+}
+
+function decodeExtractionReceipt(row: MemoryExtractionReceiptRow): MemoryExtractionReceipt {
+  const operationId = requiredIdentifierString(row.operation_id, 'operation_id');
+  const sessionId = requiredIdentifierString(row.session_id, 'session_id');
+  requiredHash(row.request_hash, 'request_hash');
+  const committedAt = requiredNonNegativeInteger(row.committed_at, 'committed_at');
+  const encoded = requiredString(row.result_json, 'result_json');
+  if (encoded.length > MAX_OPERATION_RESULT_JSON_CODE_UNITS) {
+    throw new Error(`Memory extraction ${operationId} result JSON is too large`);
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(encoded);
+  } catch (error) {
+    throw new Error(`Invalid result JSON for Memory extraction ${operationId}`, { cause: error });
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Invalid receipt for Memory extraction ${operationId}`);
+  }
+  const receipt = value as Record<string, unknown>;
+  if (
+    receipt.operationId !== operationId ||
+    receipt.sessionId !== sessionId ||
+    !['remembered', 'not_applicable', 'extracted'].includes(String(receipt.status)) ||
+    receipt.committedAt !== committedAt ||
+    !Array.isArray(receipt.requestedItems)
+  ) {
+    throw new Error(`Invalid receipt for Memory extraction ${operationId}`);
+  }
+  const requestedItems = receipt.requestedItems.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error(`Invalid requested Item in Memory extraction ${operationId}`);
+    }
+    const record = item as Record<string, unknown>;
+    return {
+      itemId: normalizeIdentifier(record.itemId, 'receipt itemId'),
+      content: requiredString(record.content, 'receipt content'),
+    };
+  });
+  if (requestedItems.length > MAX_MUTATIONS_PER_OPERATION) {
+    throw new Error(`Memory extraction ${operationId} has too many requested Items`);
+  }
+  if (
+    (receipt.status === 'remembered' && requestedItems.length === 0) ||
+    (receipt.status !== 'remembered' && requestedItems.length > 0)
+  ) {
+    throw new Error(`Memory extraction ${operationId} has inconsistent requested Items`);
+  }
+  return {
+    operationId,
+    sessionId,
+    status: receipt.status as MemoryExtractionReceipt['status'],
+    requestedItems,
+    committedAt,
+  };
+}
+
 function decodeOperation(row: MemoryOperationRow): MemoryWriteOperationResult {
   const operationId = requiredIdentifierString(row.operation_id, 'operation_id');
   const operationType = requiredString(row.operation_type, 'operation_type');
@@ -1083,9 +1279,8 @@ function decodeOperation(row: MemoryOperationRow): MemoryWriteOperationResult {
   }
   const decodedResults = results.map((result, index) => decodeMutationResult(result, index));
   if (
-    (operationType === 'batch' && decodedResults.length < 2) ||
-    (operationType !== 'batch' &&
-      (decodedResults.length !== 1 || decodedResults[0]?.mutationType !== operationType))
+    operationType !== 'batch' &&
+    (decodedResults.length !== 1 || decodedResults[0]?.mutationType !== operationType)
   ) {
     throw new Error(`Invalid results for Memory operation ${operationId}`);
   }

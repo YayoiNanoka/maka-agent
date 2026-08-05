@@ -144,6 +144,41 @@ export interface ApplyMemoryMutationsRequest {
   readonly mutations: readonly MemoryItemMutation[];
 }
 
+/** Session-wide watermark for the RuntimeEvent coverage already evaluated for long-term memory. */
+export interface MemoryExtractionCursor {
+  readonly sessionId: string;
+  readonly processedOrdinal: number;
+  readonly updatedAt: number;
+}
+
+export interface MemoryExtractionRequestedItemResult {
+  readonly itemId: string;
+  readonly content: string;
+}
+
+export interface MemoryExtractionReceipt {
+  readonly operationId: string;
+  readonly sessionId: string;
+  readonly status: 'remembered' | 'not_applicable' | 'extracted';
+  readonly requestedItems: readonly MemoryExtractionRequestedItemResult[];
+  readonly committedAt: number;
+}
+
+/**
+ * Trusted extraction commit. Runtime validates the frozen RuntimeEvent boundary before calling
+ * the Store; SQLite atomically creates admitted Items and advances the Session watermark.
+ */
+export interface CommitMemoryExtractionRequest {
+  readonly operationId: string;
+  readonly sessionId: string;
+  readonly expectedCursorOrdinal: number;
+  readonly nextCursorOrdinal: number;
+  readonly items: readonly MemoryItemWrite[];
+  /** Indexes into items whose committed identities are observable to memory_remember. */
+  readonly requestedItemIndexes: readonly number[];
+  readonly trigger: 'remember' | 'extract';
+}
+
 export type MemoryMutationOutcome = 'created' | 'updated' | 'archived' | 'restored' | 'noop';
 
 export interface MemoryMutationResult {
@@ -161,6 +196,11 @@ export interface MemoryWriteOperationResult {
   readonly replayed: boolean;
   readonly committedAt: number;
   readonly results: readonly MemoryMutationResult[];
+}
+
+export interface MemoryExtractionCommitResult extends MemoryWriteOperationResult {
+  readonly cursor: MemoryExtractionCursor;
+  readonly receipt: MemoryExtractionReceipt;
 }
 
 export interface MemoryItemRecord {
@@ -181,6 +221,9 @@ export interface SearchMemoryItemsByKeyRequest {
 
 export interface MemoryItemStore {
   applyMutations(request: ApplyMemoryMutationsRequest): Promise<MemoryWriteOperationResult>;
+  commitExtraction(request: CommitMemoryExtractionRequest): Promise<MemoryExtractionCommitResult>;
+  readExtractionCursor(sessionId: string): Promise<MemoryExtractionCursor | undefined>;
+  readExtractionReceipt(operationId: string): Promise<MemoryExtractionReceipt | undefined>;
   readItem(itemId: string): Promise<MemoryItemRecord | undefined>;
   searchByKeys(request: SearchMemoryItemsByKeyRequest): Promise<readonly MemoryItemRecord[]>;
   readOperation(operationId: string): Promise<MemoryWriteOperationResult | undefined>;
@@ -189,9 +232,8 @@ export interface MemoryItemStore {
 export type MemoryItemStoreConflictReason =
   | 'operation_reused'
   | 'version_conflict'
-  | 'duplicate_active'
-  | 'duplicate_within_batch'
   | 'item_not_found'
+  | 'cursor_conflict'
   | 'invalid_lifecycle_transition';
 
 export class MemoryItemStoreConflictError extends Error {
@@ -201,7 +243,6 @@ export class MemoryItemStoreConflictError extends Error {
     readonly reason: MemoryItemStoreConflictReason,
     message: string,
     readonly itemId?: string,
-    readonly conflictingItemId?: string,
   ) {
     super(message);
   }

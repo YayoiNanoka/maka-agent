@@ -78,6 +78,167 @@ import type {
 import { decodeModelCallAttempt, type ModelCallAttempt } from '@maka/core/model-call-attempt';
 import { buildLlmHistorySummarizer } from '../history-compact-summarizer.js';
 import { createTestAiSdkBackend } from './execution-boundary-test-helpers.js';
+import type { MemoryExtractionSourceSnapshot } from '../memory-extraction.js';
+
+describe('AiSdkBackend Memory Extraction triggers', () => {
+  test('runs memory_remember synchronously and returns the persisted requested Item to the next step', async () => {
+    let modelCalls = 0;
+    let snapshot: MemoryExtractionSourceSnapshot | undefined;
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        modelCalls += 1;
+        return {
+          stream: simulateReadableStream({
+            chunks: (modelCalls === 1
+              ? [
+                  { type: 'stream-start', warnings: [] },
+                  {
+                    type: 'tool-call',
+                    toolCallId: 'remember-call',
+                    toolName: 'memory_remember',
+                    input: '{}',
+                  },
+                  {
+                    type: 'finish',
+                    finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+                    usage: emptyUsage(),
+                  },
+                ]
+              : [
+                  { type: 'stream-start', warnings: [] },
+                  { type: 'text-start', id: 'text-1' },
+                  { type: 'text-delta', id: 'text-1', delta: 'Remembered.' },
+                  { type: 'text-end', id: 'text-1' },
+                  {
+                    type: 'finish',
+                    finishReason: { unified: 'stop', raw: 'stop' },
+                    usage: emptyUsage(),
+                  },
+                ]) as LanguageModelV4StreamPart[],
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
+      },
+    });
+    const durable = durableTurnHarness('turn-memory', 'Remember that I prefer concise Chinese.');
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      tools: [],
+      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+      memoryExtraction: {
+        gate: async () => ({ allowed: true }),
+        remember: async (value) => {
+          snapshot = value;
+          return {
+            status: 'remembered',
+            requestedItems: [{ itemId: 'memory-1', content: 'User prefers concise Chinese.' }],
+          };
+        },
+        extract: () => {},
+      },
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    await drainDurably(
+      backend.send(durable.input({ runId: 'run-1', invocationId: 'invocation-1' })),
+      durable,
+    );
+
+    assert.equal(snapshot?.trigger, 'remember');
+    assert.equal(snapshot?.toolCallId, 'remember-call');
+    assert.match(JSON.stringify(model.doStreamCalls[1]?.prompt), /User prefers concise Chinese/);
+  });
+
+  test('dispatches memory_extract only after the terminal Event is durably consumed', async () => {
+    let modelCalls = 0;
+    let extractionSnapshot: MemoryExtractionSourceSnapshot | undefined;
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        modelCalls += 1;
+        return {
+          stream: simulateReadableStream({
+            chunks: (modelCalls === 1
+              ? [
+                  { type: 'stream-start', warnings: [] },
+                  {
+                    type: 'tool-call',
+                    toolCallId: 'extract-call',
+                    toolName: 'memory_extract',
+                    input: '{}',
+                  },
+                  {
+                    type: 'finish',
+                    finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+                    usage: emptyUsage(),
+                  },
+                ]
+              : [
+                  { type: 'stream-start', warnings: [] },
+                  { type: 'text-start', id: 'text-1' },
+                  { type: 'text-delta', id: 'text-1', delta: 'Done.' },
+                  { type: 'text-end', id: 'text-1' },
+                  {
+                    type: 'finish',
+                    finishReason: { unified: 'stop', raw: 'stop' },
+                    usage: emptyUsage(),
+                  },
+                ]) as LanguageModelV4StreamPart[],
+            initialDelayInMs: null,
+            chunkDelayInMs: null,
+          }),
+        };
+      },
+    });
+    const durable = durableTurnHarness('turn-memory', 'This is durable project context.');
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      tools: [],
+      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+      memoryExtraction: {
+        gate: async () => ({ allowed: true }),
+        remember: async () => ({ status: 'unavailable', requestedItems: [] }),
+        extract: (snapshot) => {
+          extractionSnapshot = snapshot;
+        },
+      },
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    await drainDurably(
+      backend.send(durable.input({ runId: 'run-1', invocationId: 'invocation-1' })),
+      durable,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.equal(modelCalls, 2);
+    assert.ok(
+      durable.ledger.some(
+        (event) =>
+          event.content?.kind === 'function_response' &&
+          event.content.name === 'memory_extract' &&
+          JSON.stringify(event.content.result).includes('accepted'),
+      ),
+    );
+    assert.equal(extractionSnapshot?.trigger, 'extract');
+    assert.ok(extractionSnapshot?.terminalEventId);
+    assert.ok(durable.ledger.some(({ id }) => id === extractionSnapshot?.terminalEventId));
+  });
+});
 
 describe('AiSdkBackend model history', () => {
   test('preserves operation-owned audio through the durable request path and redacts its capture', async () => {
