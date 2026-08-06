@@ -8,26 +8,8 @@ import {
   type MountWindowState,
   type ViewportMetrics,
 } from './progressive-turn-mount.js';
-import type { WarmupScheduler } from './turn-size-warmup.js';
-
-function defaultScheduler(): WarmupScheduler | undefined {
-  if (typeof requestAnimationFrame !== 'function') return undefined;
-  return {
-    requestIdle: typeof requestIdleCallback === 'function'
-      ? (callback) => {
-        const id = requestIdleCallback(callback);
-        return () => cancelIdleCallback(id);
-      }
-      : (callback) => {
-        const id = setTimeout(callback, 1);
-        return () => clearTimeout(id);
-      },
-    requestFrame: (callback) => {
-      const id = requestAnimationFrame(callback);
-      return () => cancelAnimationFrame(id);
-    },
-  };
-}
+import { prefixHeightFor, type TurnGeometryRecord } from './turn-size-index.js';
+import { createBrowserWarmupScheduler, type WarmupScheduler } from './turn-size-warmup.js';
 
 /**
  * React adapter for the #2052 progressive transcript mount.
@@ -53,12 +35,23 @@ export function useProgressiveTurnMount(input: {
   scrollRef: RefObject<HTMLElement | null>;
   /** Search navigation target; mounted before use-chat-scroll queries it. */
   targetTurnId?: string;
+  /**
+   * Turn geometry measured on a previous visit (#2224). When every
+   * unmounted turn has a height, the caller renders a prefix spacer
+   * instead of letting the document grow during the fill.
+   */
+  seededGeometry?: TurnGeometryRecord;
   scheduler?: WarmupScheduler;
 }): {
   /** Render turns from this index on; 0 means the transcript is complete. */
   start: number;
   /** True once every turn is mounted; gates the turn-size warm-up. */
   filled: boolean;
+  /**
+   * Height standing in for the unmounted prefix, undefined when any prefix
+   * turn lacks a measurement; 0 once the transcript is complete.
+   */
+  prefixHeight: number | undefined;
   /** Mount a specific turn now and scroll to it once it exists. */
   revealTurn: (turnId: string) => void;
 } {
@@ -81,7 +74,7 @@ export function useProgressiveTurnMount(input: {
   const beforeFillRef = useRef<ViewportMetrics | undefined>(undefined);
   const schedulerRef = useRef<WarmupScheduler | undefined>(undefined);
   if (schedulerRef.current === undefined) {
-    schedulerRef.current = input.scheduler ?? defaultScheduler();
+    schedulerRef.current = input.scheduler ?? createBrowserWarmupScheduler();
   }
 
   useEffect(() => {
@@ -134,5 +127,10 @@ export function useProgressiveTurnMount(input: {
     setPendingReveal(turnId);
   }, []);
 
-  return { start: reconciled.start, filled: reconciled.start === 0, revealTurn };
+  return {
+    start: reconciled.start,
+    filled: reconciled.start === 0,
+    prefixHeight: prefixHeightFor(input.turnIds, reconciled.start, input.seededGeometry),
+    revealTurn,
+  };
 }

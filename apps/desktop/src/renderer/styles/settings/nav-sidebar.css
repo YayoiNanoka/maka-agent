@@ -12,6 +12,7 @@
 
 .settingsBackButton {
   justify-content: flex-start;
+  padding-inline: var(--space-2);
   -webkit-app-region: no-drag;
 }
 

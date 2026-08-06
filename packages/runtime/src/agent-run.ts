@@ -60,6 +60,7 @@ import {
   createRuntimeContinuationStartAdmissionProof,
   type RuntimeContinuationStartAdmissionProof,
 } from './runtime-continuation-admission.js';
+import { DEFAULT_TOOL_MODE, isToolMode, type ToolMode } from '@maka/core/tool-mode';
 import type {
   ProviderRequestAttemptRecord,
   ProviderRequestCaptureLedgerRecord,
@@ -137,6 +138,8 @@ export interface AgentRunInput {
   invocationId?: string;
   /** Pre-resolved snapshot used by continuations; normal turns derive it from header + input. */
   effectiveOrchestration?: EffectiveOrchestration;
+  /** Pre-resolved tool protocol used by continuations. */
+  effectiveToolMode?: ToolMode;
   /** Set only when this run's backend tool path is guarded by canonical T1. */
   toolBoundaryProtocol?: ToolBoundaryProtocol;
 }
@@ -194,6 +197,7 @@ export class AgentRun {
   readonly toolBoundaryProtocol: ToolBoundaryProtocol | undefined;
   readonly lineage: AgentRunLineage;
   readonly effectiveOrchestration: EffectiveOrchestration;
+  readonly toolMode: ToolMode;
 
   private header: SessionHeader;
   private active: AgentRunActiveSession | undefined;
@@ -246,6 +250,12 @@ export class AgentRun {
         input.header.orchestrationMode,
         input.userInput.turnOrchestration,
       );
+    const requestedToolMode =
+      input.effectiveToolMode ?? input.userInput.toolMode ?? DEFAULT_TOOL_MODE;
+    if (!isToolMode(requestedToolMode)) {
+      throw new Error(`Invalid tool mode: ${String(requestedToolMode)}`);
+    }
+    this.toolMode = requestedToolMode;
     this.lineage = {
       ...(input.userInput.parentRunId ? { parentRunId: input.userInput.parentRunId } : {}),
       ...(input.userInput.resumedFromRunId
@@ -312,7 +322,8 @@ export class AgentRun {
     // failure below is real and must reach the stop's caller: a stop that
     // reports success while the run stays non-terminal is the silent loss this
     // method exists to prevent.
-    if (!this.input.runtimeEventStore || !this.input.runStore) return;
+    const runStore = this.input.runStore;
+    if (!this.input.runtimeEventStore || !runStore) return;
     await this.flushRuntimePartialBuffer(true);
     // The claim only fences writers inside this Run. Another owner — a Host
     // recovery, a resumed continuation — may have sealed the ledger already,
@@ -323,6 +334,21 @@ export class AgentRun {
     const events = await this.loadTurnRuntimeEvents();
     if (events.some((event) => isTerminalRuntimeEvent(event) && event.id !== claimedEventId))
       return;
+    if (!this.runStoreAvailable) {
+      // The Run-store latch is best-effort history (one busy trace append
+      // sets it) and commitTerminalRun silently skips under it, which here
+      // would turn the stop into a reported success with no terminal fact:
+      // the silent variant of the loss this method exists to prevent.
+      // Probe like the RuntimeEvent read above; a store that answers lifts
+      // the latch, one that cannot fails the settlement loudly so the stop
+      // stays retryable.
+      try {
+        await runStore.readRun(this.sessionId, this.runId);
+        this.runStoreAvailable = true;
+      } catch (error) {
+        throw new Error('AgentRun store is unavailable for stop settlement', { cause: error });
+      }
+    }
     const ts = this.lastTs || this.input.now();
     const finalStatus = { status: 'aborted' as const };
     this.finalStatus ??= finalStatus;
@@ -482,17 +508,33 @@ export class AgentRun {
    * never be computed over a projection the ledger cannot replay.
    */
   async loadTurnRuntimeEvents(): Promise<RuntimeEvent[]> {
-    if (!this.input.runtimeEventStore || !this.runtimeEventStoreAvailable) {
+    const store = this.input.runtimeEventStore;
+    if (!store) {
       throw new Error('RuntimeEvent store is unavailable for turn runtime events');
     }
     await this.flushRuntimePartialBuffer(false);
     await this.runtimeEventQueue.catch(() => {});
-    // A write may have failed while we waited; a snapshot from a store that
-    // just went unavailable must not be treated as a complete durable read.
-    if (!this.runtimeEventStoreAvailable) {
-      throw new Error('RuntimeEvent store became unavailable for turn runtime events');
+    if (this.runtimeEventStoreAvailable) {
+      return await store.readRuntimeEvents(this.sessionId, this.runId);
     }
-    return await this.input.runtimeEventStore.readRuntimeEvents(this.sessionId, this.runId);
+    // The unavailability latch records that a past write failed, not that
+    // the store cannot answer now. This read is the probe that
+    // disambiguates, the same way recordRuntimeEvents reads the ledger back
+    // after an ambiguous append: a store that answers is available again
+    // and the latch lifts, so a stop retried after one rejected write can
+    // still settle its terminal fact (#2253) instead of failing on stale
+    // history forever. A store that cannot answer keeps rejecting, and
+    // coverage is never computed over a projection the ledger cannot
+    // replay.
+    try {
+      const events = await store.readRuntimeEvents(this.sessionId, this.runId);
+      this.runtimeEventStoreAvailable = true;
+      return events;
+    } catch (error) {
+      throw new Error('RuntimeEvent store is unavailable for turn runtime events', {
+        cause: error,
+      });
+    }
   }
 
   recordSemanticCompactBlock(block: SemanticCompactBlock): void {
@@ -527,6 +569,7 @@ export class AgentRun {
         runId: this.runId,
         turnId: this.turnId,
         orchestration: this.effectiveOrchestration,
+        toolMode: this.toolMode,
         text: this.input.userInput.text,
         ...(this.input.userInput.voiceAudio ? { voiceAudio: this.input.userInput.voiceAudio } : {}),
         ...(this.input.userInput.attachments
@@ -566,6 +609,9 @@ export class AgentRun {
       });
       for await (const _runtimeEvent of flow.run(ctx, {
         text: begin.backendInput.text,
+        ...(begin.backendInput.toolMode !== undefined
+          ? { toolMode: begin.backendInput.toolMode }
+          : {}),
         ...(begin.backendInput.attachments ? { attachments: begin.backendInput.attachments } : {}),
         ...(begin.backendInput.quotes ? { quotes: begin.backendInput.quotes } : {}),
         context: begin.backendInput.context,
@@ -689,6 +735,7 @@ export class AgentRun {
       backendInput: {
         turnId: this.turnId,
         orchestration: this.effectiveOrchestration,
+        toolMode: this.toolMode,
         text: this.input.userInput.text,
         ...(this.input.userInput.attachments
           ? { attachments: this.input.userInput.attachments }
@@ -1110,6 +1157,7 @@ export class AgentRun {
       orchestrationMode: this.effectiveOrchestration.mode,
       orchestrationSource: this.effectiveOrchestration.source,
       agentSwarmAuthorization: this.effectiveOrchestration.agentSwarmAuthorization,
+      toolMode: this.toolMode,
       createdAt,
       updatedAt: createdAt,
       ...this.lineage,
@@ -1180,6 +1228,7 @@ export class AgentRun {
             orchestrationMode: this.effectiveOrchestration.mode,
             orchestrationSource: this.effectiveOrchestration.source,
             agentSwarmAuthorization: this.effectiveOrchestration.agentSwarmAuthorization,
+            toolMode: this.toolMode,
           },
         },
         { durable },

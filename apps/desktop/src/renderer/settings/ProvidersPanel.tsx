@@ -11,7 +11,6 @@ import {
   Skeleton,
   StatusDot,
   Text,
-  Toolbar,
   VStack,
 } from '@astryxdesign/core';
 import { ChevronRight } from '@maka/ui/icons';
@@ -38,7 +37,6 @@ import { providerPanelActionErrorMessage, type ConnectionsBridge } from './provi
 import { getProviderSettingsCopy } from '../locales/settings-provider-copy';
 
 export type { ConnectionsBridge } from './provider-panel-shared';
-export { ProviderLogo, providerDisplay } from './provider-display';
 
 /**
  * Where the panel is. Four levels, one container, one back affordance:
@@ -240,7 +238,7 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
   }
 
   return (
-    <VStack className="providersPanel" gap={6} data-maka-contract="providers-panel">
+    <VStack className="providersPanel" gap={2} data-maka-contract="providers-panel">
       {level === 'detail' && selected ? (
         // tabIndex -1 so a route change can land focus on the level itself —
         // the standard SPA answer to "where does focus go when the page
@@ -322,27 +320,21 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
         </VStack>
       ) : (
         <>
-          <Toolbar
-            label={copy.connectionsAria}
-            gap={2}
-            startContent={(
-              <HStack gap={2} vAlign="center">
-                <Heading level={3}>{copy.connected}</Heading>
-                {connections.length > 0 && (
-                  <Text type="supporting" color="secondary">{copy.count(connections.length)}</Text>
-                )}
-              </HStack>
-            )}
-            endContent={(
-              <Button
-                ref={addButtonRef}
-                variant="primary"
-                label={copy.addConnection}
-                onClick={openCatalog}
-                data-maka-contract="add-connection"
-              />
-            )}
-          />
+          <HStack gap={2} vAlign="center" hAlign="between">
+            <HStack gap={2} vAlign="center">
+              <Heading level={3}>{copy.connections}</Heading>
+              {connections.length > 0 && (
+                <Text type="supporting" color="secondary">{copy.count(connections.length)}</Text>
+              )}
+            </HStack>
+            <Button
+              ref={addButtonRef}
+              variant="primary"
+              label={copy.addConnection}
+              onClick={openCatalog}
+              data-maka-contract="add-connection"
+            />
+          </HStack>
           {loadError ? (
             <Banner
               status="error"

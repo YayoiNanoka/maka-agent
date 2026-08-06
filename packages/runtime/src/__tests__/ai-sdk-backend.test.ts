@@ -77,7 +77,11 @@ import type {
 } from '../provider-request-telemetry.js';
 import { decodeModelCallAttempt, type ModelCallAttempt } from '@maka/core/model-call-attempt';
 import { buildLlmHistorySummarizer } from '../history-compact-summarizer.js';
-import { createTestAiSdkBackend } from './execution-boundary-test-helpers.js';
+import { createToolResultArchiveCapability } from '../tool-result-archive-capability.js';
+import {
+  createTestAiSdkBackend,
+  testToolResultArchive,
+} from './execution-boundary-test-helpers.js';
 import type { MemoryExtractionSourceSnapshot } from '../memory-extraction.js';
 
 describe('AiSdkBackend Memory Extraction triggers', () => {
@@ -383,7 +387,6 @@ describe('AiSdkBackend Memory Extraction triggers', () => {
     assert.ok(durable.ledger.some(({ id }) => id === extractionSnapshot?.terminalEventId));
   });
 });
-
 describe('AiSdkBackend model history', () => {
   test('preserves operation-owned audio through the durable request path and redacts its capture', async () => {
     const model = completionModel();
@@ -3342,14 +3345,16 @@ describe('AiSdkBackend model history', () => {
         },
         charsPerToken: 1,
       },
-      archiveToolResult: async (event) => {
-        archiveRequests.push({
-          runtimeEventId: event.runtimeEventId,
-          serializedResult: event.serializedResult,
-          bodySha256: event.bodySha256,
-        });
-        return { artifactId: `artifact-${event.runtimeEventId}` };
-      },
+      toolResultArchive: testToolResultArchive({
+        archiveToolResult: async (event) => {
+          archiveRequests.push({
+            runtimeEventId: event.runtimeEventId,
+            serializedResult: event.serializedResult,
+            bodySha256: event.bodySha256,
+          });
+          return { artifactId: `artifact-${event.runtimeEventId}` };
+        },
+      }),
     });
 
     await drain(
@@ -3437,10 +3442,12 @@ describe('AiSdkBackend model history', () => {
         },
         charsPerToken: 1,
       },
-      archiveToolResult: async (event) =>
-        event.runtimeEventId === 'rt-new-result'
-          ? { artifactId: 'artifact-new-rt-result' }
-          : undefined,
+      toolResultArchive: testToolResultArchive({
+        archiveToolResult: async (event) =>
+          event.runtimeEventId === 'rt-new-result'
+            ? { artifactId: 'artifact-new-rt-result' }
+            : undefined,
+      }),
     });
 
     await drain(
@@ -3542,7 +3549,9 @@ describe('AiSdkBackend model history', () => {
         },
         charsPerToken: 1,
       },
-      archiveToolResult: async (event) => ({ artifactId: `artifact-${event.runtimeEventId}` }),
+      toolResultArchive: testToolResultArchive({
+        archiveToolResult: async (event) => ({ artifactId: `artifact-${event.runtimeEventId}` }),
+      }),
     });
 
     for await (const event of backend.send({
@@ -3628,19 +3637,21 @@ describe('AiSdkBackend model history', () => {
         },
         charsPerToken: 1,
       },
-      archiveToolResult: async (event) => {
-        archivedBody = event.serializedResult;
-        return { artifactId: `artifact-${event.runtimeEventId}` };
-      },
-      readToolResultArchive: async (event) => {
-        if (event.originalBytes !== utf8Bytes(archivedBody)) {
-          return { ok: false, reason: 'size_mismatch' };
-        }
-        return {
-          ok: true,
-          serializedResult: event.bodySha256 === sha256(archivedBody) ? archivedBody : 'tampered',
-        };
-      },
+      toolResultArchive: testToolResultArchive({
+        archiveToolResult: async (event) => {
+          archivedBody = event.serializedResult;
+          return { artifactId: `artifact-${event.runtimeEventId}` };
+        },
+        readToolResultArchive: async (event) => {
+          if (event.originalBytes !== utf8Bytes(archivedBody)) {
+            return { ok: false, reason: 'size_mismatch' };
+          }
+          return {
+            ok: true,
+            serializedResult: event.bodySha256 === sha256(archivedBody) ? archivedBody : 'tampered',
+          };
+        },
+      }),
     });
 
     for await (const event of backend.send({
@@ -3787,15 +3798,17 @@ describe('AiSdkBackend model history', () => {
         },
         charsPerToken: 1,
       },
-      archiveToolResult: async (event) => {
-        archivedBodies.set(event.runtimeEventId, event.serializedResult);
-        return { artifactId: `artifact-${event.runtimeEventId}` };
-      },
-      readToolResultArchive: async (event) => {
-        readRuntimeEventIds.push(event.runtimeEventId);
-        const body = archivedBodies.get(event.runtimeEventId);
-        return body ? { ok: true, serializedResult: body } : { ok: false, reason: 'not_found' };
-      },
+      toolResultArchive: testToolResultArchive({
+        archiveToolResult: async (event) => {
+          archivedBodies.set(event.runtimeEventId, event.serializedResult);
+          return { artifactId: `artifact-${event.runtimeEventId}` };
+        },
+        readToolResultArchive: async (event) => {
+          readRuntimeEventIds.push(event.runtimeEventId);
+          const body = archivedBodies.get(event.runtimeEventId);
+          return body ? { ok: true, serializedResult: body } : { ok: false, reason: 'not_found' };
+        },
+      }),
       writeSynthesisCache: async (event) => {
         writeInputs.push({ turnId: event.turnId, query: event.source.query });
         return { blocks: [] };
@@ -3918,14 +3931,16 @@ describe('AiSdkBackend model history', () => {
             : {}),
           charsPerToken: CHARS_PER_TOKEN,
         },
-        archiveToolResult: async (event) => {
-          archivedBodies.set(event.runtimeEventId, event.serializedResult);
-          return { artifactId: `artifact-${event.runtimeEventId}` };
-        },
-        readToolResultArchive: async (event) => {
-          const body = archivedBodies.get(event.runtimeEventId);
-          return body ? { ok: true, serializedResult: body } : { ok: false, reason: 'not_found' };
-        },
+        toolResultArchive: testToolResultArchive({
+          archiveToolResult: async (event) => {
+            archivedBodies.set(event.runtimeEventId, event.serializedResult);
+            return { artifactId: `artifact-${event.runtimeEventId}` };
+          },
+          readToolResultArchive: async (event) => {
+            const body = archivedBodies.get(event.runtimeEventId);
+            return body ? { ok: true, serializedResult: body } : { ok: false, reason: 'not_found' };
+          },
+        }),
         writeSynthesisCache: async () => ({ blocks: [] }),
       });
       for await (const _event of backend.send({
@@ -4055,15 +4070,17 @@ describe('AiSdkBackend model history', () => {
         },
         charsPerToken: 1,
       },
-      archiveToolResult: async (event) => {
-        archivedBodies.set(event.runtimeEventId, event.serializedResult);
-        return { artifactId: `artifact-${event.runtimeEventId}` };
-      },
-      readToolResultArchive: async (event) => {
-        readRuntimeEventIds.push(event.runtimeEventId);
-        const body = archivedBodies.get(event.runtimeEventId);
-        return body ? { ok: true, serializedResult: body } : { ok: false, reason: 'not_found' };
-      },
+      toolResultArchive: testToolResultArchive({
+        archiveToolResult: async (event) => {
+          archivedBodies.set(event.runtimeEventId, event.serializedResult);
+          return { artifactId: `artifact-${event.runtimeEventId}` };
+        },
+        readToolResultArchive: async (event) => {
+          readRuntimeEventIds.push(event.runtimeEventId);
+          const body = archivedBodies.get(event.runtimeEventId);
+          return body ? { ok: true, serializedResult: body } : { ok: false, reason: 'not_found' };
+        },
+      }),
       loadSynthesisCache: async () => {
         loadCalls += 1;
         return { blocks: [block] };
@@ -4182,14 +4199,16 @@ describe('AiSdkBackend model history', () => {
         },
         charsPerToken: 1,
       },
-      archiveToolResult: async (event) => {
-        archivedBodies.set(event.runtimeEventId, event.serializedResult);
-        return { artifactId: `artifact-${event.runtimeEventId}` };
-      },
-      readToolResultArchive: async (event) => {
-        const body = archivedBodies.get(event.runtimeEventId);
-        return body ? { ok: true, serializedResult: body } : { ok: false, reason: 'not_found' };
-      },
+      toolResultArchive: testToolResultArchive({
+        archiveToolResult: async (event) => {
+          archivedBodies.set(event.runtimeEventId, event.serializedResult);
+          return { artifactId: `artifact-${event.runtimeEventId}` };
+        },
+        readToolResultArchive: async (event) => {
+          const body = archivedBodies.get(event.runtimeEventId);
+          return body ? { ok: true, serializedResult: body } : { ok: false, reason: 'not_found' };
+        },
+      }),
       writeSynthesisCache: async (input) => {
         writeInputs.push({
           sourceRefCount: input.source.retrievedArchiveRefs.length,
@@ -4314,15 +4333,17 @@ describe('AiSdkBackend model history', () => {
         },
         charsPerToken: 1,
       },
-      archiveToolResult: async (event) => {
-        archivedBodies.set(event.runtimeEventId, event.serializedResult);
-        return { artifactId: `artifact-${event.runtimeEventId}` };
-      },
-      readToolResultArchive: async (event) => {
-        readRuntimeEventIds.push(event.runtimeEventId);
-        const body = archivedBodies.get(event.runtimeEventId);
-        return body ? { ok: true, serializedResult: body } : { ok: false, reason: 'not_found' };
-      },
+      toolResultArchive: testToolResultArchive({
+        archiveToolResult: async (event) => {
+          archivedBodies.set(event.runtimeEventId, event.serializedResult);
+          return { artifactId: `artifact-${event.runtimeEventId}` };
+        },
+        readToolResultArchive: async (event) => {
+          readRuntimeEventIds.push(event.runtimeEventId);
+          const body = archivedBodies.get(event.runtimeEventId);
+          return body ? { ok: true, serializedResult: body } : { ok: false, reason: 'not_found' };
+        },
+      }),
       writeSynthesisCache: async (event) => {
         writeInputs.push({ turnId: event.turnId, query: event.source.query });
         return { blocks: [] };
@@ -8246,6 +8267,126 @@ describe('AiSdkBackend usage telemetry', () => {
     assert.equal(usageCheckpoints[0]?.costUsd, undefined);
   });
 
+  test('a pruned tool result is readable again through the tool its placeholder names', async () => {
+    // The whole loop through real dispatch (#2026): the budget prunes an
+    // oversized result, the runtime mints a placeholder naming `ArchiveRead`,
+    // the model calls it with the ref that placeholder carried, and the body
+    // lands back in the conversation. Advertising the decoder is only half the
+    // invariant; the other half is that calling it works from inside the turn.
+    const durable = durableTurnHarness('turn-1', 'read the big file');
+    const largeBody = 'ARCHIVED_BODY_SENTINEL'.repeat(200);
+    const store = new Map<string, string>();
+    const prompts: unknown[] = [];
+    let streamCalls = 0;
+    const model = new MockLanguageModelV4({
+      doStream: async ({ prompt }) => {
+        streamCalls += 1;
+        prompts.push(prompt);
+        const call = (toolCallId: string, toolName: string, input: unknown) =>
+          [
+            { type: 'stream-start', warnings: [] },
+            { type: 'tool-call', toolCallId, toolName, input: JSON.stringify(input) },
+            {
+              type: 'finish',
+              finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+              usage: {
+                inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+                outputTokens: { total: 1, text: 1, reasoning: 0 },
+              },
+            },
+          ] as LanguageModelV4StreamPart[];
+        const chunks: LanguageModelV4StreamPart[] =
+          streamCalls === 1
+            ? call('tool-1', 'Read', { path: 'big.md' })
+            : // The newest completed step is never pruned, so a second call is
+              // what makes the Read result stale enough to be archived.
+              streamCalls === 2
+              ? call('tool-2', 'Bash', { cmd: 'continue' })
+              : streamCalls === 3
+                ? call('tool-3', 'ArchiveRead', {
+                    // Read the ref out of the placeholder the runtime just
+                    // handed us, exactly as a model would.
+                    ref: /maka:\/\/archive\/[^"\\]+/.exec(JSON.stringify(prompt))?.[0] ?? 'missing',
+                    operation: 'read',
+                  })
+                : [
+                    { type: 'stream-start', warnings: [] },
+                    {
+                      type: 'finish',
+                      finishReason: { unified: 'stop', raw: 'stop' },
+                      usage: {
+                        inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+                        outputTokens: { total: 1, text: 1, reasoning: 0 },
+                      },
+                    },
+                  ];
+        return {
+          stream: simulateReadableStream({ chunks, initialDelayInMs: null, chunkDelayInMs: null }),
+        };
+      },
+    });
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      tools: [
+        {
+          name: 'Read',
+          description: 'Read description',
+          parameters: z.object({ path: z.string() }),
+          impl: async () => ({ body: largeBody }),
+        },
+        {
+          name: 'Bash',
+          description: 'Bash description',
+          parameters: z.object({ cmd: z.string() }),
+          impl: async () => ({ body: 'small' }),
+        },
+      ],
+      contextBudget: {
+        activeToolResultPrune: { enabled: true, maxCurrentResultEstimatedTokens: 1 },
+      },
+      // A real store, so the decoder has to reach what the writer actually wrote.
+      toolResultArchive: createToolResultArchiveCapability({
+        archiveToolResult: async (event) => {
+          const artifactId = `artifact-${store.size + 1}`;
+          store.set(artifactId, event.serializedResult);
+          return { artifactId };
+        },
+        readToolResultArchive: async () => ({ ok: false, reason: 'not_found' }),
+        readArchivedToolResultResource: async (event) => {
+          const serializedResult = store.get(event.artifactId);
+          return serializedResult === undefined
+            ? { ok: false, reason: 'not_found' }
+            : { ok: true, serializedResult };
+        },
+      }),
+      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    for await (const event of backend.send(durable.input())) durable.record(event);
+
+    assert.match(
+      store.get('artifact-1') ?? '',
+      /ARCHIVED_BODY_SENTINEL/,
+      'the oversized Read result must have been archived',
+    );
+    const thirdPrompt = JSON.stringify(prompts[2]);
+    assert.doesNotMatch(thirdPrompt, /ARCHIVED_BODY_SENTINEL/);
+    assert.match(thirdPrompt, /maka:\/\/archive\//);
+    assert.match(
+      JSON.stringify(prompts[3]),
+      /ARCHIVED_BODY_SENTINEL/,
+      'the ArchiveRead result must carry the archived body back into the conversation',
+    );
+  });
+
   test('records active tool-result prune diagnostics in usage telemetry', async () => {
     const durable = durableTurnHarness('turn-1', 'hi');
     const messages: unknown[] = [];
@@ -8337,7 +8478,9 @@ describe('AiSdkBackend usage telemetry', () => {
       contextBudget: {
         activeToolResultPrune: { enabled: true, maxCurrentResultEstimatedTokens: 1 },
       },
-      archiveToolResult: async () => ({ artifactId: 'artifact-tool-1' }),
+      toolResultArchive: testToolResultArchive({
+        archiveToolResult: async () => ({ artifactId: 'artifact-tool-1' }),
+      }),
       loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
       newId: idGenerator(),
       now: monotonicClock(),
@@ -8450,7 +8593,9 @@ describe('AiSdkBackend usage telemetry', () => {
           maxSummaryEstimatedTokens: 512,
         },
       },
-      archiveToolResult: async () => ({ artifactId: 'artifact-tool-1' }),
+      toolResultArchive: testToolResultArchive({
+        archiveToolResult: async () => ({ artifactId: 'artifact-tool-1' }),
+      }),
       loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
       newId: idGenerator(),
       now: monotonicClock(),
@@ -8717,10 +8862,12 @@ describe('AiSdkBackend usage telemetry', () => {
         },
       ],
       contextBudget: semanticCompactContextBudget('replace'),
-      archiveToolResult: async () => {
-        archiveCalls += 1;
-        return { artifactId: 'archived-covered-semantic-result' };
-      },
+      toolResultArchive: testToolResultArchive({
+        archiveToolResult: async () => {
+          archiveCalls += 1;
+          return { artifactId: 'archived-covered-semantic-result' };
+        },
+      }),
       loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
       newId: idGenerator(),
       now: monotonicClock(),
@@ -8883,7 +9030,9 @@ describe('AiSdkBackend usage telemetry', () => {
         },
       ],
       contextBudget: semanticCompactContextBudget('validate_only'),
-      archiveToolResult: async () => ({ artifactId: 'archived-covered-semantic-result' }),
+      toolResultArchive: testToolResultArchive({
+        archiveToolResult: async () => ({ artifactId: 'archived-covered-semantic-result' }),
+      }),
       loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
       newId: idGenerator(),
       now: monotonicClock(),
@@ -8961,7 +9110,9 @@ describe('AiSdkBackend usage telemetry', () => {
         ...budget,
         semanticCompact: { ...budget.semanticCompact, summarizerModel: 'summarizer-model-id' },
       },
-      archiveToolResult: async () => ({ artifactId: 'archived-covered-semantic-result' }),
+      toolResultArchive: testToolResultArchive({
+        archiveToolResult: async () => ({ artifactId: 'archived-covered-semantic-result' }),
+      }),
       loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
       newId: idGenerator(),
       now: monotonicClock(),
@@ -9949,6 +10100,52 @@ describe('AiSdkBackend context budget and prompt attribution', () => {
     assert.equal(
       oldReplayResult?.kind === 'tool_result' ? oldReplayResult.toolName : undefined,
       'Read',
+    );
+  });
+
+  test('replay hands the model a bounded summary for an Edit file_diff result, not the diff', () => {
+    const diff = ['--- a/a.ts', '+++ b/a.ts', '@@ -1,2 +1,2 @@', ' keep', '-old', '+new'].join(
+      '\n',
+    );
+    const events = [
+      runtimeEvent({
+        id: 'edit-call',
+        turnId: 't1',
+        role: 'model',
+        author: 'agent',
+        content: {
+          kind: 'function_call',
+          id: 'tool-edit',
+          name: 'Edit',
+          args: { path: 'a.ts' },
+        },
+      }),
+      runtimeEvent({
+        id: 'edit-result',
+        turnId: 't1',
+        role: 'tool',
+        author: 'tool',
+        content: {
+          kind: 'function_response',
+          id: 'tool-edit',
+          name: 'Edit',
+          result: { kind: 'file_diff', paths: ['a.ts'], diff },
+        },
+      }),
+    ];
+
+    const plan = buildRuntimeEventModelReplayPlan(events);
+    const result = plan.items.find(
+      (item) => item.kind === 'tool_result' && item.toolCallId === 'tool-edit',
+    );
+
+    assert.equal(result?.kind === 'tool_result' ? result.output : undefined, 'Edited a.ts (+1 -1)');
+    // The durable event itself keeps the full diff — only the model-facing
+    // projection is bounded.
+    const durable = events[1].content;
+    assert.equal(
+      durable?.kind === 'function_response' ? (durable.result as { kind: string }).kind : undefined,
+      'file_diff',
     );
   });
 
@@ -12992,18 +13189,20 @@ async function runArchiveGatedReplay(input: {
       },
       charsPerToken: 1,
     },
-    archiveToolResult: async (event) => {
-      archivedBodies.set(event.runtimeEventId, event.serializedResult);
-      return { artifactId: `artifact-${event.runtimeEventId}` };
-    },
-    readToolResultArchive: async (event) => {
-      readRuntimeEventIds.push(event.runtimeEventId);
-      const body = archivedBodies.get(event.runtimeEventId);
-      assert.ok(body);
-      return event.bodySha256 === sha256(body)
-        ? { ok: true, serializedResult: body }
-        : { ok: false, reason: 'corrupt' };
-    },
+    toolResultArchive: testToolResultArchive({
+      archiveToolResult: async (event) => {
+        archivedBodies.set(event.runtimeEventId, event.serializedResult);
+        return { artifactId: `artifact-${event.runtimeEventId}` };
+      },
+      readToolResultArchive: async (event) => {
+        readRuntimeEventIds.push(event.runtimeEventId);
+        const body = archivedBodies.get(event.runtimeEventId);
+        assert.ok(body);
+        return event.bodySha256 === sha256(body)
+          ? { ok: true, serializedResult: body }
+          : { ok: false, reason: 'corrupt' };
+      },
+    }),
   });
   const selectedEvents = archiveGatedTurnEvents('a', input.selectedPath, input.selectedResult);
   const unselectedEvents = archiveGatedTurnEvents(

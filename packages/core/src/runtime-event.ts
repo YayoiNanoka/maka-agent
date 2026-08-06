@@ -24,12 +24,6 @@ import { INTERACTION_ID_MAX_BYTES, INTERACTION_TOOL_NAME_MAX_BYTES } from './int
 import type { PermissionRequestPayload, PermissionResponse } from './permission.js';
 import type { TurnOrigin } from './runtime-inputs.js';
 import type { UserQuestionRequest } from './user-question.js';
-import type {
-  CacheMissInputSource,
-  ContextBudgetDiagnostic,
-  PrefixChangeReason,
-  PromptSegmentEstimate,
-} from './usage-stats/types.js';
 import {
   defineObjectShape,
   hasExactShape,
@@ -43,7 +37,7 @@ import {
   isPermissionRequestPayload,
   isUserQuestionRequest,
 } from './interaction-record-schema.js';
-import { isTokenUsageFields } from './usage-record-schema.js';
+import { isTokenUsageFields, type TokenUsageFields } from './usage-record-schema.js';
 import { isToolRecoveryFactEnvelope, type ToolRecoveryFactEnvelope } from './tool-recovery-fact.js';
 import {
   isRuntimeEventWorkspaceFactEnvelope,
@@ -207,32 +201,7 @@ export type RuntimeEventContentKind = (typeof RUNTIME_EVENT_CONTENT_KINDS)[numbe
  * Token usage carried as a runtime action rather than a content payload.
  * Mirrors TokenUsageEvent / TokenUsageMessage so projections can map 1:1.
  */
-export interface RuntimeEventTokenUsage {
-  input: number;
-  output: number;
-  cacheHitInput?: number;
-  cacheMissInput?: number;
-  cacheWriteInput?: number;
-  cacheMissInputSource?: CacheMissInputSource;
-  reasoning?: number;
-  total?: number;
-  rawFinishReason?: string;
-  /** Number of provider runtime/tool-loop steps represented by this usage. */
-  runtimeSteps?: number;
-  /** Backward-compatible alias for cacheHitInput. */
-  cacheRead?: number;
-  /** Backward-compatible alias for cacheWriteInput. */
-  cacheCreation?: number;
-  costUsd?: number;
-  systemPromptHash?: string;
-  contextRemaining?: number;
-  prefixHash?: string;
-  prefixChangeReason?: PrefixChangeReason;
-  requestShapeHash?: string;
-  requestShapeChangeReason?: PrefixChangeReason;
-  promptSegments?: PromptSegmentEstimate[];
-  contextBudget?: ContextBudgetDiagnostic;
-}
+export interface RuntimeEventTokenUsage extends TokenUsageFields {}
 
 /**
  * Permission decision attached to an event. Runtime history may retain the
@@ -356,6 +325,10 @@ export interface RuntimeEventRefs {
   artifactId?: string;
   /** Runtime-owned durable identity for one tool side-effect boundary. */
   operationId?: string;
+  /** Provider tool-call id of the enclosing exec operation. */
+  parentToolCallId?: string;
+  /** Runtime-owned durable identity of the enclosing exec operation. */
+  parentOperationId?: string;
   /**
    * Assistant step id for a function_call event: the id of the step's
    * text/thinking messages (their `providerEventId`). Model replay pairs a
@@ -418,6 +391,10 @@ export interface RuntimeEvent {
 
   role: RuntimeEventRole;
   author: RuntimeEventAuthor;
+  /** Execution surface that produced this fact; absent on legacy ledgers. */
+  origin?: 'provider' | 'code_mode';
+  /** Explicit provider-history policy; absent means visible for legacy compatibility. */
+  modelVisibility?: 'visible' | 'hidden';
   /** Lifecycle assertion; omitted on ordinary in-flight content events. */
   status?: RuntimeEventStatus;
 
@@ -428,7 +405,7 @@ export interface RuntimeEvent {
 
 const RUNTIME_EVENT_SHAPE = defineObjectShape<RuntimeEvent>()(
   ['id', 'invocationId', 'runId', 'sessionId', 'turnId', 'ts', 'partial', 'role', 'author'],
-  ['branch', 'status', 'content', 'actions', 'refs'],
+  ['branch', 'origin', 'modelVisibility', 'status', 'content', 'actions', 'refs'],
 );
 const TEXT_CONTENT_SHAPE = defineObjectShape<RuntimeEventTextContent>()(
   ['kind', 'text'],
@@ -543,6 +520,7 @@ const RUNTIME_TOKEN_USAGE_SHAPE = defineObjectShape<RuntimeEventTokenUsage>()(
     'requestShapeChangeReason',
     'promptSegments',
     'contextBudget',
+    'providerRequestTraceId',
   ],
 );
 const RUNTIME_REFS_SHAPE = defineObjectShape<RuntimeEventRefs>()(
@@ -555,6 +533,8 @@ const RUNTIME_REFS_SHAPE = defineObjectShape<RuntimeEventRefs>()(
     'providerRequestTraceId',
     'artifactId',
     'operationId',
+    'parentToolCallId',
+    'parentOperationId',
     'stepId',
     'sourceInvocationId',
     'sourceRunId',
@@ -582,6 +562,10 @@ export function decodeRuntimeEvent(value: unknown): RuntimeEvent {
     typeof value.partial !== 'boolean' ||
     !isRuntimeEventRole(value.role) ||
     !isRuntimeEventAuthor(value.author) ||
+    (value.origin !== undefined && value.origin !== 'provider' && value.origin !== 'code_mode') ||
+    (value.modelVisibility !== undefined &&
+      value.modelVisibility !== 'visible' &&
+      value.modelVisibility !== 'hidden') ||
     (value.status !== undefined && !isRuntimeEventStatus(value.status)) ||
     (value.content !== undefined && !isRuntimeEventContent(value.content)) ||
     (value.actions !== undefined && !isRuntimeEventActions(value.actions)) ||
@@ -861,6 +845,8 @@ function isRuntimeEventRefs(value: unknown): value is RuntimeEventRefs {
       value.providerRequestTraceId,
       value.artifactId,
       value.operationId,
+      value.parentToolCallId,
+      value.parentOperationId,
       value.stepId,
       value.sourceInvocationId,
       value.sourceRunId,
@@ -901,6 +887,7 @@ export function isPartialRuntimeEvent(event: RuntimeEvent): boolean {
  * filtering (partial chunks are never replayed into the next model call).
  */
 export function runtimeEventHasModelVisibleContent(event: RuntimeEvent): boolean {
+  if (event.modelVisibility === 'hidden') return false;
   const content = event.content;
   if (!content) return false;
   switch (content.kind) {

@@ -1,5 +1,10 @@
 import { useEffect, useRef, type ComponentType } from 'react';
-import { isInFlightToolStatus, type ToolResultContent, type UiLocale } from '@maka/core';
+import {
+  countDiffLineStats,
+  isInFlightToolStatus,
+  type ToolResultContent,
+  type UiLocale,
+} from '@maka/core';
 import {
   Check,
   Clock,
@@ -283,30 +288,44 @@ export function ToolCallDetail({ item }: { item: ToolActivityItem }) {
 export function ToolTrow({ items }: { items: ToolActivityItem[] }) {
   const locale = useUiLocale();
   if (items.length === 0) return null;
-  const calls: ChatToolCallItem[] = items.map((item) => ({
-    key: item.toolUseId,
-    // The name is what a person reads to tell one call from the next, and for
-    // Computer Use the display name is "Maka Computer" — a noun, identical on
-    // every row of a ten-call turn. A label derived from the call's own
-    // arguments says what happened instead.
-    name: computerActionLabel(item, locale) ?? resolveToolDisplayName(item, locale),
-    status: astryxToolStatus(item),
-    target: item.intent ? formatToolIntent(item.intent) : undefined,
-    duration: formatDuration(item.durationMs) ?? undefined,
-    errorMessage: toolCallErrorMessage(item, locale),
-    stats: outcomeWord(item, locale),
-    resultDetail: (
-      <ToolDetailReveal>
-        <ToolCallDetail item={item} />
-      </ToolDetailReveal>
-    ),
-  }));
+  const calls: ChatToolCallItem[] = items.map((item) => {
+    const diffStats =
+      item.result?.kind === 'file_diff' ? diffRowStats(item.result.diff) : undefined;
+    return {
+      key: item.toolUseId,
+      // The name is what a person reads to tell one call from the next, and for
+      // Computer Use the display name is "Maka Computer" — a noun, identical on
+      // every row of a ten-call turn. A label derived from the call's own
+      // arguments says what happened instead.
+      name: computerActionLabel(item, locale) ?? resolveToolDisplayName(item, locale),
+      status: astryxToolStatus(item),
+      target: item.intent ? formatToolIntent(item.intent) : undefined,
+      duration: formatDuration(item.durationMs) ?? undefined,
+      errorMessage: toolCallErrorMessage(item, locale),
+      stats: outcomeWord(item, locale),
+      ...(diffStats ?? {}),
+      resultDetail: (
+        <ToolDetailReveal>
+          <ToolCallDetail item={item} />
+        </ToolDetailReveal>
+      ),
+    };
+  });
 
   // No defaultIsExpanded: opening a group is the reader's move. Seeding it open
   // from in-flight status latches, since the prop is uncontrolled and the
   // timeline key is stable (see timelineEntryKey). Cost: the collapsed header
   // projects the last call, which can settle before a parallel sibling.
   return <ChatToolCalls calls={calls} />;
+}
+
+/** Green `+N` / red `-N` on the row, from the shared structural parse; zero counts stay unpainted. */
+function diffRowStats(diff: string): { additions?: number; deletions?: number } {
+  const { additions, deletions } = countDiffLineStats(diff);
+  return {
+    ...(additions > 0 ? { additions } : {}),
+    ...(deletions > 0 ? { deletions } : {}),
+  };
 }
 
 function astryxToolStatus(item: ToolActivityItem): ChatToolCallItem['status'] {

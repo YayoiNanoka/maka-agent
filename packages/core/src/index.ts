@@ -10,6 +10,7 @@
 export * from './mcp.js';
 export * from './collaboration.js';
 export * from './orchestration.js';
+export * from './tool-mode.js';
 export * from './swarm-command.js';
 export * from './graph-command.js';
 export * from './plan.js';
@@ -505,6 +506,12 @@ export {
   type QuietPreview,
   type ToolInvocationInput,
 } from './tool-quiet-preview.js';
+export {
+  countDiffLineStats,
+  parseUnifiedDiffRows,
+  type UnifiedDiffRow,
+  type UnifiedDiffRowKind,
+} from './unified-diff.js';
 export { redactSecrets as displayRedactSecrets } from './display-redaction.js';
 export {
   SHELL_RUN_ID_MAX_CHARS,
@@ -512,6 +519,12 @@ export {
   SHELL_RUN_ACTIVE_STATUSES,
   SHELL_RUN_STATUSES,
   SHELL_RUN_TERMINAL_STATUSES,
+  assertShellRunIdentifier,
+  assertShellRunPatch,
+  assertShellRunSessionId,
+  nextShellRunRecord,
+  normalizeShellRunRecord,
+  shellRunNotFoundError,
   isShellOutput,
   isActiveShellRunStatus,
   isShellRunId,
@@ -1081,6 +1094,10 @@ export {
   sanitizeForeignTitle,
   stripEnvelopeTags,
 } from './foreign-session.js';
+
+// text-sanitize.ts (#1404)
+export type { SanitizeUnicodeOptions } from './text-sanitize.js';
+export { sanitizeUnicodeText } from './text-sanitize.js';
 
 // task-ledger.ts (main agent session task tracking)
 export type {

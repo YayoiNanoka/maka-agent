@@ -282,7 +282,6 @@ export async function createExecutionRuntimeHostComposition(
       attachmentResources: createArtifactAttachmentResourceReader({
         artifactStore: openedArtifactStore,
       }),
-      archiveResources: executionArtifacts,
       backgroundTasks: runtimeResources,
       ptyControls: runtimeResources,
       snapshotImage: createReadImageSnapshotter(openedArtifactStore),
@@ -862,6 +861,7 @@ export async function createExecutionRuntimeHostComposition(
     const connectionEffects = new HostConnectionEffectCoordinator({
       stores: runtimePolicyStores,
       activation: runtimePolicyActivation,
+      oauthCredentials,
       onCommittedMutation: registerBackendInvalidation,
     });
     const sessionCatalog = new HostSessionCatalogCoordinator({

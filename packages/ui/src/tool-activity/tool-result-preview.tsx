@@ -2,6 +2,7 @@ import { useEffect, useRef, type ReactNode } from 'react';
 import {
   isShellOutput,
   normalizeSearchUrl,
+  parseUnifiedDiffRows,
   ptyHumanTerminalText,
   readWriteStdinInputPreview,
   type ShellOutput,
@@ -212,8 +213,15 @@ export function ToolResultPreview(props: {
     );
   }
 
-  // file_write / image / summary / unknown — show a compact descriptor so the
-  // user knows what kind landed without dumping binary or storage refs.
+  // image / summary / unknown — show a compact descriptor so the user knows
+  // what kind landed without dumping binary or storage refs.
+  if (content.kind === 'file_write') {
+    return (
+      <div data-kind={content.kind}>
+        <ToolCodeBlock code={`Wrote ${content.bytes} bytes to ${content.path}`} />
+      </div>
+    );
+  }
   return (
     <div data-kind={content.kind}>
       <ToolCodeBlock code={`[${content.kind}]`} />
@@ -295,6 +303,31 @@ export function diffLineKind(line: string): 'add' | 'del' | 'hunk' | 'meta' | 'c
  * `previewVariants` has always declared for exactly this — the call site was
  * what went missing.
  */
+type DiffPreviewRow = {
+  kind: 'add' | 'del' | 'ctx' | 'meta';
+  text: string;
+  lineNumber?: number;
+};
+
+/**
+ * Display rows for the gutter, from the shared structural parse in
+ * `@maka/core`: hunk headers are consumed into the line numbers (a deletion
+ * shows its old-side number, additions and context the new-side one) and file
+ * headers never survive the parse — so a deleted SQL `-- a` comment can no
+ * longer be mistaken for one. A foreign diff with no hunk headers degrades
+ * to unnumbered meta rows.
+ */
+function diffPreviewRows(lines: string[]): DiffPreviewRow[] {
+  return parseUnifiedDiffRows(lines.join('\n')).flatMap((row): DiffPreviewRow[] => {
+    if (row.kind === 'hunk') return [];
+    if (row.kind === 'meta') return [{ kind: 'meta' as const, text: row.text }];
+    const lineNumber = row.kind === 'del' ? row.oldLine : row.newLine;
+    return [
+      { kind: row.kind, text: row.text, ...(lineNumber !== undefined ? { lineNumber } : {}) },
+    ];
+  });
+}
+
 function FileDiffPreview(props: { diff: string; paths: string[] }) {
   const copy = getToolActivityCopy(useUiLocale()).result;
   // Apply UI-level redaction then cap the displayed lines. Both are
@@ -307,6 +340,13 @@ function FileDiffPreview(props: { diff: string; paths: string[] }) {
   // a blank tinted row at the end of every diff.
   const lines = body.split('\n');
   if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  // The copyable body keeps the full standard diff; the rendered rows come
+  // from the structural parse, which drops the redundant file headers.
+  const rows = diffPreviewRows(lines);
+  const numbered = rows.some((row) => row.lineNumber !== undefined);
+  const digits = numbered
+    ? String(rows.reduce((max, row) => Math.max(max, row.lineNumber ?? 0), 0)).length
+    : 0;
   return (
     <ToolOutputSurface
       kind="file_diff"
@@ -314,15 +354,20 @@ function FileDiffPreview(props: { diff: string; paths: string[] }) {
       body={body}
     >
       <pre className={previewVariants({ part: 'diff-body' })}>
-        {lines.map((line, index) => (
+        {rows.map((row, index) => (
           <span
             // Index keys: the list is a re-split of one immutable string, so a
             // line's position is its identity.
             key={index}
             className={previewVariants({ part: 'diff-line' })}
-            data-line={diffLineKind(line)}
+            data-line={row.kind}
           >
-            {line}
+            {numbered && (
+              <span className="maka-tool-diff-gutter" style={{ minWidth: `${digits}ch` }}>
+                {row.lineNumber ?? ''}
+              </span>
+            )}
+            {row.text}
             {'\n'}
           </span>
         ))}

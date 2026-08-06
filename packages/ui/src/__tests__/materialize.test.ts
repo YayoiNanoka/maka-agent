@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import type { AttachmentRef, StoredMessage } from "@maka/core";
 import {
   materializeChat,
+  materializeTools,
   materializeTurns,
   overlayLiveTurn,
   type TurnTimelineItem,
@@ -188,6 +189,37 @@ describe("materializeChat attachments", () => {
 function userMsg(turnId: string, ts: number, text: string): StoredMessage {
   return { type: "user", id: `u-${turnId}`, turnId, ts, text };
 }
+
+test('retains persisted nested tool activity identity', () => {
+  const [tool] = materializeTools([{
+    type: 'tool_call',
+    id: 'nested-1',
+    turnId: 'turn-1',
+    ts: 1,
+    toolName: 'Read',
+    args: { path: 'README.md' },
+    origin: 'code_mode',
+    modelVisibility: 'hidden',
+    parentToolCallId: 'exec-1',
+    parentOperationId: 'exec-operation-1',
+  }]);
+
+  assert.deepEqual(tool, {
+    toolUseId: 'nested-1',
+    toolName: 'Read',
+    activityKind: undefined,
+    displayName: undefined,
+    intent: undefined,
+    status: 'interrupted',
+    args: { path: 'README.md' },
+    result: undefined,
+    durationMs: undefined,
+    origin: 'code_mode',
+    modelVisibility: 'hidden',
+    parentToolCallId: 'exec-1',
+    parentOperationId: 'exec-operation-1',
+  });
+});
 
 function shellRunResult(revision: number) {
   return {
@@ -555,6 +587,72 @@ describe("live tool status over persisted", () => {
       tools?.kind === "tools" ? tools.items[0]?.status : undefined,
       "running",
     );
+  });
+
+  test("keeps durable tool detail while a Runtime Host Turn is still live", () => {
+    const settled = materializeTurns([
+      userMsg("t1", 1, "use the computer"),
+      {
+        type: "turn_state",
+        id: "s1",
+        turnId: "t1",
+        ts: 2,
+        status: "running",
+        partialOutputRetained: false,
+      },
+      {
+        type: "tool_call",
+        id: "computer-1",
+        turnId: "t1",
+        ts: 3,
+        toolName: "maka_computer",
+        args: { action: "click_element", element_id: "615" },
+      },
+      {
+        type: "tool_result",
+        id: "result-1",
+        turnId: "t1",
+        ts: 4,
+        toolUseId: "computer-1",
+        isError: false,
+        content: { kind: "text", text: "unsupported_action" },
+      },
+    ]);
+
+    const turns = overlayLiveTurn(settled, {
+      turnId: "t1",
+      phase: "streamed",
+      steps: [
+        {
+          stepId: "tool:computer-1",
+          tools: [
+            {
+              toolUseId: "computer-1",
+              toolName: "maka_computer",
+              status: "running",
+              args: undefined,
+              // Runtime Host live events carry lifecycle but not the durable
+              // result payload.
+              result: { kind: "text", text: "" },
+            },
+          ],
+        },
+      ],
+    });
+
+    const toolGroup = turns
+      .find((turn) => turn.turnId === "t1")
+      ?.timeline.find((item: TurnTimelineItem) => item.kind === "tools");
+    const tool = toolGroup?.kind === "tools" ? toolGroup.items[0] : undefined;
+    assert.deepEqual(tool?.args, {
+      action: "click_element",
+      element_id: "615",
+    });
+    assert.deepEqual(tool?.result, {
+      kind: "text",
+      text: "unsupported_action",
+    });
+    assert.equal(tool?.status, "running");
   });
 
   // Deleting the merge exception rests entirely on the live side carrying its

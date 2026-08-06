@@ -67,6 +67,10 @@ export interface ToolActivityItem {
   activityKind?: ToolActivityKind;
   displayName?: string;
   intent?: string;
+  origin?: 'provider' | 'code_mode';
+  modelVisibility?: 'visible' | 'hidden';
+  parentToolCallId?: string;
+  parentOperationId?: string;
   /**
    * Assistant step this tool belongs to (equals the step's AssistantMessage
    * id). Populated from the persisted `tool_call.stepId`, or from the live
@@ -193,6 +197,10 @@ export function materializeTools(
         activityKind: call.activityKind,
         displayName: call.displayName,
         intent: call.intent,
+        ...(call.origin !== undefined ? { origin: call.origin } : {}),
+        ...(call.modelVisibility !== undefined ? { modelVisibility: call.modelVisibility } : {}),
+        ...(call.parentToolCallId !== undefined ? { parentToolCallId: call.parentToolCallId } : {}),
+        ...(call.parentOperationId !== undefined ? { parentOperationId: call.parentOperationId } : {}),
         ...(call.stepId !== undefined ? { stepId: call.stepId } : {}),
         status: result
           ? materializeToolResultStatus(result)
@@ -211,10 +219,13 @@ function materializeToolResultStatus(
 }
 
 /**
- * Merge live tool state on top of the persisted tool. Live normally wins: its
- * events arrive ahead of the persisted JSONL refresh, so it carries the most
- * current status, and preferring the lagging side painted every long command
- * as interrupted until it exited.
+ * Merge live tool state on top of the persisted tool. Live owns transient
+ * state: its events arrive ahead of the persisted transcript refresh, so it
+ * carries the most current status and output chunks. The durable transcript
+ * fills call arguments and settled results when the live path has no payload.
+ * Runtime Host live events deliberately omit both; letting those empty
+ * projections win made an expanded tool row blank until the whole Turn
+ * settled.
  *
  * The exception is a turn that has already ended. Live only stays current
  * while events keep arriving, and the subscription does not replay — a missed
@@ -233,6 +244,20 @@ function mergeLiveOverPersisted(
   turnSettled: boolean,
 ): ToolActivityItem {
   const merged: ToolActivityItem = { ...persisted, ...live };
+  if (live.args === undefined) {
+    merged.args = persisted.args;
+  }
+  const liveResultIsEmpty =
+    live.result === undefined ||
+    (live.result.kind === "text" && live.result.text.length === 0);
+  if (persisted.result !== undefined && liveResultIsEmpty) {
+    // Runtime Host represents its deliberately omitted result payload as an
+    // empty text result at the SessionEvent compatibility seam. A transcript
+    // refresh can also win the race with the terminal live event, leaving no
+    // live result at all. In both cases the committed result supplies detail
+    // without taking a newer, meaningful live result away.
+    merged.result = persisted.result;
+  }
   // A settled turn always yields a settled persisted status — materializeTools
   // only reads a tool as in-flight while the turn record says `running` — so
   // this needs no guard on the persisted side.
