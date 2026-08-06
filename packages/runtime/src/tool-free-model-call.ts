@@ -51,14 +51,11 @@ export class ProviderPrefixModelCallUnavailableError extends Error {
 export async function generateProviderPrefixModelCall(
   input: ProviderPrefixModelCallInput,
 ): Promise<ProviderPrefixModelCallResult> {
-  if (
-    input.toolChoicePolicy === 'omit' &&
-    input.activeTools.some((name) => input.tools[name]?.kind === 'provider')
-  ) {
-    // Anthropic has no provider-level `none` choice. Client Tool calls remain
-    // Runtime-owned and can be rejected after generation, but provider-native
-    // Tools execute remotely before a response exists. Never dispatch that
-    // unsafe auxiliary request.
+  if (input.activeTools.some((name) => input.tools[name]?.kind === 'provider')) {
+    // Provider-native Tools may execute remotely before a response exists, and
+    // compatible endpoints are not guaranteed to honor `toolChoice: 'none'`.
+    // Never dispatch an auxiliary request with one active, regardless of the
+    // transport-specific Tool-choice policy.
     throw new ProviderPrefixModelCallUnavailableError(
       'Memory extraction is unavailable with active provider-native Tools',
     );

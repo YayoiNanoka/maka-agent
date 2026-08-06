@@ -202,31 +202,33 @@ describe('Memory Extraction provider prefix', () => {
     assert.deepEqual(body?.tool_choice, { type: 'auto' });
   });
 
-  test('does not dispatch Anthropic auxiliary calls with active provider-native Tools', async () => {
-    let dispatched = false;
-    const model = new MockLanguageModelV4({
-      doGenerate: async () => {
-        dispatched = true;
-        throw new Error('provider request must not run');
-      },
-    });
-
-    await assert.rejects(
-      generateProviderPrefixModelCall({
-        model,
-        messages: [{ role: 'user', content: 'Extract memory without using tools.' }],
-        tools: {
-          WebSearch: {
-            kind: 'provider',
-            providerTool: { kind: 'anthropic-web-search-20250305', maxUses: 8 },
-          },
+  test('does not dispatch any auxiliary transport with active provider-native Tools', async () => {
+    for (const toolChoicePolicy of ['none', 'omit'] as const) {
+      let dispatched = false;
+      const model = new MockLanguageModelV4({
+        doGenerate: async () => {
+          dispatched = true;
+          throw new Error('provider request must not run');
         },
-        activeTools: ['WebSearch'],
-        toolChoicePolicy: 'omit',
-      }),
-      /unavailable with active provider-native Tools/,
-    );
-    assert.equal(dispatched, false);
+      });
+
+      await assert.rejects(
+        generateProviderPrefixModelCall({
+          model,
+          messages: [{ role: 'user', content: 'Extract memory without using tools.' }],
+          tools: {
+            WebSearch: {
+              kind: 'provider',
+              providerTool: { kind: 'anthropic-web-search-20250305', maxUses: 8 },
+            },
+          },
+          activeTools: ['WebSearch'],
+          toolChoicePolicy,
+        }),
+        /unavailable with active provider-native Tools/,
+      );
+      assert.equal(dispatched, false, `${toolChoicePolicy} must fail before provider dispatch`);
+    }
   });
 
   test('disables AI SDK retries for the isolated canonicalizer request', async () => {

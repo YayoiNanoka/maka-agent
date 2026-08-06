@@ -26,6 +26,125 @@ import { HostMemoryExtractionCoordinator } from '../server/memory-extraction-coo
 import { MemoryExtractionSessionLane } from '../server/memory-extraction-session-lane.js';
 
 describe('HostMemoryExtractionCoordinator', () => {
+  test('extracts incidental memory through the post-terminal memory_extract path', async () => {
+    await withMemoryWriter(async (writer) => {
+      const item = proposalItem('The project uses Rust.', 'workspace', 'event-user-1', 'uses Rust');
+      const entries = [
+        {
+          ordinal: 1,
+          event: textEvent('event-user-1', 'run-1', 'turn-1', 'The project uses Rust.'),
+        },
+        {
+          ordinal: 2,
+          event: modelTextEvent('event-terminal-1', 'run-1', 'turn-1', 'Understood.'),
+        },
+      ];
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const extractionCompleted = completionSignal();
+      const coordinator = createCoordinator({
+        writer,
+        entries,
+        outputs: [extractProposal(item), canonicalization(item)],
+        observed,
+        onResidencyRelease: extractionCompleted.resolve,
+      });
+
+      coordinator
+        .sourceCapabilities()
+        .extract(
+          extractSnapshot(
+            'run-1',
+            'turn-1',
+            'event-terminal-1',
+            'The project uses Rust.',
+            'event-user-1',
+          ),
+        );
+
+      await extractionCompleted.promise;
+      const stored = await writer.searchByKeys({
+        terms: ['response preference'],
+        match: 'exact',
+        workspaceKey: '/workspace/maka',
+      });
+      assert.deepEqual(
+        stored.map(({ item: storedItem }) => storedItem.content),
+        ['The project uses Rust.'],
+      );
+      assert.equal(observed.length, 2);
+      assert.equal(observed[0]!.snapshot.trigger, 'extract');
+      assert.equal(observed[0]!.snapshot.terminalEventId, 'event-terminal-1');
+      await coordinator.close();
+    });
+  });
+
+  test('rejects requestedItems from memory_extract without advancing its terminal boundary', async () => {
+    await withMemoryWriter(async (writer) => {
+      const invalid = proposalItem(
+        'The project uses Rust.',
+        'workspace',
+        'event-user-1',
+        'uses Rust',
+      );
+      const entries = [
+        {
+          ordinal: 1,
+          event: textEvent('event-user-1', 'run-1', 'turn-1', 'The project uses Rust.'),
+        },
+        {
+          ordinal: 2,
+          event: modelTextEvent('event-terminal-1', 'run-1', 'turn-1', 'Understood.'),
+        },
+      ];
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const extractionCompleted = completionSignal();
+      const coordinator = createCoordinator({
+        writer,
+        entries,
+        outputs: Array.from({ length: 3 }, () =>
+          JSON.stringify({
+            status: 'complete',
+            coverageStatus: 'processed',
+            requestedStatus: 'resolved',
+            requestedItems: [invalid],
+            incidentalItems: [],
+          }),
+        ),
+        observed,
+        onResidencyRelease: extractionCompleted.resolve,
+      });
+
+      coordinator
+        .sourceCapabilities()
+        .extract(
+          extractSnapshot(
+            'run-1',
+            'turn-1',
+            'event-terminal-1',
+            'The project uses Rust.',
+            'event-user-1',
+          ),
+        );
+
+      await extractionCompleted.promise;
+      assert.equal(
+        (await writer.readPendingExtractionFailure('session-1'))?.firstFailureClass,
+        'schema',
+      );
+      assert.equal(await writer.readExtractionCursor('session-1'), undefined);
+      assert.deepEqual(
+        await writer.searchByKeys({
+          terms: ['response preference'],
+          match: 'exact',
+          workspaceKey: '/workspace/maka',
+        }),
+        [],
+      );
+      assert.equal(observed.length, 3);
+      await coordinator.close();
+    });
+  });
+
   test('crosses Runs with a Session Cursor, preserves provider configuration, appends changes, and replays exactly', async () => {
     await withMemoryWriter(async (writer) => {
       const entries: Array<{ ordinal: number; event: RuntimeEvent }> = [];
@@ -881,6 +1000,7 @@ function createCoordinator(input: {
   observed?: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }>;
   policyState?: { incognito: boolean };
   afterModelCall?: () => void;
+  onResidencyRelease?: () => void;
   checkpoint?: HistoryCompactCheckpoint;
 }): HostMemoryExtractionCoordinator {
   const policyState = input.policyState ?? { incognito: false };
@@ -911,7 +1031,7 @@ function createCoordinator(input: {
       },
     },
     lane: new MemoryExtractionSessionLane(),
-    acquireResidency: () => ({ release: () => {} }),
+    acquireResidency: () => ({ release: () => input.onResidencyRelease?.() }),
     now: () => 2_000,
   });
 }
@@ -940,6 +1060,45 @@ function snapshot(
     workspaceKey: '/workspace/maka',
     toolCallId,
   };
+}
+
+function extractSnapshot(
+  runId: string,
+  turnId: string,
+  terminalEventId: string,
+  text: string,
+  indexedEventId?: string,
+): MemoryExtractionSourceSnapshot {
+  return {
+    trigger: 'extract',
+    sourceHeader: header(),
+    sourceSystemPrompt: 'original system',
+    sourceMessages: [
+      { role: 'user', content: text },
+      { role: 'assistant', content: 'Understood.' },
+    ],
+    ...(indexedEventId ? { sourceEventMessagePositions: { [indexedEventId]: [0] } } : {}),
+    sourceTools: {
+      memory_extract: { description: 'Extract', inputSchema: {} },
+    },
+    sourceActiveTools: ['memory_extract'],
+    sourceProviderOptions: { openai: { reasoningEffort: 'medium' } },
+    sessionId: 'session-1',
+    runId,
+    turnId,
+    workspaceKey: '/workspace/maka',
+    terminalEventId,
+  };
+}
+
+function extractProposal(item: ReturnType<typeof proposalItem>): string {
+  return JSON.stringify({
+    status: 'complete',
+    coverageStatus: 'processed',
+    requestedStatus: 'not_applicable',
+    requestedItems: [],
+    incidentalItems: [item],
+  });
 }
 
 function proposal(content: string, scope: 'global' | 'workspace', eventId: string): string {
@@ -1073,4 +1232,12 @@ async function withMemoryWriter(
     await owner?.close();
     await rm(root, { recursive: true, force: true });
   }
+}
+
+function completionSignal(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
