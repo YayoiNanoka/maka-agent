@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 import {
+  bindProviderVisibleEvidence,
   MAX_MEMORY_EVIDENCE_JSON_CHARS,
   memoryExtractionEvidenceJsonSize,
   planMemoryCoverage,
@@ -107,7 +108,18 @@ describe('Memory Extraction evidence planning', () => {
   test('renders indexed Provider-prefix evidence without duplicating its text', () => {
     const event = textEvent('indexed-user', 'user', 'This text already exists in the prefix.');
     const evidence = projectMemoryExtractionEvidence([event]);
-    const rendered = renderMemoryExtractionEvidence(evidence, { 'indexed-user': [3] });
+    const messagePositions = { 'indexed-user': [3] };
+    const bound = bindProviderVisibleEvidence(
+      evidence,
+      [
+        { role: 'user', content: 'Earlier message 0.' },
+        { role: 'assistant', content: 'Earlier response.' },
+        { role: 'user', content: 'Earlier message 2.' },
+        { role: 'user', content: 'This text already exists in the prefix.' },
+      ],
+      messagePositions,
+    );
+    const rendered = renderMemoryExtractionEvidence(bound, messagePositions);
 
     assert.deepEqual(rendered, [
       {
