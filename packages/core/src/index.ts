@@ -260,12 +260,15 @@ export type {
   GenericToolLedgerAppendValidation,
   ToolLedgerLane,
   ToolLedgerLaneValidation,
+  ToolLedgerRejectionCode,
   ToolLedgerScanOperation,
   ToolLedgerScanResult,
   ToolLedgerTransitionKind,
   ToolLedgerTransitionValidation,
 } from './tool-ledger-scanner.js';
 export {
+  ToolLedgerCorruptionError,
+  ToolLedgerRejectionError,
   scanToolLedger,
   validateGenericToolLedgerAppend,
   validateToolLedgerEventLane,
@@ -399,6 +402,8 @@ export {
   isThinkingLevel,
   thinkingVariantsForModel,
 } from './model-thinking.js';
+
+export type { ChatModelChoice } from './chat-model-choice.js';
 
 // agent-run.ts
 export type {

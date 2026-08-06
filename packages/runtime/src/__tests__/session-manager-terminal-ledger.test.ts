@@ -1,7 +1,13 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as timerDelay } from 'node:timers/promises';
-import { deriveTurnRecords, DurableStoreWriteError, isTerminalRuntimeEvent } from '@maka/core';
+import {
+  deriveTurnRecords,
+  DurableStoreWriteError,
+  isTerminalRuntimeEvent,
+  ToolLedgerCorruptionError,
+  ToolLedgerRejectionError,
+} from '@maka/core';
 import type { SandboxBoundaryResponse } from '@maka/core/sandbox-boundary';
 import type {
   AgentRunEvent,
@@ -468,6 +474,149 @@ describe('SessionManager terminal ledger invariants', () => {
       isTerminalRuntimeEvent,
     );
     expect(terminals.map((event) => event.id)).toEqual(['terminal-one']);
+  });
+
+  test('a ledger rejection does not cost the run its terminal write', async () => {
+    // The store latch exists for a store that went away. A rejection means the
+    // opposite — the ledger is healthy and refused one malformed event — so
+    // latching only guaranteed that this run could never write its own terminal
+    // fact: `commitTerminalRun` returns early on an unavailable store, which is
+    // how a refused tool result left a run reading `running` forever (#2234).
+    const store = new TinySessionStore();
+    // `canonical` is the only durability production ships (SqliteRuntimeStore
+    // declares it), and it is what makes a rejected append rethrow. A
+    // best-effort double would swallow the rejection instead and prove a
+    // weaker thing than production actually does.
+    const runStore = new TinyAgentRunStore({
+      rejectRuntimeEventIds: ['refused-event'],
+      durability: 'canonical',
+    });
+    const session = await store.create(makeInput());
+    const run = new AgentRun({
+      sessionId: session.id,
+      header: session,
+      userInput: { turnId: 'turn-1', text: 'hello' },
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      newId: nextId(),
+      now: nextNow(23_000),
+      hooks: inertAgentRunHooks(store),
+    });
+    await runStore.createRun(
+      makeRunHeader({ sessionId: session.id, runId: run.runId, turnId: run.turnId }),
+    );
+
+    // The rejection still fails the caller — a producer bug must not pass
+    // quietly — and it is recorded on the run.
+    await assert.rejects(
+      run.recordRuntimeEvents([
+        runtimeEvent({
+          id: 'refused-event',
+          sessionId: session.id,
+          runId: run.runId,
+          turnId: run.turnId,
+        }),
+      ]),
+      (error: unknown) => error instanceof ToolLedgerRejectionError,
+    );
+    expect((await runStore.readRun(session.id, run.runId)).traceWriteError).toMatch(
+      /Tool ledger transition rejected: orphan_response/,
+    );
+
+    // The ledger is still open, so the turn can still end.
+    await run.recordRuntimeEvents([
+      runtimeEvent({
+        id: 'terminal-after-rejection',
+        sessionId: session.id,
+        runId: run.runId,
+        turnId: run.turnId,
+        status: 'failed',
+        actions: { endInvocation: true },
+      }),
+    ]);
+
+    const terminals = (await runStore.readRuntimeEvents(session.id, run.runId)).filter(
+      isTerminalRuntimeEvent,
+    );
+    expect(terminals.map((event) => event.id)).toEqual(['terminal-after-rejection']);
+    expect(
+      (await runStore.readRuntimeEvents(session.id, run.runId)).some(
+        (event) => event.id === 'refused-event',
+      ),
+    ).toBe(false);
+  });
+
+  test('an already-corrupt ledger latches the store, and the latch is what costs the terminal fact', async () => {
+    // The exemption is for a bad candidate against a healthy store; a ledger
+    // that is already damaged keeps failing closed. This test pins that, and
+    // pins the price, because the price is not what the fail-closed rationale
+    // assumes: a corrupt ledger only refuses TOOL facts (production gates the
+    // health scan behind `isToolLedgerBearingEvent`). The terminal event is not
+    // one, so the damaged ledger would have accepted it. What actually keeps it
+    // out is the latch. Assert both halves — the refusal and the collateral —
+    // so that changing either side has to change this test.
+    const store = new TinySessionStore();
+    const runStore = new TinyAgentRunStore({ corruptLedger: true, durability: 'canonical' });
+    const session = await store.create(makeInput());
+    const run = new AgentRun({
+      sessionId: session.id,
+      header: session,
+      userInput: { turnId: 'turn-1', text: 'hello' },
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      newId: nextId(),
+      now: nextNow(24_000),
+      hooks: inertAgentRunHooks(store),
+    });
+    await runStore.createRun(
+      makeRunHeader({ sessionId: session.id, runId: run.runId, turnId: run.turnId }),
+    );
+
+    // A tool fact is what a damaged ledger refuses.
+    await assert.rejects(
+      run.recordRuntimeEvents([
+        runtimeEvent({
+          id: 'well-formed-tool-fact',
+          sessionId: session.id,
+          runId: run.runId,
+          turnId: run.turnId,
+          content: { kind: 'function_call', id: 'call-1', name: 'noop', args: {} },
+        }),
+      ]),
+      (error: unknown) => error instanceof ToolLedgerCorruptionError,
+    );
+    expect((await runStore.readRun(session.id, run.runId)).traceWriteError).toMatch(
+      /Tool ledger is corrupt: duplicate_call/,
+    );
+
+    // The terminal event carries no tool fact, so the corrupt ledger itself
+    // would take it — the double proves that by not throwing for it. The latch
+    // is the only thing in its way: under a canonical store `recordRuntimeEvents`
+    // never reaches the append and replays the latched failure instead. (The
+    // replay carries the original error object, so the message still reads
+    // "corrupt" and the stack still points into the double's append — neither
+    // is evidence the append ran.)
+    await assert.rejects(
+      run.recordRuntimeEvents([
+        runtimeEvent({
+          id: 'terminal-after-corruption',
+          sessionId: session.id,
+          runId: run.runId,
+          turnId: run.turnId,
+          status: 'failed',
+          actions: { endInvocation: true },
+        }),
+      ]),
+      (error: unknown) => error instanceof ToolLedgerCorruptionError,
+    );
+    // This is the assertion that fails if the latch goes away: without it the
+    // append is attempted, the double accepts a non-tool fact, and the run's
+    // terminal event lands after all.
+    expect(
+      (await runStore.readRuntimeEvents(session.id, run.runId)).some(isTerminalRuntimeEvent),
+    ).toBe(false);
   });
 
   test('synthetic finalization claims its terminal outcome before its first await', async () => {
@@ -2272,8 +2421,18 @@ class TinyAgentRunStore implements AgentRunStore, RuntimeEventStore {
       failTerminalRuntimeEventAppends?: boolean;
       failTerminalRuntimeEventDurabilityAfterAppend?: boolean;
       beforeTerminalRuntimeEventAppend?: () => Promise<void>;
+      /** Event ids the ledger refuses the way a real transition check would. */
+      rejectRuntimeEventIds?: readonly string[];
+      /** Refuse every append the way an already-corrupt ledger does. */
+      corruptLedger?: boolean;
+      /** SqliteRuntimeStore is `canonical`; declare it when a test needs that shape. */
+      durability?: 'best_effort' | 'canonical';
     } = {},
   ) {}
+
+  get durability(): 'best_effort' | 'canonical' | undefined {
+    return this.options.durability;
+  }
 
   async createRun(header: AgentRunHeader): Promise<AgentRunHeader> {
     this.headers.set(key(header.sessionId, header.runId), clone(header));
@@ -2324,6 +2483,17 @@ class TinyAgentRunStore implements AgentRunStore, RuntimeEventStore {
     }
     if (this.options.failTerminalRuntimeEventAppends && isTerminalRuntimeEvent(event)) {
       throw new Error('terminal runtime event append failed');
+    }
+    if (this.options.corruptLedger && isToolLedgerBearingEvent(event)) {
+      // Production gates the health scan behind `isToolLedgerBearingEvent`
+      // (sqlite-runtime-store.ts), so a corrupt ledger refuses tool facts and
+      // nothing else. A double that refuses EVERY append cannot tell the latch
+      // apart from the refusal, and the test built on it passes with latching
+      // deleted outright.
+      throw new ToolLedgerCorruptionError('duplicate_call', 'some-older-event');
+    }
+    if (this.options.rejectRuntimeEventIds?.includes(event.id)) {
+      throw new ToolLedgerRejectionError('orphan_response', event.id);
     }
     if (isTerminalRuntimeEvent(event)) await this.options.beforeTerminalRuntimeEventAppend?.();
     const eventKey = key(sessionId, runId);
@@ -2445,6 +2615,18 @@ function makeRunHeader(overrides: Partial<AgentRunHeader> = {}): AgentRunHeader 
     updatedAt: 1,
     ...overrides,
   };
+}
+
+/** Mirrors the private predicate in `sqlite-runtime-store.ts` that gates the
+ *  workspace tool-ledger health scan. Kept here so the corrupt-ledger double
+ *  refuses exactly what production refuses, and accepts what it accepts. */
+function isToolLedgerBearingEvent(event: RuntimeEvent): boolean {
+  return (
+    event.content?.kind === 'function_call' ||
+    event.content?.kind === 'function_response' ||
+    event.actions?.toolDispatch !== undefined ||
+    event.actions?.toolRecovery !== undefined
+  );
 }
 
 function runtimeEvent(overrides: Partial<RuntimeEvent>): RuntimeEvent {

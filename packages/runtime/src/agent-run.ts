@@ -7,7 +7,12 @@ import type {
   RuntimeEventStore,
   ToolBoundaryProtocol,
 } from '@maka/core';
-import { DurableStoreWriteError, isSessionInlineRun, isTerminalRuntimeEvent } from '@maka/core';
+import {
+  DurableStoreWriteError,
+  ToolLedgerRejectionError,
+  isSessionInlineRun,
+  isTerminalRuntimeEvent,
+} from '@maka/core';
 import { Buffer } from 'node:buffer';
 import { isDeepStrictEqual } from 'node:util';
 import { redactSecrets } from '@maka/core/redaction';
@@ -1647,8 +1652,34 @@ export class AgentRun {
   ): Promise<void> {
     if (!this.input.runtimeEventStore || !this.runtimeEventStoreAvailable) return Promise.resolve();
     const next = this.runtimeEventQueue.then(operation, operation).catch(async (error) => {
-      this.runtimeEventStoreAvailable = false;
-      this.runtimeEventStoreFailure = error;
+      // A rejection is the ledger refusing one malformed candidate, not the
+      // store going away: it stays healthy and readable, so the latch would
+      // only cost this run the writes it still owes — above all its own
+      // terminal event, which `recordRuntimeEvents` refuses once the store
+      // reads unavailable. That is how a single refused append left a run at
+      // `running` with no terminal event and no visible failure (#2234). The
+      // append still fails the caller (a producer bug must not pass quietly),
+      // but the ledger stays open so the turn can end the way every other
+      // failure ends.
+      //
+      // Only that one class is exempt. A store that went away keeps latching:
+      // nothing this run emits next can land.
+      //
+      // `ToolLedgerCorruptionError` also keeps latching, but be precise about
+      // what that buys, because it is less than it looks. A damaged ledger
+      // refuses TOOL facts only — the health scan sits behind
+      // `isToolLedgerBearingEvent` — so this run's terminal event, which bears
+      // no tool fact, is a write the corrupt store would have taken. The latch
+      // is what keeps it out, and the run ends at `running` with no terminal
+      // fact: #2234's own shape, for the already-damaged population. Held here
+      // deliberately rather than fixed in passing — a run that cannot write its
+      // tool facts should arguably still be allowed to say it ended, but that
+      // is a behaviour change on a path this commit does not otherwise touch.
+      // Tracked in #2313; the corrupt-ledger test pins the current price.
+      if (!(error instanceof ToolLedgerRejectionError)) {
+        this.runtimeEventStoreAvailable = false;
+        this.runtimeEventStoreFailure = error;
+      }
       await this.enqueueTraceWriteFailure(error, label);
       if (options.rethrow) throw error;
     });

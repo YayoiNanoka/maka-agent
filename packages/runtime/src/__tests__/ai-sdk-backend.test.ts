@@ -7491,6 +7491,164 @@ describe('AiSdkBackend usage telemetry', () => {
     assert.equal(events.at(-1)?.type, 'complete');
   });
 
+  test('does not call a truncated provider stream a finished turn', async () => {
+    // The upstream cut the SSE connection mid-answer: chunks arrived, no
+    // `finish` frame did. The stream then ends without yielding an error and
+    // without throwing, so every guard that watches for a thrown failure sees
+    // nothing. Reporting `end_turn` here tells the caller the model said its
+    // piece when the connection simply died — a benchmark cell recorded
+    // `status: completed` on exactly this shape while the agent was still
+    // mid-task.
+    const durable = durableTurnHarness('turn-truncated', 'analyse the image');
+    const model = new MockLanguageModelV4({
+      doStream: async () => ({
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            { type: 'text-start', id: 'text-1' },
+            { type: 'text-delta', id: 'text-1', delta: 'Let me look at the top region' },
+          ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      }),
+    });
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      tools: [],
+      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    const events = await drainDurably(backend.send(durable.input()), durable);
+    const complete = events.find(
+      (event): event is Extract<SessionEvent, { type: 'complete' }> => event.type === 'complete',
+    );
+
+    // Not merely "some other stop reason": `max_tokens` would also satisfy that
+    // and still record the turn as completed downstream, which is the bug.
+    assert.equal(
+      complete?.stopReason,
+      'error',
+      'a stream that never delivered a finish frame did not end the turn',
+    );
+    // And it must say so. A failed terminal whose only trace is the stop reason
+    // leaves the session's lastError empty and the request ledger reading
+    // `success` — the same silence that let the benchmark cell pass unnoticed.
+    assert.ok(
+      events.some((event) => event.type === 'error'),
+      'a failed terminal must be accompanied by an error event',
+    );
+  });
+
+  test('says which failed terminal a content filter is', async () => {
+    // A named provider terminal, not a stream nobody closed. It reaches the
+    // same failed outcome and so must carry the same error event — on main it
+    // ended the turn failed while `lastError` stayed empty — but calling it
+    // "ended without finishing" would describe the wrong thing.
+    const durable = durableTurnHarness('turn-filtered', 'analyse the image');
+    const model = new MockLanguageModelV4({
+      doStream: async () => ({
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            { type: 'text-start', id: 'text-1' },
+            { type: 'text-delta', id: 'text-1', delta: 'I cannot' },
+            { type: 'text-end', id: 'text-1' },
+            {
+              type: 'finish',
+              finishReason: { unified: 'content-filter' as const, raw: 'content_filter' },
+              usage: emptyUsage(),
+            },
+          ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      }),
+    });
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      tools: [],
+      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    const events = await drainDurably(backend.send(durable.input()), durable);
+    const complete = events.find(
+      (event): event is Extract<SessionEvent, { type: 'complete' }> => event.type === 'complete',
+    );
+    const error = events.find(
+      (event): event is Extract<SessionEvent, { type: 'error' }> => event.type === 'error',
+    );
+
+    assert.equal(complete?.stopReason, 'error');
+    assert.ok(error, 'a failed terminal must be accompanied by an error event');
+  });
+
+  test('keeps a turn the provider named its own reason for', async () => {
+    // The SDK's `other` is not a reason, it is the SDK declining to name one:
+    // an unrecognized `finish_reason` from an OpenAI-compatible provider —
+    // llama.cpp's `eos_token`, DeepSeek's `insufficient_system_resource` —
+    // lands in the same bucket as a connection that died mid-answer. The
+    // provider's own spelling is the only thing that tells them apart, so
+    // treating the bucket itself as failure would fail complete answers.
+    const durable = durableTurnHarness('turn-unnamed', 'analyse the image');
+    const model = new MockLanguageModelV4({
+      doStream: async () => ({
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            { type: 'text-start', id: 'text-1' },
+            { type: 'text-delta', id: 'text-1', delta: 'The top region is empty.' },
+            { type: 'text-end', id: 'text-1' },
+            {
+              type: 'finish',
+              finishReason: { unified: 'other' as const, raw: 'eos_token' },
+              usage: emptyUsage(),
+            },
+          ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      }),
+    });
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      tools: [],
+      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    const events = await drainDurably(backend.send(durable.input()), durable);
+    const complete = events.find(
+      (event): event is Extract<SessionEvent, { type: 'complete' }> => event.type === 'complete',
+    );
+
+    assert.equal(complete?.stopReason, 'end_turn');
+    assert.ok(!events.some((event) => event.type === 'error'));
+  });
+
   test('rejects continuation-capable tools before side effects without a durable reader', async () => {
     const loop = countingToolLoopModel(1);
     let executions = 0;

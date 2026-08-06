@@ -1354,7 +1354,7 @@ export class AiSdkBackend implements AgentBackend {
     let lastStepInputTokens: number | undefined;
     let streamStatus: LlmCallRecord['status'] = 'success';
     let streamErrorClass: string | undefined;
-    let rawFinishReason: string | undefined;
+    let streamedFinishReason: string | undefined;
     let runtimeSteps = 0;
     let requestShapeForTelemetry: RequestShapeDiagnostic | undefined;
     let promptSegmentsForTelemetry: PromptSegmentEstimate[] = [];
@@ -1963,7 +1963,7 @@ export class AiSdkBackend implements AgentBackend {
                   }
                 }
                 if (event.kind === 'finish' || event.kind === 'step-finish') {
-                  rawFinishReason = event.finishReason ?? rawFinishReason;
+                  streamedFinishReason = event.finishReason ?? streamedFinishReason;
                 }
                 if (event.kind === 'text-start') {
                   stepTextPartStartOffset = stepText.length;
@@ -2210,8 +2210,13 @@ export class AiSdkBackend implements AgentBackend {
           // stream without a trailing `finish-step` for the last step.
           await flushStep();
 
-          finishReason = (await result.finishReason.catch(() => 'stop')) ?? 'stop';
-          rawFinishReason = rawFinishReason ?? finishReason;
+          // The settled promise reports only the SDK's unified enum; the stream
+          // events carry what the provider itself said, which is strictly more
+          // specific and is already what telemetry prefers below. Reading the
+          // same value here keeps the turn's outcome and its record from
+          // disagreeing about why the stream ended.
+          finishReason =
+            streamedFinishReason ?? (await result.finishReason.catch(() => 'stop')) ?? 'stop';
           await queue.waitUntilConsumedThroughCurrent();
 
           if (returnedToolCalls.length > 0) {
@@ -2483,7 +2488,29 @@ export class AiSdkBackend implements AgentBackend {
           (this.maxSteps !== undefined && finishReason === 'tool-calls'
             ? 'step_limit'
             : this.mapFinishReason(finishReason));
-        trace.modelStreamCompleted(stopReason);
+        if (stopReason === 'error') {
+          // Reaching a failed terminal without anything having been thrown.
+          // Every other `stopReason: 'error'` here comes out of the catch below
+          // with an error event and a failed trace behind it, and the session's
+          // `lastError` and the request ledger are fed by exactly those. Ending
+          // the turn failed while the telemetry still reads `success` is the
+          // same blindness this branch exists to remove.
+          //
+          // Two different things arrive here and the message says which: the
+          // provider stopping the stream on its own policy, and a stop nothing
+          // named at all.
+          const err = new Error(
+            finishReason === 'content-filter'
+              ? 'Provider stopped the stream on a content filter'
+              : `Provider stream ended without finishing (${finishReason})`,
+          );
+          streamStatus = 'error';
+          streamErrorClass = this.modelAdapter.classifyError(err);
+          queue.push(this.makeErrorEvent(turnId, err));
+          trace.modelStreamFailed(streamErrorClass, err, priorReplayFailureTrace(priorReplay));
+        } else {
+          trace.modelStreamCompleted(stopReason);
+        }
         const completeEvent = {
           type: 'complete',
           id: this.newId(),
