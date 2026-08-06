@@ -7,7 +7,10 @@ import { z } from 'zod';
 import { ModelAdapter } from '../model-adapter.js';
 import { getAIModel } from '../model-factory.js';
 import type { ModelToolSet } from '../model-protocol.js';
-import { generateProviderPrefixModelCall } from '../tool-free-model-call.js';
+import {
+  generateProviderPrefixModelCall,
+  generateToolFreeModelCall,
+} from '../tool-free-model-call.js';
 
 describe('Memory Extraction provider prefix', () => {
   test('disables Tools only for the auxiliary request while preserving the source prefix', async () => {
@@ -197,6 +200,69 @@ describe('Memory Extraction provider prefix', () => {
       ['Read'],
     );
     assert.deepEqual(body?.tool_choice, { type: 'auto' });
+  });
+
+  test('does not dispatch Anthropic auxiliary calls with active provider-native Tools', async () => {
+    let dispatched = false;
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => {
+        dispatched = true;
+        throw new Error('provider request must not run');
+      },
+    });
+
+    await assert.rejects(
+      generateProviderPrefixModelCall({
+        model,
+        messages: [{ role: 'user', content: 'Extract memory without using tools.' }],
+        tools: {
+          WebSearch: {
+            kind: 'provider',
+            providerTool: { kind: 'anthropic-web-search-20250305', maxUses: 8 },
+          },
+        },
+        activeTools: ['WebSearch'],
+        toolChoicePolicy: 'omit',
+      }),
+      /unavailable with active provider-native Tools/,
+    );
+    assert.equal(dispatched, false);
+  });
+
+  test('disables AI SDK retries for the isolated canonicalizer request', async () => {
+    let dispatches = 0;
+    const connection: LlmConnection = {
+      slug: 'canonicalizer-retry-test',
+      name: 'Canonicalizer retry test',
+      providerType: 'openai',
+      baseUrl: 'https://openai.invalid/v1',
+      defaultModel: 'gpt-test',
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const model = getAIModel({
+      connection,
+      apiKey: 'test-key',
+      modelId: connection.defaultModel,
+      fetch: async () => {
+        dispatches += 1;
+        return new Response(JSON.stringify({ error: { message: 'temporary failure' } }), {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+
+    await assert.rejects(
+      generateToolFreeModelCall({
+        model,
+        prompt: 'Canonicalize validated user evidence.',
+        maxOutputTokens: 128,
+        maxRetries: 0,
+      }),
+    );
+    assert.equal(dispatches, 1);
   });
 });
 

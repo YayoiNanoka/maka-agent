@@ -118,7 +118,15 @@ function createWriterFacade(
       const snapshot = snapshotCommitExtractionRequest(request);
       return run(() => store.commitExtraction(snapshot));
     },
+    initializeExtractionCursor: (sessionId, processedOrdinal) =>
+      run(() => store.initializeExtractionCursor(sessionId, processedOrdinal)),
     readExtractionCursor: (sessionId) => run(() => store.readExtractionCursor(sessionId)),
+    readPendingExtractionFailure: (sessionId) =>
+      run(() => store.readPendingExtractionFailure(sessionId)),
+    settleExtractionFailure: (request) => {
+      const snapshot = Object.freeze({ ...request });
+      return run(() => store.settleExtractionFailure(snapshot));
+    },
     readExtractionReceipt: (operationId) => run(() => store.readExtractionReceipt(operationId)),
     readItem: (itemId) => run(() => store.readItem(itemId)),
     searchByKeys: (request) => {
@@ -145,8 +153,10 @@ function snapshotCommitExtractionRequest(
     sessionId: request.sessionId,
     expectedCursorOrdinal: request.expectedCursorOrdinal,
     nextCursorOrdinal: request.nextCursorOrdinal,
+    coverageHash: request.coverageHash,
     items: Object.freeze(request.items.map(snapshotItemWrite)),
     requestedItemIndexes: Object.freeze([...request.requestedItemIndexes]),
+    ...(request.noOpReason ? { noOpReason: request.noOpReason } : {}),
     trigger: request.trigger,
   });
 }

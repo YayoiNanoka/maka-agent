@@ -151,17 +151,70 @@ export interface MemoryExtractionCursor {
   readonly updatedAt: number;
 }
 
-export interface MemoryExtractionRequestedItemResult {
-  readonly itemId: string;
-  readonly content: string;
+export type MemoryExtractionFailureClass =
+  | 'provider'
+  | 'schema'
+  | 'evidence'
+  | 'localization'
+  | 'requested_admission';
+
+/** One frozen coverage range retained for exactly one later trigger cycle. */
+export interface PendingMemoryExtractionFailure {
+  readonly sessionId: string;
+  readonly fromOrdinal: number;
+  readonly throughOrdinal: number;
+  readonly coverageHash: string;
+  readonly firstOperationId: string;
+  /** Preserve the semantics of the failed range when a later trigger retries it. */
+  readonly firstTrigger: 'remember' | 'extract';
+  readonly firstFailureClass: MemoryExtractionFailureClass;
+  readonly failedAt: number;
+}
+
+export interface SettleMemoryExtractionFailureRequest {
+  readonly operationId: string;
+  readonly sessionId: string;
+  readonly expectedCursorOrdinal: number;
+  readonly failedThroughOrdinal: number;
+  readonly coverageHash: string;
+  readonly failureClass: MemoryExtractionFailureClass;
+  readonly trigger: 'remember' | 'extract';
+}
+
+export type SettleMemoryExtractionFailureResult =
+  | {
+      readonly status: 'retry_later';
+      readonly replayed: boolean;
+      readonly pending: PendingMemoryExtractionFailure;
+    }
+  | {
+      readonly status: 'discarded';
+      readonly replayed: boolean;
+      readonly receipt: MemoryExtractionReceipt;
+      readonly cursor: MemoryExtractionCursor;
+    };
+
+export interface MemoryExtractionDiscardedRange {
+  readonly fromOrdinal: number;
+  readonly throughOrdinal: number;
+  readonly coverageHash: string;
+  readonly firstFailureClass: MemoryExtractionFailureClass;
+  readonly finalFailureClass: MemoryExtractionFailureClass;
 }
 
 export interface MemoryExtractionReceipt {
   readonly operationId: string;
   readonly sessionId: string;
-  readonly status: 'remembered' | 'not_applicable' | 'extracted';
+  readonly status: 'remembered' | 'not_applicable' | 'extracted' | 'discarded';
   readonly requestedItems: readonly MemoryExtractionRequestedItemResult[];
+  readonly noOpReason?: 'sensitive_information';
+  readonly discardedRange?: MemoryExtractionDiscardedRange;
   readonly committedAt: number;
+}
+
+export interface MemoryExtractionRequestedItemResult {
+  readonly itemId: string;
+  readonly content: string;
 }
 
 /**
@@ -173,9 +226,12 @@ export interface CommitMemoryExtractionRequest {
   readonly sessionId: string;
   readonly expectedCursorOrdinal: number;
   readonly nextCursorOrdinal: number;
+  readonly coverageHash: string;
   readonly items: readonly MemoryItemWrite[];
   /** Indexes into items whose committed identities are observable to memory_remember. */
   readonly requestedItemIndexes: readonly number[];
+  /** Explicit deterministic no-op for a user-requested batch rejected by policy. */
+  readonly noOpReason?: 'sensitive_information';
   readonly trigger: 'remember' | 'extract';
 }
 
@@ -222,7 +278,17 @@ export interface SearchMemoryItemsByKeyRequest {
 export interface MemoryItemStore {
   applyMutations(request: ApplyMemoryMutationsRequest): Promise<MemoryWriteOperationResult>;
   commitExtraction(request: CommitMemoryExtractionRequest): Promise<MemoryExtractionCommitResult>;
+  initializeExtractionCursor(
+    sessionId: string,
+    processedOrdinal: number,
+  ): Promise<MemoryExtractionCursor>;
   readExtractionCursor(sessionId: string): Promise<MemoryExtractionCursor | undefined>;
+  readPendingExtractionFailure(
+    sessionId: string,
+  ): Promise<PendingMemoryExtractionFailure | undefined>;
+  settleExtractionFailure(
+    request: SettleMemoryExtractionFailureRequest,
+  ): Promise<SettleMemoryExtractionFailureResult>;
   readExtractionReceipt(operationId: string): Promise<MemoryExtractionReceipt | undefined>;
   readItem(itemId: string): Promise<MemoryItemRecord | undefined>;
   searchByKeys(request: SearchMemoryItemsByKeyRequest): Promise<readonly MemoryItemRecord[]>;

@@ -997,20 +997,22 @@ export class AiSdkBackend implements AgentBackend {
     ) {
       throw new Error('Long-term Memory trigger tool names are reserved by Runtime');
     }
-    const memoryTools =
-      input.memoryExtraction && !modelUsesNativeOpenAiResponses(input.connection, input.modelId)
-        ? buildMemoryExtractionTriggerTools({
-            capabilities: input.memoryExtraction,
-            snapshot: (trigger, context) => this.memorySourceSnapshot(trigger, context),
-            markExtractRequested: (context) => {
-              const scope = [...this.activeTurns].find(
-                (candidate) =>
-                  candidate.turnId === context.turnId && candidate.runId === context.runId,
-              );
-              if (scope) scope.memoryExtractRequested = true;
-            },
-          })
-        : [];
+    const memoryTools = input.memoryExtraction
+      ? buildMemoryExtractionTriggerTools({
+          capabilities: input.memoryExtraction,
+          snapshot: (trigger, context) => this.memorySourceSnapshot(trigger, context),
+          markExtractRequested: (context) => {
+            const scope = [...this.activeTurns].find(
+              (candidate) =>
+                candidate.turnId === context.turnId && candidate.runId === context.runId,
+            );
+            if (scope) scope.memoryExtractRequested = true;
+          },
+          ...(modelUsesNativeOpenAiResponses(input.connection, input.modelId)
+            ? { unsupportedReason: 'provider_unsupported' as const }
+            : {}),
+        })
+      : [];
     this.toolAvailabilityRuntime = new ToolAvailabilityRuntime(
       // The archive decoder is a runtime protocol tool, not a host binding:
       // this session's placeholders name it, so this session advertises it.
@@ -4377,34 +4379,14 @@ function projectMemoryConversationPrefix(
   messages: ModelMessage[];
   eventMessagePositions?: Readonly<Record<string, readonly number[]>>;
 } {
-  const projected: ModelMessage[] = [];
-  const remappedPositions = new Map<number, number>();
-  for (const [sourceIndex, message] of messages.entries()) {
-    const conversationMessage = projectMemoryConversationMessage(message);
-    if (!conversationMessage) continue;
-    remappedPositions.set(sourceIndex, projected.length);
-    projected.push(conversationMessage);
-  }
-  if (!eventMessagePositions) return { messages: projected };
-
-  const projectedEventPositions: Record<string, number[]> = {};
-  for (const [eventId, positions] of Object.entries(eventMessagePositions)) {
-    const remapped = [
-      ...new Set(
-        positions.flatMap((position) => {
-          const projectedPosition = remappedPositions.get(position);
-          return projectedPosition === undefined ? [] : [projectedPosition];
-        }),
-      ),
-    ].sort((left, right) => left - right);
-    if (remapped.length > 0) projectedEventPositions[eventId] = remapped;
-  }
-  return { messages: projected, eventMessagePositions: projectedEventPositions };
-}
-
-function projectMemoryConversationMessage(message: ModelMessage): ModelMessage | undefined {
-  if (message.role === 'user') return message;
-  return undefined;
+  // Context visibility and durable evidence authority are separate boundaries.
+  // Keep the exact source prefix so the auxiliary request preserves referents
+  // and provider-cache shape. The Evidence Index and trusted admission layer
+  // independently restrict durable citations to user-authored RuntimeEvents.
+  return {
+    messages: [...messages],
+    ...(eventMessagePositions ? { eventMessagePositions } : {}),
+  };
 }
 
 function memoryExtractionModelHeader(

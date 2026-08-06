@@ -26,6 +26,7 @@ import {
   type ProxiedFetchTransport,
   type ToolFreeModelCallContent,
   type MemoryExtractionSourceSnapshot,
+  ProviderPrefixModelCallUnavailableError,
 } from '@maka/runtime';
 import type { RuntimePolicyStoresWriter } from '@maka/storage/runtime-policy-stores';
 import type { InteractiveUsageStoresWriter } from '@maka/storage/usage-stores';
@@ -114,12 +115,15 @@ export interface HostMemoryExtractionModel {
   generate(input: {
     readonly snapshot: MemoryExtractionSourceSnapshot;
     readonly prompt: string;
-    readonly stage: 'proposal' | 'localized';
+    readonly stage: 'proposal' | 'localized' | 'canonicalize';
     readonly abortSignal: AbortSignal;
-  }): Promise<string>;
+  }): Promise<
+    | { readonly ok: true; readonly text: string }
+    | { readonly ok: false; readonly errorClass: HostAuxiliaryModelFailureClass }
+  >;
 }
 
-/** Creates bounded, tool-free extraction calls on the source Session's model authority. */
+/** Creates bounded extraction calls on the source Session's model authority. */
 export function createHostMemoryExtractionModel(
   input: HostSessionEffectModelInput,
 ): HostMemoryExtractionModel {
@@ -131,27 +135,41 @@ export function createHostMemoryExtractionModel(
       stage,
       abortSignal,
     }: Parameters<HostMemoryExtractionModel['generate']>[0]) => {
-      const result = await runHostAuxiliaryModelCall(authority, {
-        transportContextId: snapshot.sessionId,
-        telemetrySessionId: snapshot.sessionId,
-        header: snapshot.sourceHeader,
-        callKind: 'memory_extraction',
-        callId: `memory_${stage}_${authority.newId()}`,
-        abortSignal,
-        buildRequest: () => ({
-          ...(snapshot.sourceSystemPrompt ? { system: snapshot.sourceSystemPrompt } : {}),
-          messages: [...snapshot.sourceMessages, { role: 'user', content: prompt }],
-          tools: snapshot.sourceTools,
-          activeTools: snapshot.sourceActiveTools,
-          ...(snapshot.sourceProviderOptions
-            ? { providerOptions: snapshot.sourceProviderOptions }
-            : {}),
-          ...(snapshot.sourceMaxOutputTokens !== undefined
-            ? { maxOutputTokens: snapshot.sourceMaxOutputTokens }
-            : {}),
-        }),
-      });
-      return result.text;
+      try {
+        const result = await runHostAuxiliaryModelCall(authority, {
+          transportContextId: snapshot.sessionId,
+          telemetrySessionId: snapshot.sessionId,
+          header: snapshot.sourceHeader,
+          callKind: 'memory_extraction',
+          callId: `memory_${stage}_${authority.newId()}`,
+          abortSignal,
+          buildRequest: () =>
+            stage === 'canonicalize'
+              ? {
+                  prompt,
+                  maxOutputTokens: snapshot.sourceMaxOutputTokens ?? 2_048,
+                  maxRetries: 0,
+                }
+              : {
+                  ...(snapshot.sourceSystemPrompt ? { system: snapshot.sourceSystemPrompt } : {}),
+                  messages: [...snapshot.sourceMessages, { role: 'user', content: prompt }],
+                  tools: snapshot.sourceTools,
+                  activeTools: snapshot.sourceActiveTools,
+                  ...(snapshot.sourceProviderOptions
+                    ? { providerOptions: snapshot.sourceProviderOptions }
+                    : {}),
+                  ...(snapshot.sourceMaxOutputTokens !== undefined
+                    ? { maxOutputTokens: snapshot.sourceMaxOutputTokens }
+                    : {}),
+                },
+        });
+        return { ok: true as const, text: result.text };
+      } catch (error) {
+        return {
+          ok: false as const,
+          errorClass: auxiliaryModelErrorClass(error, abortSignal),
+        };
+      }
     },
   });
 }
@@ -333,6 +351,7 @@ interface AuxiliaryModelCallAuthority {
 type AuxiliaryModelRequest =
   | (ToolFreeModelCallContent & {
       readonly maxOutputTokens: number;
+      readonly maxRetries?: number;
       readonly system?: string;
       readonly tools?: never;
     })
@@ -660,6 +679,7 @@ function auxiliaryModelErrorClass(
     return reason instanceof Error && reason.name === 'TimeoutError' ? 'timeout' : 'aborted';
   }
   if (!(error instanceof Error)) return 'unknown';
+  if (error instanceof ProviderPrefixModelCallUnavailableError) return 'configuration';
   if (error instanceof AuxiliaryModelCallConfigurationError) return 'configuration';
   return 'provider';
 }

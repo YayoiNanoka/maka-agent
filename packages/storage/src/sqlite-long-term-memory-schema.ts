@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 2;
+export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 3;
 
 const SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS = 5_000;
 const SQLITE_INITIALIZATION_RETRY_DELAY_MS = 10;
@@ -129,6 +129,25 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
     );
   `,
   ],
+  [
+    3,
+    `
+    CREATE TABLE memory_extraction_failures (
+      session_id TEXT PRIMARY KEY CHECK (length(session_id) > 0),
+      from_ordinal INTEGER NOT NULL CHECK (from_ordinal > 0),
+      through_ordinal INTEGER NOT NULL CHECK (through_ordinal >= from_ordinal),
+      coverage_hash TEXT NOT NULL CHECK (length(coverage_hash) = 64),
+      first_operation_id TEXT NOT NULL UNIQUE CHECK (length(first_operation_id) > 0),
+      first_trigger TEXT NOT NULL CHECK (first_trigger IN ('remember', 'extract')),
+      first_failure_class TEXT NOT NULL CHECK (
+        first_failure_class IN (
+          'provider', 'schema', 'evidence', 'localization', 'requested_admission'
+        )
+      ),
+      failed_at INTEGER NOT NULL CHECK (failed_at >= 0)
+    );
+  `,
+  ],
 ]);
 
 interface MinimumTableShape {
@@ -219,6 +238,42 @@ const MINIMUM_SCHEMA_SHAPES: ReadonlyMap<number, MinimumSchemaShape> = new Map([
             'request_hash',
             'result_json',
             'committed_at',
+          ],
+        },
+      ],
+      indexes: VERSION_1_MINIMUM_SCHEMA_SHAPE.indexes,
+    },
+  ],
+  [
+    3,
+    {
+      tables: [
+        ...VERSION_1_MINIMUM_SCHEMA_SHAPE.tables,
+        {
+          name: 'memory_extraction_cursors',
+          requiredColumns: ['session_id', 'processed_ordinal', 'updated_at'],
+        },
+        {
+          name: 'memory_extraction_receipts',
+          requiredColumns: [
+            'operation_id',
+            'session_id',
+            'request_hash',
+            'result_json',
+            'committed_at',
+          ],
+        },
+        {
+          name: 'memory_extraction_failures',
+          requiredColumns: [
+            'session_id',
+            'from_ordinal',
+            'through_ordinal',
+            'coverage_hash',
+            'first_operation_id',
+            'first_trigger',
+            'first_failure_class',
+            'failed_at',
           ],
         },
       ],

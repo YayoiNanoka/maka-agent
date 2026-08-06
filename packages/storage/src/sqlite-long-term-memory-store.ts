@@ -25,6 +25,7 @@ import {
   type CommitMemoryExtractionRequest,
   type MemoryExtractionCommitResult,
   type MemoryExtractionCursor,
+  type MemoryExtractionFailureClass,
   type MemoryExtractionReceipt,
   type MemoryItem,
   type MemoryItemKey,
@@ -36,7 +37,10 @@ import {
   type MemoryItemWrite,
   type MemoryMutationResult,
   type MemoryWriteOperationResult,
+  type PendingMemoryExtractionFailure,
   type SearchMemoryItemsByKeyRequest,
+  type SettleMemoryExtractionFailureRequest,
+  type SettleMemoryExtractionFailureResult,
 } from '@maka/core/long-term-memory';
 import {
   assertSupportedSqliteLongTermMemorySchemaVersion,
@@ -144,6 +148,17 @@ interface MemoryExtractionCursorRow {
   session_id: unknown;
   processed_ordinal: unknown;
   updated_at: unknown;
+}
+
+interface MemoryExtractionFailureRow {
+  session_id: unknown;
+  from_ordinal: unknown;
+  through_ordinal: unknown;
+  coverage_hash: unknown;
+  first_operation_id: unknown;
+  first_trigger: unknown;
+  first_failure_class: unknown;
+  failed_at: unknown;
 }
 
 interface MemoryExtractionReceiptRow {
@@ -270,6 +285,7 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       'nextCursorOrdinal',
       false,
     );
+    const coverageHash = requiredHash(request.coverageHash, 'coverageHash');
     if (nextCursorOrdinal <= expectedCursorOrdinal) {
       throw new Error('Memory extraction Cursor must advance');
     }
@@ -278,11 +294,18 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       request.requestedItemIndexes,
       items.length,
     );
+    const noOpReason = normalizeExtractionNoOpReason(request.noOpReason);
     if (request.trigger !== 'remember' && request.trigger !== 'extract') {
       throw new Error('Memory extraction trigger is invalid');
     }
     if (request.trigger === 'extract' && requestedItemIndexes.length > 0) {
       throw new Error('Incidental extraction cannot expose requested Items');
+    }
+    if (
+      noOpReason &&
+      (request.trigger !== 'remember' || items.length > 0 || requestedItemIndexes.length > 0)
+    ) {
+      throw new Error('A rejected explicit Memory request must commit as an empty no-op');
     }
     validateExtractionObservedAtForCommit(items, committedAt);
     const requestHash = hashCanonical({
@@ -290,8 +313,10 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       sessionId,
       expectedCursorOrdinal,
       nextCursorOrdinal,
+      coverageHash,
       items,
       requestedItemIndexes,
+      noOpReason: noOpReason ?? null,
       trigger: request.trigger,
     });
 
@@ -333,6 +358,23 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
         );
       }
 
+      const pendingFailure = this.#readPendingExtractionFailureRow(sessionId);
+      if (pendingFailure) {
+        const pending = decodePendingExtractionFailure(pendingFailure);
+        if (
+          pending.firstOperationId === operationId ||
+          pending.fromOrdinal !== expectedCursorOrdinal + 1 ||
+          pending.throughOrdinal !== nextCursorOrdinal ||
+          pending.coverageHash !== coverageHash ||
+          pending.firstTrigger !== request.trigger
+        ) {
+          throw new MemoryItemStoreConflictError(
+            'cursor_conflict',
+            `Memory extraction pending range for Session ${sessionId} does not match the commit`,
+          );
+        }
+      }
+
       const results = items.map((item, index) => this.#createItem(item, index, committedAt));
       const requestedItems = requestedItemIndexes.map((index) => {
         const result = results[index]!;
@@ -348,6 +390,7 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
               ? 'remembered'
               : 'not_applicable',
         requestedItems,
+        ...(noOpReason ? { noOpReason } : {}),
         committedAt,
       };
 
@@ -372,6 +415,11 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
              VALUES (?, ?, ?)`,
           )
           .run(sessionId, nextCursorOrdinal, committedAt);
+      }
+      if (pendingFailure) {
+        this.#database
+          .prepare('DELETE FROM memory_extraction_failures WHERE session_id = ?')
+          .run(sessionId);
       }
       this.#options.failpoint?.('after_cursor_write');
 
@@ -407,6 +455,42 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
     }
   }
 
+  async initializeExtractionCursor(
+    sessionId: string,
+    processedOrdinal: number,
+  ): Promise<MemoryExtractionCursor> {
+    this.#assertOpen();
+    const normalizedSessionId = normalizeIdentifier(sessionId, 'sessionId');
+    const normalizedOrdinal = normalizeCursorOrdinal(processedOrdinal, 'processedOrdinal', false);
+    const updatedAt = normalizeTimestamp((this.#options.now ?? Date.now)(), 'current time');
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const existing = this.#readExtractionCursorRow(normalizedSessionId);
+      if (existing) {
+        const decoded = decodeExtractionCursor(existing);
+        this.#database.exec('COMMIT');
+        return decoded;
+      }
+      if (this.#readPendingExtractionFailureRow(normalizedSessionId)) {
+        throw new MemoryItemStoreConflictError(
+          'cursor_conflict',
+          `Memory extraction for Session ${normalizedSessionId} has a pending failed range`,
+        );
+      }
+      this.#database
+        .prepare(
+          `INSERT INTO memory_extraction_cursors(session_id, processed_ordinal, updated_at)
+           VALUES (?, ?, ?)`,
+        )
+        .run(normalizedSessionId, normalizedOrdinal, updatedAt);
+      this.#database.exec('COMMIT');
+      return { sessionId: normalizedSessionId, processedOrdinal: normalizedOrdinal, updatedAt };
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
+  }
+
   async readExtractionCursor(sessionId: string): Promise<MemoryExtractionCursor | undefined> {
     this.#assertOpen();
     const normalizedSessionId = normalizeIdentifier(sessionId, 'sessionId');
@@ -414,6 +498,235 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       const row = this.#readExtractionCursorRow(normalizedSessionId);
       return row ? decodeExtractionCursor(row) : undefined;
     });
+  }
+
+  async readPendingExtractionFailure(
+    sessionId: string,
+  ): Promise<PendingMemoryExtractionFailure | undefined> {
+    this.#assertOpen();
+    const normalizedSessionId = normalizeIdentifier(sessionId, 'sessionId');
+    return this.#readSnapshot(() => {
+      const row = this.#readPendingExtractionFailureRow(normalizedSessionId);
+      return row ? decodePendingExtractionFailure(row) : undefined;
+    });
+  }
+
+  async settleExtractionFailure(
+    request: SettleMemoryExtractionFailureRequest,
+  ): Promise<SettleMemoryExtractionFailureResult> {
+    this.#assertOpen();
+    const operationId = normalizeIdentifier(request.operationId, 'operationId');
+    const sessionId = normalizeIdentifier(request.sessionId, 'sessionId');
+    const expectedCursorOrdinal = normalizeCursorOrdinal(
+      request.expectedCursorOrdinal,
+      'expectedCursorOrdinal',
+      true,
+    );
+    const failedThroughOrdinal = normalizeCursorOrdinal(
+      request.failedThroughOrdinal,
+      'failedThroughOrdinal',
+      false,
+    );
+    if (failedThroughOrdinal <= expectedCursorOrdinal) {
+      throw new Error('Memory extraction failed range must advance beyond the Cursor');
+    }
+    const coverageHash = requiredHash(request.coverageHash, 'coverageHash');
+    const failureClass = normalizeExtractionFailureClass(request.failureClass);
+    if (request.trigger !== 'remember' && request.trigger !== 'extract') {
+      throw new Error('Memory extraction trigger is invalid');
+    }
+    const recordedAt = normalizeTimestamp((this.#options.now ?? Date.now)(), 'current time');
+
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const existingReceipt = this.#readExtractionReceiptRow(operationId);
+      if (existingReceipt) {
+        const receipt = decodeExtractionReceipt(existingReceipt);
+        if (receipt.status !== 'discarded') {
+          throw new MemoryItemStoreConflictError(
+            'operation_reused',
+            `Memory operation ${operationId} already completed successfully`,
+          );
+        }
+        const discarded = receipt.discardedRange!;
+        const replayHash = hashCanonical({
+          kind: 'memory_extraction_discard',
+          sessionId,
+          trigger: request.trigger,
+          discardedRange: discarded,
+        });
+        if (
+          receipt.sessionId !== sessionId ||
+          requiredHash(existingReceipt.request_hash, 'request_hash') !== replayHash ||
+          discarded.fromOrdinal !== expectedCursorOrdinal + 1 ||
+          discarded.throughOrdinal !== failedThroughOrdinal ||
+          discarded.coverageHash !== coverageHash ||
+          discarded.finalFailureClass !== failureClass
+        ) {
+          throw new MemoryItemStoreConflictError(
+            'operation_reused',
+            `Memory operation ${operationId} was already used for a different failed range`,
+          );
+        }
+        const cursor = this.#readExtractionCursorRow(sessionId);
+        if (!cursor) throw new Error(`Discarded Memory extraction ${operationId} lost its Cursor`);
+        this.#database.exec('COMMIT');
+        return {
+          status: 'discarded',
+          replayed: true,
+          receipt,
+          cursor: decodeExtractionCursor(cursor),
+        };
+      }
+
+      const cursorRow = this.#readExtractionCursorRow(sessionId);
+      const currentOrdinal = cursorRow
+        ? requiredPositiveInteger(cursorRow.processed_ordinal, 'processed_ordinal')
+        : 0;
+      if (currentOrdinal !== expectedCursorOrdinal) {
+        throw new MemoryItemStoreConflictError(
+          'cursor_conflict',
+          `Memory extraction Cursor for Session ${sessionId} is ${currentOrdinal}, expected ${expectedCursorOrdinal}`,
+        );
+      }
+
+      const pendingRow = this.#readPendingExtractionFailureRow(sessionId);
+      if (!pendingRow) {
+        const pending: PendingMemoryExtractionFailure = {
+          sessionId,
+          fromOrdinal: expectedCursorOrdinal + 1,
+          throughOrdinal: failedThroughOrdinal,
+          coverageHash,
+          firstOperationId: operationId,
+          firstTrigger: request.trigger,
+          firstFailureClass: failureClass,
+          failedAt: recordedAt,
+        };
+        this.#database
+          .prepare(
+            `INSERT INTO memory_extraction_failures(
+               session_id, from_ordinal, through_ordinal, coverage_hash,
+               first_operation_id, first_trigger, first_failure_class, failed_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            sessionId,
+            pending.fromOrdinal,
+            pending.throughOrdinal,
+            pending.coverageHash,
+            pending.firstOperationId,
+            pending.firstTrigger,
+            pending.firstFailureClass,
+            pending.failedAt,
+          );
+        this.#database.exec('COMMIT');
+        return { status: 'retry_later', replayed: false, pending };
+      }
+
+      const pending = decodePendingExtractionFailure(pendingRow);
+      if (pending.firstOperationId === operationId) {
+        if (
+          pending.fromOrdinal !== expectedCursorOrdinal + 1 ||
+          pending.throughOrdinal !== failedThroughOrdinal ||
+          pending.coverageHash !== coverageHash ||
+          pending.firstTrigger !== request.trigger ||
+          pending.firstFailureClass !== failureClass
+        ) {
+          throw new MemoryItemStoreConflictError(
+            'operation_reused',
+            `Memory operation ${operationId} was already used for a different failed range`,
+          );
+        }
+        this.#database.exec('COMMIT');
+        return { status: 'retry_later', replayed: true, pending };
+      }
+      if (
+        pending.fromOrdinal !== expectedCursorOrdinal + 1 ||
+        pending.throughOrdinal !== failedThroughOrdinal ||
+        pending.coverageHash !== coverageHash ||
+        pending.firstTrigger !== request.trigger
+      ) {
+        throw new MemoryItemStoreConflictError(
+          'cursor_conflict',
+          `Memory extraction failed range for Session ${sessionId} changed before discard`,
+        );
+      }
+
+      const discardedRange = {
+        fromOrdinal: pending.fromOrdinal,
+        throughOrdinal: pending.throughOrdinal,
+        coverageHash: pending.coverageHash,
+        firstFailureClass: pending.firstFailureClass,
+        finalFailureClass: failureClass,
+      } as const;
+      const receipt: MemoryExtractionReceipt = {
+        operationId,
+        sessionId,
+        status: 'discarded',
+        requestedItems: [],
+        discardedRange,
+        committedAt: recordedAt,
+      };
+      const requestHash = hashCanonical({
+        kind: 'memory_extraction_discard',
+        sessionId,
+        trigger: request.trigger,
+        discardedRange,
+      });
+
+      if (cursorRow) {
+        const updated = this.#database
+          .prepare(
+            `UPDATE memory_extraction_cursors
+             SET processed_ordinal = ?, updated_at = ?
+             WHERE session_id = ? AND processed_ordinal = ?`,
+          )
+          .run(failedThroughOrdinal, recordedAt, sessionId, expectedCursorOrdinal);
+        if (updated.changes !== 1) {
+          throw new MemoryItemStoreConflictError(
+            'cursor_conflict',
+            `Memory extraction Cursor for Session ${sessionId} changed during discard`,
+          );
+        }
+      } else {
+        this.#database
+          .prepare(
+            `INSERT INTO memory_extraction_cursors(session_id, processed_ordinal, updated_at)
+             VALUES (?, ?, ?)`,
+          )
+          .run(sessionId, failedThroughOrdinal, recordedAt);
+      }
+      this.#options.failpoint?.('after_cursor_write');
+      this.#database
+        .prepare('DELETE FROM memory_extraction_failures WHERE session_id = ?')
+        .run(sessionId);
+      this.#options.failpoint?.('before_operation_write');
+      this.#database
+        .prepare(
+          `INSERT INTO memory_write_operations(
+             operation_id, operation_type, request_hash, result_json, committed_at
+           ) VALUES (?, 'batch', ?, '[]', ?)`,
+        )
+        .run(operationId, requestHash, recordedAt);
+      this.#database
+        .prepare(
+          `INSERT INTO memory_extraction_receipts(
+             operation_id, session_id, request_hash, result_json, committed_at
+           ) VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(operationId, sessionId, requestHash, JSON.stringify(receipt), recordedAt);
+      this.#database.exec('COMMIT');
+      this.#options.failpoint?.('after_commit');
+      return {
+        status: 'discarded',
+        replayed: false,
+        receipt,
+        cursor: { sessionId, processedOrdinal: failedThroughOrdinal, updatedAt: recordedAt },
+      };
+    } catch (error) {
+      rollback(this.#database);
+      throw error;
+    }
   }
 
   async readExtractionReceipt(operationId: string): Promise<MemoryExtractionReceipt | undefined> {
@@ -719,6 +1032,16 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
          FROM memory_extraction_cursors WHERE session_id = ?`,
       )
       .get(sessionId) as MemoryExtractionCursorRow | undefined;
+  }
+
+  #readPendingExtractionFailureRow(sessionId: string): MemoryExtractionFailureRow | undefined {
+    return this.#database
+      .prepare(
+        `SELECT session_id, from_ordinal, through_ordinal, coverage_hash,
+                first_operation_id, first_trigger, first_failure_class, failed_at
+         FROM memory_extraction_failures WHERE session_id = ?`,
+      )
+      .get(sessionId) as MemoryExtractionFailureRow | undefined;
   }
 
   #readExtractionReceiptRow(operationId: string): MemoryExtractionReceiptRow | undefined {
@@ -1043,6 +1366,34 @@ function normalizeCursorOrdinal(value: unknown, name: string, allowZero: boolean
   return value as number;
 }
 
+function normalizeExtractionFailureClass(value: unknown): MemoryExtractionFailureClass {
+  if (
+    value !== 'provider' &&
+    value !== 'schema' &&
+    value !== 'evidence' &&
+    value !== 'localization' &&
+    value !== 'requested_admission'
+  ) {
+    throw new Error('Invalid Memory extraction failure class');
+  }
+  return value;
+}
+
+function normalizeExtractionTrigger(value: unknown): 'remember' | 'extract' {
+  if (value !== 'remember' && value !== 'extract') {
+    throw new Error('Invalid Memory extraction trigger');
+  }
+  return value;
+}
+
+function normalizeExtractionNoOpReason(value: unknown): 'sensitive_information' | undefined {
+  if (value === undefined) return undefined;
+  if (value !== 'sensitive_information') {
+    throw new Error('Invalid Memory extraction no-op reason');
+  }
+  return value;
+}
+
 function normalizeRequestedItemIndexes(value: unknown, itemCount: number): number[] {
   if (!Array.isArray(value)) throw new Error('requestedItemIndexes must be an array');
   const indexes = [...new Set(value)];
@@ -1197,6 +1548,21 @@ function decodeExtractionCursor(row: MemoryExtractionCursorRow): MemoryExtractio
   };
 }
 
+function decodePendingExtractionFailure(
+  row: MemoryExtractionFailureRow,
+): PendingMemoryExtractionFailure {
+  return {
+    sessionId: requiredIdentifierString(row.session_id, 'session_id'),
+    fromOrdinal: requiredPositiveInteger(row.from_ordinal, 'from_ordinal'),
+    throughOrdinal: requiredPositiveInteger(row.through_ordinal, 'through_ordinal'),
+    coverageHash: requiredHash(row.coverage_hash, 'coverage_hash'),
+    firstOperationId: requiredIdentifierString(row.first_operation_id, 'first_operation_id'),
+    firstTrigger: normalizeExtractionTrigger(row.first_trigger),
+    firstFailureClass: normalizeExtractionFailureClass(row.first_failure_class),
+    failedAt: requiredNonNegativeInteger(row.failed_at, 'failed_at'),
+  };
+}
+
 function decodeExtractionReceipt(row: MemoryExtractionReceiptRow): MemoryExtractionReceipt {
   const operationId = requiredIdentifierString(row.operation_id, 'operation_id');
   const sessionId = requiredIdentifierString(row.session_id, 'session_id');
@@ -1219,7 +1585,7 @@ function decodeExtractionReceipt(row: MemoryExtractionReceiptRow): MemoryExtract
   if (
     receipt.operationId !== operationId ||
     receipt.sessionId !== sessionId ||
-    !['remembered', 'not_applicable', 'extracted'].includes(String(receipt.status)) ||
+    !['remembered', 'not_applicable', 'extracted', 'discarded'].includes(String(receipt.status)) ||
     receipt.committedAt !== committedAt ||
     !Array.isArray(receipt.requestedItems)
   ) {
@@ -1244,11 +1610,37 @@ function decodeExtractionReceipt(row: MemoryExtractionReceiptRow): MemoryExtract
   ) {
     throw new Error(`Memory extraction ${operationId} has inconsistent requested Items`);
   }
+  const noOpReason = normalizeExtractionNoOpReason(receipt.noOpReason);
+  if (noOpReason && receipt.status !== 'not_applicable') {
+    throw new Error(`Memory extraction ${operationId} has an invalid no-op reason`);
+  }
+  let discardedRange: MemoryExtractionReceipt['discardedRange'];
+  if (receipt.status === 'discarded') {
+    const value = receipt.discardedRange;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`Memory extraction ${operationId} is missing its discarded range`);
+    }
+    const range = value as Record<string, unknown>;
+    discardedRange = {
+      fromOrdinal: requiredPositiveInteger(range.fromOrdinal, 'discarded fromOrdinal'),
+      throughOrdinal: requiredPositiveInteger(range.throughOrdinal, 'discarded throughOrdinal'),
+      coverageHash: requiredHash(range.coverageHash, 'discarded coverageHash'),
+      firstFailureClass: normalizeExtractionFailureClass(range.firstFailureClass),
+      finalFailureClass: normalizeExtractionFailureClass(range.finalFailureClass),
+    };
+    if (discardedRange.throughOrdinal < discardedRange.fromOrdinal) {
+      throw new Error(`Memory extraction ${operationId} has an invalid discarded range`);
+    }
+  } else if (receipt.discardedRange !== undefined) {
+    throw new Error(`Memory extraction ${operationId} has an unexpected discarded range`);
+  }
   return {
     operationId,
     sessionId,
     status: receipt.status as MemoryExtractionReceipt['status'],
     requestedItems,
+    ...(noOpReason ? { noOpReason } : {}),
+    ...(discardedRange ? { discardedRange } : {}),
     committedAt,
   };
 }

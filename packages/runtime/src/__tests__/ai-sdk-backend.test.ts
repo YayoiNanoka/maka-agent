@@ -87,7 +87,7 @@ import type { OpenAiResponsesSemanticBaseline } from '../openai-responses-contin
 import type { OpenAiResponsesTransportState } from '../openai-responses-websocket.js';
 
 describe('AiSdkBackend Memory Extraction triggers', () => {
-  test('does not expose Memory triggers on the native OpenAI Responses lane', async () => {
+  test('exposes explicitly unsupported Memory triggers on the native OpenAI Responses lane', async () => {
     const model = completionModel();
     let memoryCalled = false;
     const backend = createTestAiSdkBackend({
@@ -119,7 +119,7 @@ describe('AiSdkBackend Memory Extraction triggers', () => {
       model.doStreamCalls[0]?.tools?.some(
         (tool) => tool.name === 'memory_remember' || tool.name === 'memory_extract',
       ) ?? false,
-      false,
+      true,
     );
     assert.equal(memoryCalled, false);
   });
@@ -205,7 +205,7 @@ describe('AiSdkBackend Memory Extraction triggers', () => {
     assert.match(JSON.stringify(model.doStreamCalls[1]?.prompt), /User prefers concise Chinese/);
   });
 
-  test('keeps only user-authored messages in the frozen Memory evidence prefix', async () => {
+  test('keeps the complete frozen provider context while evidence authority remains user-only', async () => {
     let modelCalls = 0;
     let snapshot: MemoryExtractionSourceSnapshot | undefined;
     const model = new MockLanguageModelV4({
@@ -299,11 +299,16 @@ describe('AiSdkBackend Memory Extraction triggers', () => {
 
     assert.ok(snapshot);
     const messagesJson = JSON.stringify(snapshot.sourceMessages);
-    assert.doesNotMatch(messagesJson, /TOOL-ONLY-SECRET|read-call|volatile\.json/);
-    assert.equal(
-      snapshot.sourceMessages.every((message) => message.role === 'user'),
-      true,
+    assert.match(messagesJson, /TOOL-ONLY-SECRET/);
+    assert.match(messagesJson, /read-call/);
+    assert.match(messagesJson, /volatile\.json/);
+    assert.ok(snapshot.sourceMessages.some((message) => message.role === 'assistant'));
+    assert.ok(snapshot.sourceMessages.some((message) => message.role === 'tool'));
+    const sourceUserEvent = durable.ledger.find(
+      (event) => event.role === 'user' && event.content?.kind === 'text',
     );
+    assert.ok(sourceUserEvent);
+    assert.deepEqual(snapshot.sourceEventMessagePositions?.[sourceUserEvent.id], [0]);
     assert.ok(snapshot.sourceTools.Read, 'Tool schemas remain available for provider-prefix reuse');
   });
 

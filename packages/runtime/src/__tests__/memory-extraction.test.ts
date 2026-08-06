@@ -2,7 +2,15 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 
-import { projectMemoryExtractionEvidence } from '../memory-extraction-evidence.js';
+import {
+  bindProviderVisibleEvidence,
+  projectMemoryExtractionEvidence,
+} from '../memory-extraction-evidence.js';
+import {
+  buildMemoryExtractionTriggerTools,
+  MEMORY_EXTRACT_TOOL_NAME,
+  MEMORY_REMEMBER_TOOL_NAME,
+} from '../memory-extraction.js';
 import {
   admitMemoryProposalItem,
   buildFirstMemoryProposalPrompt,
@@ -13,6 +21,10 @@ describe('bounded Memory Extraction', () => {
   test('projects only user text, excluding Assistant, Thinking, and every Tool event', () => {
     const evidence = projectMemoryExtractionEvidence([
       event('user-1', 'user', { kind: 'text', text: 'Use concise Chinese answers.' }),
+      {
+        ...event('host-user-1', 'user', { kind: 'text', text: 'Host-authored instruction.' }),
+        author: 'host',
+      },
       event('thinking-1', 'model', { kind: 'thinking', text: 'private reasoning' }),
       event('assistant-1', 'model', { kind: 'text', text: 'Understood.' }),
       event('tool-call-1', 'model', {
@@ -57,6 +69,47 @@ describe('bounded Memory Extraction', () => {
     });
     assert.match(prompt, /Current time: 60000/);
     assert.match(prompt, /"observedAt":0/);
+    assert.match(prompt, /Do not call or request any tool/);
+  });
+
+  test('returns an explicit unsupported result without starting extraction', async () => {
+    let snapshotCalled = false;
+    let extractMarked = false;
+    const tools = buildMemoryExtractionTriggerTools({
+      capabilities: {
+        gate: async () => ({ allowed: true }),
+        remember: async () => {
+          throw new Error('must not run');
+        },
+        extract: () => {
+          throw new Error('must not run');
+        },
+      },
+      snapshot: () => {
+        snapshotCalled = true;
+        return undefined;
+      },
+      markExtractRequested: () => {
+        extractMarked = true;
+      },
+      unsupportedReason: 'provider_unsupported',
+    });
+    const remember = tools.find(({ name }) => name === MEMORY_REMEMBER_TOOL_NAME);
+    const extract = tools.find(({ name }) => name === MEMORY_EXTRACT_TOOL_NAME);
+    assert.ok(remember);
+    assert.ok(extract);
+
+    assert.deepEqual(await remember.impl({}, {} as never), {
+      status: 'unavailable',
+      reason: 'provider_unsupported',
+      requestedItems: [],
+    });
+    assert.deepEqual(await extract.impl({}, {} as never), {
+      status: 'unavailable',
+      reason: 'provider_unsupported',
+    });
+    assert.equal(snapshotCalled, false);
+    assert.equal(extractMarked, false);
   });
 
   test('parses only the strict top-level Proposal schema', () => {
@@ -139,6 +192,47 @@ describe('bounded Memory Extraction', () => {
       admitMemoryProposalItem({ ...base, kind: 'knowledge', content: 'Maka uses SQLite.' }, byRef)
         ?.scopeType,
       'global',
+    );
+  });
+
+  test('admits quotes only from text actually visible to the Provider', () => {
+    const hiddenSuffix = 'visible only through the full provider message';
+    const fullText = `${'x'.repeat(4_100)} ${hiddenSuffix}`;
+    const sourceEvent = event('long-user', 'user', { kind: 'text', text: fullText });
+    const projected = projectMemoryExtractionEvidence([sourceEvent]);
+    assert.doesNotMatch(projected[0]!.text, new RegExp(hiddenSuffix));
+    const base = {
+      content: 'The user supplied a durable detail.',
+      kind: 'note' as const,
+      statementType: 'fact' as const,
+      temporalType: 'undated' as const,
+      eventStartedAt: null,
+      eventEndedAt: null,
+      scope: 'workspace' as const,
+      keys: [{ key: 'durable detail', type: 'concept' as const }],
+      evidence: [{ sourceRef: 'event:long-user', quote: hiddenSuffix }],
+    };
+
+    const bounded = new Map(projected.map((entry) => [entry.sourceRef, entry]));
+    assert.equal(admitMemoryProposalItem(base, bounded), undefined);
+
+    const bound = bindProviderVisibleEvidence(projected, [{ role: 'user', content: fullText }], {
+      'long-user': [0],
+    });
+    const providerVisible = new Map(bound.map((entry) => [entry.sourceRef, entry]));
+    assert.equal(admitMemoryProposalItem(base, providerVisible)?.citedEvents[0]?.id, 'long-user');
+
+    const assistantMapped = bindProviderVisibleEvidence(
+      projected,
+      [{ role: 'assistant', content: fullText }],
+      { 'long-user': [0] },
+    );
+    assert.equal(
+      admitMemoryProposalItem(
+        base,
+        new Map(assistantMapped.map((entry) => [entry.sourceRef, entry])),
+      ),
+      undefined,
     );
   });
 });

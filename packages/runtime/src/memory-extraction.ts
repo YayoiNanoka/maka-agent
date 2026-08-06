@@ -2,13 +2,19 @@ import { createHash } from 'node:crypto';
 import type {
   CommitMemoryExtractionRequest,
   MemoryExtractionCursor,
+  MemoryExtractionFailureClass,
   MemoryExtractionReceipt,
   MemoryItemWrite,
+  PendingMemoryExtractionFailure,
+  SettleMemoryExtractionFailureRequest,
+  SettleMemoryExtractionFailureResult,
 } from '@maka/core/long-term-memory';
+import { redactSecrets } from '@maka/core/redaction';
 import type { SessionHeader } from '@maka/core/session';
 import { z } from 'zod';
 import {
   fitMemoryExtractionEvidence,
+  bindProviderVisibleEvidence,
   isMemoryToolName,
   planMemoryCoverage,
   projectMemoryExtractionEvidence,
@@ -17,16 +23,23 @@ import {
   type MemoryCoveragePlan,
 } from './memory-extraction-evidence.js';
 import {
-  admitMemoryProposalItem,
+  admitMemoryProposalItemDetailed,
   buildFirstMemoryProposalPrompt,
   buildLocalizedMemoryProposalPrompt,
+  buildMemoryCanonicalizationPrompt,
   deterministicMemoryPolicyRejection,
   minuteTimestamp,
+  parseMemoryCanonicalization,
   parseLocalizedMemoryProposal,
   parseMemoryProposal,
   type AdmittedProposalFields,
   type MemoryProposalItem,
 } from './memory-extraction-proposal.js';
+import { isHistoryCompactContentEvent } from './history-compact.js';
+import {
+  matchHistoryCompactCheckpointPrefix,
+  type HistoryCompactCheckpoint,
+} from './history-compact-checkpoint.js';
 import type { ModelMessage, ModelToolSet } from './model-protocol.js';
 import type { MakaTool, MakaToolContext } from './tool-runtime.js';
 
@@ -37,13 +50,13 @@ export type MemoryExtractionGate =
   | { readonly allowed: true }
   | { readonly allowed: false; readonly reason: 'disabled' | 'incognito' | 'unavailable' };
 
-/** User-only projection frozen from the source request at the Tool/terminal boundary. */
+/** Exact provider-visible prefix frozen from the source request at the Tool/terminal boundary. */
 export interface MemoryExtractionSourceSnapshot {
   readonly trigger: MemoryExtractionTrigger;
   readonly sourceHeader: Pick<SessionHeader, 'llmConnectionSlug' | 'model' | 'thinkingLevel'>;
   readonly sourceSystemPrompt?: string;
   readonly sourceMessages: readonly ModelMessage[];
-  /** RuntimeEvent-to-message positions remapped onto the user-only projection. */
+  /** RuntimeEvent-to-message positions in the frozen provider prefix. */
   readonly sourceEventMessagePositions?: Readonly<Record<string, readonly number[]>>;
   readonly sourceTools: ModelToolSet;
   readonly sourceActiveTools: readonly string[];
@@ -66,8 +79,16 @@ interface RememberedMemoryItem {
 
 export type MemoryRememberResult =
   | { readonly status: 'remembered'; readonly requestedItems: readonly RememberedMemoryItem[] }
-  | { readonly status: 'not_applicable'; readonly requestedItems: readonly [] }
-  | { readonly status: 'unavailable'; readonly requestedItems: readonly [] };
+  | {
+      readonly status: 'not_applicable';
+      readonly requestedItems: readonly [];
+      readonly reason?: 'sensitive_information';
+    }
+  | {
+      readonly status: 'unavailable';
+      readonly requestedItems: readonly [];
+      readonly reason?: 'provider_unsupported';
+    };
 
 export interface MemoryExtractionSourceCapabilities {
   readonly gate: () => Promise<MemoryExtractionGate>;
@@ -79,17 +100,57 @@ export interface MemoryExtractionEnginePorts {
   readonly readGate: (sessionId: string) => Promise<MemoryExtractionGate>;
   readonly readSessionEvents: (sessionId: string) => Promise<readonly MemoryExtractionEventEntry[]>;
   readonly readCursor: (sessionId: string) => Promise<MemoryExtractionCursor | undefined>;
+  readonly initializeCursor: (
+    sessionId: string,
+    processedOrdinal: number,
+  ) => Promise<MemoryExtractionCursor>;
+  readonly readPendingFailure: (
+    sessionId: string,
+  ) => Promise<PendingMemoryExtractionFailure | undefined>;
+  readonly readLatestCompactionCheckpoint: (
+    sessionId: string,
+  ) => Promise<HistoryCompactCheckpoint | undefined>;
   readonly readReceipt: (operationId: string) => Promise<MemoryExtractionReceipt | undefined>;
   readonly generate: (input: {
     readonly snapshot: MemoryExtractionSourceSnapshot;
     readonly prompt: string;
-    readonly stage: 'proposal' | 'localized';
+    readonly stage: 'proposal' | 'localized' | 'canonicalize';
     readonly abortSignal: AbortSignal;
-  }) => Promise<string>;
+  }) => Promise<
+    | { readonly ok: true; readonly text: string }
+    | {
+        readonly ok: false;
+        readonly errorClass:
+          | 'aborted'
+          | 'timeout'
+          | 'configuration'
+          | 'provider'
+          | 'persistence'
+          | 'unknown';
+      }
+  >;
   readonly commit: (request: CommitMemoryExtractionRequest) => Promise<{
     readonly receipt: MemoryExtractionReceipt;
   }>;
+  readonly settleFailure: (
+    request: SettleMemoryExtractionFailureRequest,
+  ) => Promise<SettleMemoryExtractionFailureResult>;
   readonly now?: () => number;
+}
+
+const MAX_MEMORY_EXTRACTION_MODEL_CALLS = 3;
+
+type CoverageProcessingResult =
+  | {
+      readonly kind: 'committed';
+      readonly receipt: MemoryExtractionReceipt;
+      readonly nextCursorOrdinal: number;
+    }
+  | { readonly kind: 'counted_failure'; readonly failureClass: MemoryExtractionFailureClass }
+  | { readonly kind: 'blocked' };
+
+interface MemoryModelCallBudget {
+  remaining: number;
 }
 
 export function buildMemoryExtractionTriggerTools(input: {
@@ -99,6 +160,7 @@ export function buildMemoryExtractionTriggerTools(input: {
     context: MakaToolContext,
   ) => MemoryExtractionSourceSnapshot | undefined;
   readonly markExtractRequested: (context: MakaToolContext) => void;
+  readonly unsupportedReason?: 'provider_unsupported';
 }): readonly MakaTool[] {
   const noArguments = z.object({}).strict();
   return [
@@ -112,6 +174,13 @@ export function buildMemoryExtractionTriggerTools(input: {
       impl: async (_args: Record<string, never>, context: MakaToolContext) => {
         const gate = await input.capabilities.gate();
         if (!gate.allowed) return { status: 'unavailable', requestedItems: [] };
+        if (input.unsupportedReason) {
+          return {
+            status: 'unavailable',
+            reason: input.unsupportedReason,
+            requestedItems: [],
+          };
+        }
         const snapshot = input.snapshot('remember', context);
         if (!snapshot) return { status: 'unavailable', requestedItems: [] };
         return input.capabilities.remember(snapshot);
@@ -126,6 +195,9 @@ export function buildMemoryExtractionTriggerTools(input: {
       impl: async (_args: Record<string, never>, context: MakaToolContext) => {
         const gate = await input.capabilities.gate();
         if (!gate.allowed) return { status: 'unavailable' };
+        if (input.unsupportedReason) {
+          return { status: 'unavailable', reason: input.unsupportedReason };
+        }
         input.markExtractRequested(context);
         return { status: 'accepted' };
       },
@@ -149,78 +221,149 @@ export class MemoryExtractionEngine {
     const boundary = findExtractionBoundary(entries, snapshot);
     if (!boundary || !(await this.allowed(snapshot.sessionId))) return unavailableMemoryResult();
 
-    const cursor = await this.ports.readCursor(snapshot.sessionId);
+    if (!(await this.allowed(snapshot.sessionId))) return unavailableMemoryResult();
+    let cursor = await this.ports.readCursor(snapshot.sessionId);
+    if (!(await this.allowed(snapshot.sessionId))) return unavailableMemoryResult();
+    const pendingFailure = await this.ports.readPendingFailure(snapshot.sessionId);
+    if (!cursor && !pendingFailure) {
+      if (!(await this.allowed(snapshot.sessionId))) return unavailableMemoryResult();
+      const checkpoint = await this.ports.readLatestCompactionCheckpoint(snapshot.sessionId);
+      const bootstrapOrdinal = checkpoint
+        ? validCompactionBootstrapOrdinal(entries, checkpoint)
+        : undefined;
+      if (bootstrapOrdinal && bootstrapOrdinal <= boundary.ordinal) {
+        cursor = await this.ports.initializeCursor(snapshot.sessionId, bootstrapOrdinal);
+      }
+    }
+
     let expectedCursorOrdinal = cursor?.processedOrdinal ?? 0;
+    if (pendingFailure?.firstOperationId === operationId) return unavailableMemoryResult();
+    if (
+      pendingFailure &&
+      (pendingFailure.fromOrdinal !== expectedCursorOrdinal + 1 ||
+        pendingFailure.throughOrdinal > boundary.ordinal)
+    ) {
+      return unavailableMemoryResult();
+    }
+    if (pendingFailure) {
+      const retryOperationId = pendingRetryOperationId(operationId, pendingFailure);
+      const retry = await this.processRange({
+        snapshot,
+        trigger: pendingFailure.firstTrigger,
+        operationId: retryOperationId,
+        expectedCursorOrdinal,
+        targetBoundaryOrdinal: pendingFailure.throughOrdinal,
+        expectedCoverageHash: pendingFailure.coverageHash,
+        entries,
+        prioritizeCurrentTurn: false,
+      });
+      if (retry.kind === 'blocked') return unavailableMemoryResult();
+      if (retry.kind === 'committed') {
+        expectedCursorOrdinal = retry.nextCursorOrdinal;
+      } else {
+        const settled = await this.settleCountedFailure({
+          snapshot,
+          trigger: pendingFailure.firstTrigger,
+          operationId: retryOperationId,
+          expectedCursorOrdinal,
+          throughOrdinal: pendingFailure.throughOrdinal,
+          coverageHash: pendingFailure.coverageHash,
+          failureClass: retry.failureClass,
+        });
+        if (!settled || settled.status !== 'discarded') return unavailableMemoryResult();
+        expectedCursorOrdinal = settled.cursor.processedOrdinal;
+      }
+    }
+
     if (expectedCursorOrdinal >= boundary.ordinal) {
       return snapshot.trigger === 'remember'
         ? { status: 'not_applicable', requestedItems: [] }
         : unavailableMemoryResult();
     }
-    const priorityEvidence =
-      snapshot.trigger === 'remember'
-        ? projectMemoryExtractionEvidence(
-            entries
-              .filter(
-                ({ ordinal, event }) =>
-                  ordinal <= boundary.ordinal &&
-                  event.runId === snapshot.runId &&
-                  event.turnId === snapshot.turnId,
-              )
-              .map(({ event }) => event),
-          )
-        : [];
-    while (expectedCursorOrdinal < boundary.ordinal) {
-      const pendingEntries = entries.filter(
-        ({ ordinal }) => ordinal > expectedCursorOrdinal && ordinal <= boundary.ordinal,
-      );
-      let coverage = planMemoryCoverage({
-        pendingEntries,
-        sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
-      });
-      if (!coverage || coverage.entries.length === 0) return unavailableMemoryResult();
 
-      let finalBatch = coverage.entries.at(-1)!.ordinal === boundary.ordinal;
-      if (finalBatch && snapshot.trigger === 'remember') {
-        const prioritized = planMemoryCoverage({
-          pendingEntries,
-          priorityEvidence,
-          sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
-        });
-        if (!prioritized || prioritized.entries.length === 0) return unavailableMemoryResult();
-        if (prioritized.entries.at(-1)!.ordinal === boundary.ordinal) {
-          coverage = prioritized;
-        } else {
-          coverage =
-            planMemoryCoverage({
-              pendingEntries: pendingEntries.slice(0, prioritized.entries.length),
-              sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
-            }) ?? prioritized;
-          finalBatch = false;
-        }
-      }
-
-      const batchTrigger = finalBatch ? snapshot.trigger : 'extract';
-      const nextCursorOrdinal = coverage.entries.at(-1)!.ordinal;
-      const batchOperationId = finalBatch
-        ? operationId
-        : memoryExtractionBatchOperationId(operationId, expectedCursorOrdinal, nextCursorOrdinal);
-      const committed = await this.processCoverageBatch({
+    const processed = await this.processRange({
+      snapshot,
+      trigger: snapshot.trigger,
+      operationId,
+      expectedCursorOrdinal,
+      targetBoundaryOrdinal: boundary.ordinal,
+      entries,
+      prioritizeCurrentTurn: snapshot.trigger === 'remember',
+    });
+    if (processed.kind === 'committed') {
+      return rememberResultFromReceipt(snapshot.trigger, processed.receipt);
+    }
+    if (processed.kind === 'counted_failure') {
+      await this.settleCountedFailure({
         snapshot,
-        trigger: batchTrigger,
-        operationId: batchOperationId,
+        trigger: snapshot.trigger,
+        operationId,
         expectedCursorOrdinal,
-        coverage,
-        entries,
-        boundaryOrdinal: boundary.ordinal,
+        throughOrdinal: boundary.ordinal,
+        coverageHash: memoryCoverageHash(
+          entries.filter(
+            ({ ordinal }) => ordinal > expectedCursorOrdinal && ordinal <= boundary.ordinal,
+          ),
+        ),
+        failureClass: processed.failureClass,
       });
-      if (!committed) return unavailableMemoryResult();
-      expectedCursorOrdinal = nextCursorOrdinal;
-      if (finalBatch) return rememberResultFromReceipt(snapshot.trigger, committed.receipt);
     }
     return unavailableMemoryResult();
   }
 
-  private async processCoverageBatch(input: {
+  private async processRange(input: {
+    readonly snapshot: MemoryExtractionSourceSnapshot;
+    readonly trigger: MemoryExtractionTrigger;
+    readonly operationId: string;
+    readonly expectedCursorOrdinal: number;
+    readonly targetBoundaryOrdinal: number;
+    readonly expectedCoverageHash?: string;
+    readonly entries: readonly MemoryExtractionEventEntry[];
+    readonly prioritizeCurrentTurn: boolean;
+  }): Promise<CoverageProcessingResult> {
+    const pendingEntries = input.entries.filter(
+      ({ ordinal }) =>
+        ordinal > input.expectedCursorOrdinal && ordinal <= input.targetBoundaryOrdinal,
+    );
+    const coverageHash = memoryCoverageHash(pendingEntries);
+    if (input.expectedCoverageHash && input.expectedCoverageHash !== coverageHash) {
+      return { kind: 'blocked' };
+    }
+    const priorityEvidence = input.prioritizeCurrentTurn
+      ? projectMemoryExtractionEvidence(
+          pendingEntries
+            .filter(
+              ({ event }) =>
+                event.runId === input.snapshot.runId && event.turnId === input.snapshot.turnId,
+            )
+            .map(({ event }) => event),
+        )
+      : [];
+    const requestedEvidenceContainsSensitiveText =
+      input.trigger === 'remember' && memoryEvidenceContainsSensitiveText(priorityEvidence);
+    const coverage = planMemoryCoverage({
+      pendingEntries,
+      ...(input.trigger === 'remember' ? { priorityEvidence } : {}),
+      sourceEventMessagePositions: input.snapshot.sourceEventMessagePositions,
+      sourceMessages: input.snapshot.sourceMessages,
+    });
+    if (!coverage || coverage.entries.length === 0) {
+      return { kind: 'counted_failure', failureClass: 'evidence' };
+    }
+    return this.processCoverage({
+      snapshot: input.snapshot,
+      trigger: input.trigger,
+      operationId: input.operationId,
+      expectedCursorOrdinal: input.expectedCursorOrdinal,
+      coverage,
+      entries: input.entries,
+      boundaryOrdinal: input.targetBoundaryOrdinal,
+      coverageHash,
+      requestedEvidenceContainsSensitiveText,
+    });
+  }
+
+  private async processCoverage(input: {
     readonly snapshot: MemoryExtractionSourceSnapshot;
     readonly trigger: MemoryExtractionTrigger;
     readonly operationId: string;
@@ -228,7 +371,37 @@ export class MemoryExtractionEngine {
     readonly coverage: MemoryCoveragePlan;
     readonly entries: readonly MemoryExtractionEventEntry[];
     readonly boundaryOrdinal: number;
-  }): Promise<{ readonly receipt: MemoryExtractionReceipt } | undefined> {
+    readonly coverageHash: string;
+    readonly requestedEvidenceContainsSensitiveText: boolean;
+  }): Promise<CoverageProcessingResult> {
+    const { snapshot, coverage } = input;
+    if (input.requestedEvidenceContainsSensitiveText) {
+      return this.commitSensitiveNoOp(input);
+    }
+    const budget: MemoryModelCallBudget = { remaining: MAX_MEMORY_EXTRACTION_MODEL_CALLS };
+    let lastFailureClass: MemoryExtractionFailureClass = 'schema';
+    do {
+      const attempt = await this.processCoverageAttempt(input, budget);
+      if (attempt.kind === 'committed' || attempt.kind === 'blocked') return attempt;
+      lastFailureClass = attempt.failureClass;
+    } while (budget.remaining > 0);
+    return { kind: 'counted_failure', failureClass: lastFailureClass };
+  }
+
+  private async processCoverageAttempt(
+    input: {
+      readonly snapshot: MemoryExtractionSourceSnapshot;
+      readonly trigger: MemoryExtractionTrigger;
+      readonly operationId: string;
+      readonly expectedCursorOrdinal: number;
+      readonly coverage: MemoryCoveragePlan;
+      readonly entries: readonly MemoryExtractionEventEntry[];
+      readonly boundaryOrdinal: number;
+      readonly coverageHash: string;
+      readonly requestedEvidenceContainsSensitiveText: boolean;
+    },
+    budget: MemoryModelCallBudget,
+  ): Promise<CoverageProcessingResult> {
     const { snapshot, trigger, coverage } = input;
     let requestedItems: readonly MemoryProposalItem[] = [];
     let incidentalItems: readonly MemoryProposalItem[] = [];
@@ -236,8 +409,7 @@ export class MemoryExtractionEngine {
     let requestedAdmissionEvidence = coverage.evidence;
 
     if (coverage.evidence.length > 0 || trigger === 'remember') {
-      if (!(await this.allowed(snapshot.sessionId))) return undefined;
-      const firstRaw = await this.callModel(
+      const firstCall = await this.callModel(
         snapshot,
         buildFirstMemoryProposalPrompt({
           trigger,
@@ -246,39 +418,58 @@ export class MemoryExtractionEngine {
           sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
         }),
         'proposal',
+        budget,
       );
-      const first = parseMemoryProposal(firstRaw);
-      if (!first) return undefined;
+      if (firstCall.kind !== 'ok') return firstCall;
+      const first = parseMemoryProposal(firstCall.raw);
+      if (!first) return { kind: 'counted_failure', failureClass: 'schema' };
       if (
         trigger === 'extract' &&
         (first.status !== 'complete' ||
           first.requestedStatus !== 'not_applicable' ||
           first.requestedItems.length > 0)
       ) {
-        return undefined;
+        return { kind: 'counted_failure', failureClass: 'schema' };
       }
       requestedItems = first.requestedItems;
       incidentalItems = first.incidentalItems;
       requestedStatus = first.requestedStatus;
 
       if (first.status === 'search_required') {
-        if (trigger !== 'remember' || !(await this.allowed(snapshot.sessionId))) return undefined;
+        if (trigger !== 'remember' || !(await this.allowed(snapshot.sessionId))) {
+          return { kind: 'blocked' };
+        }
         const localizedEntries = searchSameSessionMemoryHistory(
           input.entries,
           input.boundaryOrdinal,
           first.search,
         );
-        if (localizedEntries.length === 0) return undefined;
-        const localizedEvidence = fitMemoryExtractionEvidence(
+        if (localizedEntries.length === 0) {
+          return { kind: 'counted_failure', failureClass: 'localization' };
+        }
+        const localizedVisibleEvidence = bindProviderVisibleEvidence(
           projectMemoryExtractionEvidence(
             localizedEntries.map(({ event }) => event),
             { snippetTerms: first.search.terms },
           ),
+          snapshot.sourceMessages,
+          snapshot.sourceEventMessagePositions,
+        );
+        const localizedEvidence = fitMemoryExtractionEvidence(
+          localizedVisibleEvidence,
           undefined,
           snapshot.sourceEventMessagePositions,
         );
-        if (!localizedEvidence || !(await this.allowed(snapshot.sessionId))) return undefined;
-        const localizedRaw = await this.callModel(
+        if (!localizedEvidence) {
+          return { kind: 'counted_failure', failureClass: 'evidence' };
+        }
+        if (memoryEvidenceContainsSensitiveText(localizedEvidence)) {
+          return this.commitSensitiveNoOp(input);
+        }
+        if (budget.remaining <= 0) {
+          return { kind: 'counted_failure', failureClass: 'localization' };
+        }
+        const localizedCall = await this.callModel(
           snapshot,
           buildLocalizedMemoryProposalPrompt({
             now: this.now(),
@@ -286,18 +477,25 @@ export class MemoryExtractionEngine {
             sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
           }),
           'localized',
+          budget,
         );
-        const localized = parseLocalizedMemoryProposal(localizedRaw);
-        if (!localized || localized.status === 'cannot_resolve') return undefined;
+        if (localizedCall.kind !== 'ok') return localizedCall;
+        const localized = parseLocalizedMemoryProposal(localizedCall.raw);
+        if (!localized) return { kind: 'counted_failure', failureClass: 'schema' };
+        if (localized.status === 'cannot_resolve') {
+          return { kind: 'counted_failure', failureClass: 'localization' };
+        }
         requestedItems = localized.requestedItems;
         requestedStatus = localized.status;
         requestedAdmissionEvidence = localizedEvidence;
       } else if (first.status === 'cannot_resolve') {
-        return undefined;
+        return { kind: 'counted_failure', failureClass: 'localization' };
       }
     }
 
-    if (requestedStatus === 'unresolved') return undefined;
+    if (requestedStatus === 'unresolved') {
+      return { kind: 'counted_failure', failureClass: 'localization' };
+    }
     const requestedEvidenceByRef = new Map(
       requestedAdmissionEvidence.map((entry) => [entry.sourceRef, entry]),
     );
@@ -305,50 +503,238 @@ export class MemoryExtractionEngine {
       coverage.evidence.map((entry) => [entry.sourceRef, entry]),
     );
     const coverageEventIds = new Set(coverage.entries.map(({ event }) => event.id));
-    const writes: MemoryItemWrite[] = [];
-    const requestedItemIndexes: number[] = [];
-    for (const [requested, proposals] of [
+    const candidates: Array<{
+      readonly candidateId: string;
+      readonly requested: boolean;
+      readonly proposal: MemoryProposalItem;
+    }> = [];
+    let noOpReason: 'sensitive_information' | undefined;
+    proposalLoop: for (const [requested, proposals] of [
       [true, requestedItems],
       [false, incidentalItems],
     ] as const) {
       for (const proposal of proposals) {
-        if (deterministicMemoryPolicyRejection(proposal)) continue;
-        const admitted = admitMemoryProposalItem(
+        if (deterministicMemoryPolicyRejection(proposal)) {
+          if (requested) {
+            noOpReason = 'sensitive_information';
+            break proposalLoop;
+          }
+          continue;
+        }
+        const admission = admitMemoryProposalItemDetailed(
           proposal,
           requested ? requestedEvidenceByRef : coverageEvidenceByRef,
         );
-        if (!admitted) continue;
-        if (!requested && admitted.citedEvents.some((event) => !coverageEventIds.has(event.id))) {
+        if (!admission.admitted) {
+          if (requested) {
+            return {
+              kind: 'counted_failure',
+              failureClass: admission.reason === 'evidence' ? 'evidence' : 'requested_admission',
+            };
+          }
           continue;
         }
-        if (requested) requestedItemIndexes.push(writes.length);
-        writes.push(memoryItemWrite(snapshot, admitted, requested));
+        if (
+          !requested &&
+          admission.fields.citedEvents.some((event) => !coverageEventIds.has(event.id))
+        ) {
+          continue;
+        }
+        candidates.push({
+          candidateId: `candidate_${candidates.length}`,
+          requested,
+          proposal,
+        });
       }
     }
 
-    if (!(await this.allowed(snapshot.sessionId))) return undefined;
-    return this.ports.commit({
+    const writes: MemoryItemWrite[] = [];
+    const requestedItemIndexes: number[] = [];
+    if (!noOpReason && candidates.length > 0) {
+      const canonicalPrompt = buildMemoryCanonicalizationPrompt({
+        now: this.now(),
+        candidates: candidates.map(({ candidateId, requested, proposal }) => ({
+          candidateId,
+          requested,
+          evidence: proposal.evidence.map(({ sourceRef, quote }) => {
+            const source = (requested ? requestedEvidenceByRef : coverageEvidenceByRef).get(
+              sourceRef,
+            )!;
+            return {
+              sourceRef,
+              quote,
+              observedAt: minuteTimestamp(Math.max(...source.events.map((event) => event.ts))),
+            };
+          }),
+        })),
+      });
+      let byId:
+        | Map<
+            string,
+            NonNullable<ReturnType<typeof parseMemoryCanonicalization>>['results'][number]
+          >
+        | undefined;
+      let canonicalFailureClass: MemoryExtractionFailureClass = 'schema';
+      while (!byId && budget.remaining > 0) {
+        const canonicalCall = await this.callModel(
+          snapshot,
+          canonicalPrompt,
+          'canonicalize',
+          budget,
+        );
+        if (canonicalCall.kind === 'blocked') return canonicalCall;
+        if (canonicalCall.kind === 'counted_failure') {
+          canonicalFailureClass = canonicalCall.failureClass;
+          continue;
+        }
+        const results = parseMemoryCanonicalization(canonicalCall.raw)?.results;
+        if (!results || results.length !== candidates.length) {
+          canonicalFailureClass = 'schema';
+          continue;
+        }
+        const indexed = new Map(results.map((result) => [result.candidateId, result]));
+        if (
+          indexed.size !== candidates.length ||
+          candidates.some(({ candidateId }) => !indexed.has(candidateId))
+        ) {
+          canonicalFailureClass = 'schema';
+          continue;
+        }
+        byId = indexed;
+      }
+      if (!byId) return { kind: 'counted_failure', failureClass: canonicalFailureClass };
+
+      for (const candidate of candidates) {
+        const result = byId.get(candidate.candidateId)!;
+        if (result.status === 'rejected') {
+          if (candidate.requested) {
+            return { kind: 'counted_failure', failureClass: 'requested_admission' };
+          }
+          continue;
+        }
+        const canonicalProposal: MemoryProposalItem = {
+          ...result.item,
+          evidence: candidate.proposal.evidence,
+        };
+        if (deterministicMemoryPolicyRejection(canonicalProposal)) {
+          if (candidate.requested) {
+            noOpReason = 'sensitive_information';
+            break;
+          }
+          continue;
+        }
+        const admission = admitMemoryProposalItemDetailed(
+          canonicalProposal,
+          candidate.requested ? requestedEvidenceByRef : coverageEvidenceByRef,
+        );
+        if (!admission.admitted) {
+          if (candidate.requested) {
+            return {
+              kind: 'counted_failure',
+              failureClass: admission.reason === 'evidence' ? 'evidence' : 'requested_admission',
+            };
+          }
+          continue;
+        }
+        if (candidate.requested) requestedItemIndexes.push(writes.length);
+        writes.push(memoryItemWrite(snapshot, admission.fields, candidate.requested));
+      }
+    }
+
+    if (noOpReason) {
+      writes.length = 0;
+      requestedItemIndexes.length = 0;
+    }
+
+    if (!(await this.allowed(snapshot.sessionId))) return { kind: 'blocked' };
+    const committed = await this.ports.commit({
       operationId: input.operationId,
       sessionId: snapshot.sessionId,
       expectedCursorOrdinal: input.expectedCursorOrdinal,
       nextCursorOrdinal: coverage.entries.at(-1)!.ordinal,
+      coverageHash: input.coverageHash,
       items: writes,
       requestedItemIndexes,
+      ...(noOpReason ? { noOpReason } : {}),
       trigger,
     });
+    return {
+      kind: 'committed',
+      receipt: committed.receipt,
+      nextCursorOrdinal: coverage.entries.at(-1)!.ordinal,
+    };
+  }
+
+  private async commitSensitiveNoOp(input: {
+    readonly snapshot: MemoryExtractionSourceSnapshot;
+    readonly trigger: MemoryExtractionTrigger;
+    readonly operationId: string;
+    readonly expectedCursorOrdinal: number;
+    readonly coverage: MemoryCoveragePlan;
+    readonly coverageHash: string;
+  }): Promise<CoverageProcessingResult> {
+    if (!(await this.allowed(input.snapshot.sessionId))) return { kind: 'blocked' };
+    const nextCursorOrdinal = input.coverage.entries.at(-1)!.ordinal;
+    const committed = await this.ports.commit({
+      operationId: input.operationId,
+      sessionId: input.snapshot.sessionId,
+      expectedCursorOrdinal: input.expectedCursorOrdinal,
+      nextCursorOrdinal,
+      coverageHash: input.coverageHash,
+      items: [],
+      requestedItemIndexes: [],
+      noOpReason: 'sensitive_information',
+      trigger: input.trigger,
+    });
+    return { kind: 'committed', receipt: committed.receipt, nextCursorOrdinal };
   }
 
   private async callModel(
     snapshot: MemoryExtractionSourceSnapshot,
     prompt: string,
-    stage: 'proposal' | 'localized',
-  ): Promise<string> {
-    if (!(await this.allowed(snapshot.sessionId))) throw new Error('Memory extraction disabled');
-    return this.ports.generate({
+    stage: 'proposal' | 'localized' | 'canonicalize',
+    budget: MemoryModelCallBudget,
+  ): Promise<
+    | { readonly kind: 'ok'; readonly raw: string }
+    | { readonly kind: 'counted_failure'; readonly failureClass: 'provider' }
+    | { readonly kind: 'blocked' }
+  > {
+    if (budget.remaining <= 0) {
+      return { kind: 'counted_failure', failureClass: 'provider' };
+    }
+    if (!(await this.allowed(snapshot.sessionId))) return { kind: 'blocked' };
+    budget.remaining -= 1;
+    const result = await this.ports.generate({
       snapshot,
       prompt,
       stage,
       abortSignal: AbortSignal.timeout(60_000),
+    });
+    if (result.ok) return { kind: 'ok', raw: result.text };
+    if (!(await this.allowed(snapshot.sessionId))) return { kind: 'blocked' };
+    return result.errorClass === 'provider' || result.errorClass === 'timeout'
+      ? { kind: 'counted_failure', failureClass: 'provider' }
+      : { kind: 'blocked' };
+  }
+
+  private async settleCountedFailure(input: {
+    readonly snapshot: MemoryExtractionSourceSnapshot;
+    readonly trigger: MemoryExtractionTrigger;
+    readonly operationId: string;
+    readonly expectedCursorOrdinal: number;
+    readonly throughOrdinal: number;
+    readonly coverageHash: string;
+    readonly failureClass: MemoryExtractionFailureClass;
+  }): Promise<SettleMemoryExtractionFailureResult | undefined> {
+    if (!(await this.allowed(input.snapshot.sessionId))) return undefined;
+    return this.ports.settleFailure({
+      operationId: input.operationId,
+      sessionId: input.snapshot.sessionId,
+      expectedCursorOrdinal: input.expectedCursorOrdinal,
+      failedThroughOrdinal: input.throughOrdinal,
+      coverageHash: input.coverageHash,
+      failureClass: input.failureClass,
+      trigger: input.trigger,
     });
   }
 
@@ -378,21 +764,56 @@ function memoryExtractionOperationId(snapshot: MemoryExtractionSourceSnapshot): 
     .digest('hex')}`;
 }
 
-function memoryExtractionBatchOperationId(
-  operationId: string,
-  expectedCursorOrdinal: number,
-  nextCursorOrdinal: number,
+function memoryCoverageHash(entries: readonly MemoryExtractionEventEntry[]): string {
+  return createHash('sha256')
+    .update(JSON.stringify(entries.map(({ ordinal, event }) => [ordinal, event.id])))
+    .digest('hex');
+}
+
+function memoryEvidenceContainsSensitiveText(
+  evidence: readonly { readonly events: readonly MemoryExtractionEventEntry['event'][] }[],
+): boolean {
+  return evidence.some(({ events }) =>
+    events.some(
+      ({ content }) => content?.kind === 'text' && redactSecrets(content.text) !== content.text,
+    ),
+  );
+}
+
+function pendingRetryOperationId(
+  triggerOperationId: string,
+  pending: PendingMemoryExtractionFailure,
 ): string {
-  return `memory_${createHash('sha256')
+  return `memory_retry_${createHash('sha256')
     .update(
       JSON.stringify({
-        operationId,
-        expectedCursorOrdinal,
-        nextCursorOrdinal,
-        kind: 'coverage_batch',
+        triggerOperationId,
+        firstOperationId: pending.firstOperationId,
+        coverageHash: pending.coverageHash,
       }),
     )
     .digest('hex')}`;
+}
+
+function validCompactionBootstrapOrdinal(
+  entries: readonly MemoryExtractionEventEntry[],
+  checkpoint: HistoryCompactCheckpoint,
+): number | undefined {
+  const compactable = entries.filter(({ event }) => isHistoryCompactContentEvent(event));
+  const matched = matchHistoryCompactCheckpointPrefix(
+    checkpoint,
+    compactable.map(({ event }) => event),
+  );
+  if (matched.reason) return undefined;
+  if (checkpoint.phase === 'mid_turn' && checkpoint.headAnchor) {
+    const anchorIndex = entries.findIndex(
+      ({ event }) => event.id === checkpoint.headAnchor!.runtimeEventId,
+    );
+    return anchorIndex > 0 ? entries[anchorIndex - 1]!.ordinal : undefined;
+  }
+  const throughId = matched.coveredRuntimeEvents.at(-1)?.id;
+  if (!throughId) return undefined;
+  return entries.find(({ event }) => event.id === throughId)?.ordinal;
 }
 
 function findExtractionBoundary(
@@ -470,10 +891,15 @@ function rememberResultFromReceipt(
   receipt: MemoryExtractionReceipt,
 ): MemoryRememberResult {
   if (trigger === 'extract') return unavailableMemoryResult();
+  if (receipt.status === 'discarded') return unavailableMemoryResult();
   if (receipt.status === 'remembered' && receipt.requestedItems.length > 0) {
     return { status: 'remembered', requestedItems: receipt.requestedItems };
   }
-  return { status: 'not_applicable', requestedItems: [] };
+  return {
+    status: 'not_applicable',
+    requestedItems: [],
+    ...(receipt.noOpReason ? { reason: receipt.noOpReason } : {}),
+  };
 }
 
 function unavailableMemoryResult(): MemoryRememberResult {

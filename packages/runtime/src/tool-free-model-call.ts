@@ -19,6 +19,7 @@ export type ToolFreeModelCallInput = ToolFreeModelCallContent & {
   readonly providerOptions?: unknown;
   readonly abortSignal?: AbortSignal;
   readonly maxOutputTokens: number;
+  readonly maxRetries?: number;
 };
 
 export interface ToolFreeModelCallResult {
@@ -42,10 +43,26 @@ export interface ProviderPrefixModelCallInput {
 
 export type ProviderPrefixModelCallResult = ToolFreeModelCallResult;
 
+export class ProviderPrefixModelCallUnavailableError extends Error {
+  readonly name = 'ProviderPrefixModelCallUnavailableError';
+}
+
 /** One non-continuing call that preserves the source Agent's provider-visible prefix. */
 export async function generateProviderPrefixModelCall(
   input: ProviderPrefixModelCallInput,
 ): Promise<ProviderPrefixModelCallResult> {
+  if (
+    input.toolChoicePolicy === 'omit' &&
+    input.activeTools.some((name) => input.tools[name]?.kind === 'provider')
+  ) {
+    // Anthropic has no provider-level `none` choice. Client Tool calls remain
+    // Runtime-owned and can be rejected after generation, but provider-native
+    // Tools execute remotely before a response exists. Never dispatch that
+    // unsafe auxiliary request.
+    throw new ProviderPrefixModelCallUnavailableError(
+      'Memory extraction is unavailable with active provider-native Tools',
+    );
+  }
   const ai = (await import('ai')) as unknown as {
     generateText(options: Record<string, unknown>): Promise<{
       text: string;
@@ -100,6 +117,7 @@ export async function generateToolFreeModelCall(
     ...(input.abortSignal === undefined ? {} : { abortSignal: input.abortSignal }),
     ...(input.providerOptions === undefined ? {} : { providerOptions: input.providerOptions }),
     maxOutputTokens: input.maxOutputTokens,
+    ...(input.maxRetries === undefined ? {} : { maxRetries: input.maxRetries }),
   });
   const usage = normalizeAiSdkUsage(result.usage, { rawFinishReason: result.finishReason });
   const finishReason = rawFinishReasonString(result.finishReason);

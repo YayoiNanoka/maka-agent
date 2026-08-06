@@ -14,6 +14,7 @@ import {
   FilesystemWorkerClient,
   isOAuthEnrollmentProviderEnabled,
   isBuiltinFilesystemWorkerSandboxAvailable,
+  loadLatestHistoryCompactCheckpointFromRunLedger,
   prepareSkillInvocationMessageFromInventory,
   RuntimeReadModel,
   routeWebSearchTools,
@@ -457,6 +458,10 @@ export async function createExecutionRuntimeHostComposition(
       runtimeEvents: {
         readSessionRuntimeEventEntries: (sessionId) =>
           stores.runtimeEventStore.readSessionRuntimeEventEntries(sessionId),
+      },
+      historyCompaction: {
+        readLatestCheckpoint: (sessionId) =>
+          loadLatestHistoryCompactCheckpointFromRunLedger(stores.agentRunStore, sessionId),
       },
       model: createHostMemoryExtractionModel({
         runtimePolicy: runtimePolicyStores,

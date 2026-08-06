@@ -1038,6 +1038,7 @@ describe('SqliteMemoryItemStore', () => {
         sessionId: 'session-1',
         expectedCursorOrdinal: 0,
         nextCursorOrdinal: 10,
+        coverageHash: 'a'.repeat(64),
         items: [write({ sources: [source({ eventId: 'event-8' })] })],
         requestedItemIndexes: [0],
         trigger: 'remember',
@@ -1056,6 +1057,7 @@ describe('SqliteMemoryItemStore', () => {
         sessionId: 'session-1',
         expectedCursorOrdinal: 10,
         nextCursorOrdinal: 20,
+        coverageHash: 'b'.repeat(64),
         items: [],
         requestedItemIndexes: [],
         trigger: 'extract',
@@ -1069,6 +1071,7 @@ describe('SqliteMemoryItemStore', () => {
           sessionId: 'session-1',
           expectedCursorOrdinal: 10,
           nextCursorOrdinal: 30,
+          coverageHash: 'c'.repeat(64),
           items: [],
           requestedItemIndexes: [],
           trigger: 'extract',
@@ -1086,6 +1089,7 @@ describe('SqliteMemoryItemStore', () => {
         sessionId: 'session-replay',
         expectedCursorOrdinal: 0,
         nextCursorOrdinal: 5,
+        coverageHash: 'd'.repeat(64),
         items: [write({ sources: [source({ sessionId: 'session-replay' })] })],
         requestedItemIndexes: [0],
         trigger: 'remember',
@@ -1109,6 +1113,7 @@ describe('SqliteMemoryItemStore', () => {
           sessionId: 'session-rollback',
           expectedCursorOrdinal: 0,
           nextCursorOrdinal: 9,
+          coverageHash: 'e'.repeat(64),
           items: [write({ sources: [source({ sessionId: 'session-rollback' })] })],
           requestedItemIndexes: [0],
           trigger: 'remember',
@@ -1119,6 +1124,152 @@ describe('SqliteMemoryItemStore', () => {
       assert.equal(await store.readItem('item-1'), undefined);
       assert.equal(await store.readOperation('extract-rollback'), undefined);
       assert.equal(await store.readExtractionReceipt('extract-rollback'), undefined);
+    });
+  });
+
+  test('initializes an absent extraction Cursor once without leaping an existing Cursor', async () => {
+    await withStore(async ({ store }) => {
+      assert.deepEqual(await store.initializeExtractionCursor('session-bootstrap', 12), {
+        sessionId: 'session-bootstrap',
+        processedOrdinal: 12,
+        updatedAt: 1_000,
+      });
+      assert.equal(
+        (await store.initializeExtractionCursor('session-bootstrap', 30)).processedOrdinal,
+        12,
+      );
+    });
+  });
+
+  test('retries one failed range once, then atomically receipts its discard', async () => {
+    await withStore(async ({ store }) => {
+      const coverageHash = 'f'.repeat(64);
+      const firstRequest = {
+        operationId: 'failed-trigger-1',
+        sessionId: 'session-failed',
+        expectedCursorOrdinal: 0,
+        failedThroughOrdinal: 8,
+        coverageHash,
+        failureClass: 'schema',
+        trigger: 'remember',
+      } as const;
+      const first = await store.settleExtractionFailure(firstRequest);
+      assert.equal(first.status, 'retry_later');
+      assert.equal(await store.readExtractionCursor('session-failed'), undefined);
+      assert.deepEqual(await store.readPendingExtractionFailure('session-failed'), {
+        sessionId: 'session-failed',
+        fromOrdinal: 1,
+        throughOrdinal: 8,
+        coverageHash,
+        firstOperationId: 'failed-trigger-1',
+        firstTrigger: 'remember',
+        firstFailureClass: 'schema',
+        failedAt: 1_000,
+      });
+
+      const same = await store.settleExtractionFailure(firstRequest);
+      assert.equal(same.status, 'retry_later');
+      assert.equal(same.replayed, true);
+      assert.equal(await store.readExtractionCursor('session-failed'), undefined);
+
+      await assert.rejects(
+        store.settleExtractionFailure({
+          ...firstRequest,
+          operationId: 'failed-trigger-wrong-mode',
+          trigger: 'extract',
+        }),
+        (error: unknown) =>
+          error instanceof MemoryItemStoreConflictError && error.reason === 'cursor_conflict',
+      );
+
+      const second = await store.settleExtractionFailure({
+        ...firstRequest,
+        operationId: 'failed-trigger-2',
+        failureClass: 'provider',
+      });
+      assert.equal(second.status, 'discarded');
+      assert.equal(second.replayed, false);
+      assert.equal(second.receipt.status, 'discarded');
+      assert.deepEqual(second.receipt.discardedRange, {
+        fromOrdinal: 1,
+        throughOrdinal: 8,
+        coverageHash,
+        firstFailureClass: 'schema',
+        finalFailureClass: 'provider',
+      });
+      assert.equal((await store.readExtractionCursor('session-failed'))?.processedOrdinal, 8);
+      assert.equal(await store.readPendingExtractionFailure('session-failed'), undefined);
+      assert.deepEqual(await store.readExtractionReceipt('failed-trigger-2'), second.receipt);
+
+      const replay = await store.settleExtractionFailure({
+        ...firstRequest,
+        operationId: 'failed-trigger-2',
+        failureClass: 'provider',
+      });
+      assert.equal(replay.status, 'discarded');
+      assert.equal(replay.replayed, true);
+    });
+  });
+
+  test('clears an exact pending failed range in the successful extraction transaction', async () => {
+    await withStore(async ({ store }) => {
+      const coverageHash = '1'.repeat(64);
+      await store.settleExtractionFailure({
+        operationId: 'pending-before-success',
+        sessionId: 'session-recovered',
+        expectedCursorOrdinal: 0,
+        failedThroughOrdinal: 4,
+        coverageHash,
+        failureClass: 'provider',
+        trigger: 'extract',
+      });
+      const committed = await store.commitExtraction({
+        operationId: 'successful-retry',
+        sessionId: 'session-recovered',
+        expectedCursorOrdinal: 0,
+        nextCursorOrdinal: 4,
+        coverageHash,
+        items: [],
+        requestedItemIndexes: [],
+        trigger: 'extract',
+      });
+      assert.equal(committed.cursor.processedOrdinal, 4);
+      assert.equal(await store.readPendingExtractionFailure('session-recovered'), undefined);
+    });
+  });
+
+  test('rolls back Cursor, pending failure, operation, and receipt when discard fails', async () => {
+    await withStore(async ({ store, setFailpoint }) => {
+      const coverageHash = '2'.repeat(64);
+      await store.settleExtractionFailure({
+        operationId: 'discard-first-trigger',
+        sessionId: 'session-discard-rollback',
+        expectedCursorOrdinal: 0,
+        failedThroughOrdinal: 6,
+        coverageHash,
+        failureClass: 'schema',
+        trigger: 'extract',
+      });
+      setFailpoint('after_cursor_write');
+      await assert.rejects(
+        store.settleExtractionFailure({
+          operationId: 'discard-second-trigger',
+          sessionId: 'session-discard-rollback',
+          expectedCursorOrdinal: 0,
+          failedThroughOrdinal: 6,
+          coverageHash,
+          failureClass: 'provider',
+          trigger: 'extract',
+        }),
+        /after_cursor_write/,
+      );
+      assert.equal(await store.readExtractionCursor('session-discard-rollback'), undefined);
+      assert.equal(
+        (await store.readPendingExtractionFailure('session-discard-rollback'))?.firstOperationId,
+        'discard-first-trigger',
+      );
+      assert.equal(await store.readOperation('discard-second-trigger'), undefined);
+      assert.equal(await store.readExtractionReceipt('discard-second-trigger'), undefined);
     });
   });
 });

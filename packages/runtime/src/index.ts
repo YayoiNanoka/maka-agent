@@ -16,6 +16,7 @@ export {
 } from './session-manager.js';
 export { RuntimeContextCompactError } from './runtime-kernel.js';
 export type { ModelMessage, JSONValue } from './model-protocol.js';
+export { ProviderPrefixModelCallUnavailableError } from './tool-free-model-call.js';
 export {
   buildNativeWebSearchTool,
   NATIVE_WEB_SEARCH_TOOL_NAME,
@@ -975,6 +976,7 @@ export {
   renderHistoryCompactCheckpoint,
   validateHistoryCompactCheckpointShape,
 } from './history-compact-checkpoint.js';
+export { loadLatestHistoryCompactCheckpointFromRunLedger } from './history-compact-ledger.js';
 export type {
   BuildHistoryCompactCheckpointInput,
   HistoryCompactCheckpoint,

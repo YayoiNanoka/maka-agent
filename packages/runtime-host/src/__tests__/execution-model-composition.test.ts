@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
+import { z } from 'zod';
 import {
   createBypassExecutionBoundary,
   createManagedExecutionBoundary,
@@ -55,6 +56,7 @@ import { createExecutionRuntimeHostComposition } from '../server/execution-compo
 import {
   createHostDailyReviewModel,
   createHostGoalEvaluator,
+  createHostMemoryExtractionModel,
   createHostSessionEffectModel,
 } from '../server/execution-model-authority.js';
 import {
@@ -1685,6 +1687,65 @@ test('Host auxiliary models meter provider usage and abort physical requests', {
     assert.ok(dailyReviewLog);
     assert.equal(dailyReviewLog.callId, 'daily_review_daily-review-call-1');
     assert.equal(dailyReviewLog.sessionId, undefined);
+
+    const memoryModel = createHostMemoryExtractionModel({
+      runtimePolicy: policy,
+      oauthCredentials: new HostOAuthExecutionAuthority(policy),
+      claudeDeviceId: capability.rootId,
+      usage,
+      requestDrain: () => assert.fail('Memory extraction telemetry must not drain the Host'),
+      newId: () => 'memory-call-1',
+    });
+    const memorySnapshot = {
+      trigger: 'remember' as const,
+      sourceHeader: session,
+      sourceSystemPrompt: 'SOURCE_SYSTEM_SENTINEL',
+      sourceMessages: [
+        { role: 'user' as const, content: 'SOURCE_USER_SENTINEL' },
+        { role: 'assistant' as const, content: 'SOURCE_ASSISTANT_SENTINEL' },
+      ],
+      sourceTools: {
+        memory_remember: {
+          description: 'Remember durable information',
+          inputSchema: z.object({}).strict(),
+        },
+      },
+      sourceActiveTools: ['memory_remember'],
+      sessionId: session.id,
+      runId: 'memory-source-run',
+      turnId: 'memory-source-turn',
+      workspaceKey: capability.canonicalPath,
+      toolCallId: 'memory-source-call',
+    };
+    const memoryRequestsBefore = provider.requests.length;
+    const proposalResult = await memoryModel.generate({
+      snapshot: memorySnapshot,
+      prompt: 'PROPOSAL_PROMPT_SENTINEL',
+      stage: 'proposal',
+      abortSignal: new AbortController().signal,
+    });
+    assert.deepEqual(proposalResult, { ok: true, text: SUMMARY_TEXT });
+    const canonicalizeResult = await memoryModel.generate({
+      snapshot: memorySnapshot,
+      prompt: 'CANONICALIZE_PROMPT_SENTINEL',
+      stage: 'canonicalize',
+      abortSignal: new AbortController().signal,
+    });
+    assert.deepEqual(canonicalizeResult, { ok: true, text: SUMMARY_TEXT });
+    const [proposalRequest, canonicalizeRequest] = provider.requests.slice(memoryRequestsBefore);
+    assert.ok(proposalRequest);
+    assert.ok(canonicalizeRequest);
+    assert.deepEqual(toolNames(proposalRequest.body), ['memory_remember']);
+    assert.match(JSON.stringify(proposalRequest.body), /SOURCE_SYSTEM_SENTINEL/);
+    assert.match(JSON.stringify(proposalRequest.body), /SOURCE_USER_SENTINEL/);
+    assert.match(JSON.stringify(proposalRequest.body), /SOURCE_ASSISTANT_SENTINEL/);
+    assert.match(JSON.stringify(proposalRequest.body), /PROPOSAL_PROMPT_SENTINEL/);
+    assert.deepEqual(toolNames(canonicalizeRequest.body), []);
+    assert.doesNotMatch(
+      JSON.stringify(canonicalizeRequest.body),
+      /SOURCE_(SYSTEM|USER|ASSISTANT)_SENTINEL/,
+    );
+    assert.match(JSON.stringify(canonicalizeRequest.body), /CANONICALIZE_PROMPT_SENTINEL/);
 
     assert.deepEqual(
       await sessionEffects.generateRecap({

@@ -4,6 +4,7 @@ import type { InteractiveLongTermMemoryWriter } from '@maka/storage/long-term-me
 import type { RuntimePolicyReader } from '@maka/storage/runtime-policy-stores';
 import {
   MemoryExtractionEngine,
+  type HistoryCompactCheckpoint,
   type MemoryExtractionGate,
   type MemoryExtractionSourceCapabilities,
   type MemoryExtractionSourceSnapshot,
@@ -16,7 +17,12 @@ import { MemoryExtractionSessionLane } from './memory-extraction-session-lane.js
 
 type MemoryExtractionStore = Pick<
   InteractiveLongTermMemoryWriter,
-  'commitExtraction' | 'readExtractionCursor' | 'readExtractionReceipt'
+  | 'commitExtraction'
+  | 'initializeExtractionCursor'
+  | 'readExtractionCursor'
+  | 'readPendingExtractionFailure'
+  | 'readExtractionReceipt'
+  | 'settleExtractionFailure'
 >;
 
 /** Host adapter for authority, residency, drain, and Session serialization. */
@@ -35,6 +41,9 @@ export class HostMemoryExtractionCoordinator {
           sessionId: string,
         ): Promise<Array<{ readonly ordinal: number; readonly event: RuntimeEvent }>>;
       };
+      readonly historyCompaction: {
+        readLatestCheckpoint(sessionId: string): Promise<HistoryCompactCheckpoint | undefined>;
+      };
       readonly model: HostMemoryExtractionModel;
       readonly lane: MemoryExtractionSessionLane;
       readonly acquireResidency: () => RuntimeHostResidency;
@@ -46,10 +55,16 @@ export class HostMemoryExtractionCoordinator {
       readSessionEvents: (sessionId) =>
         this.input.runtimeEvents.readSessionRuntimeEventEntries(sessionId),
       readCursor: (sessionId) => this.input.store.readExtractionCursor(sessionId),
+      initializeCursor: (sessionId, processedOrdinal) =>
+        this.input.store.initializeExtractionCursor(sessionId, processedOrdinal),
+      readPendingFailure: (sessionId) => this.input.store.readPendingExtractionFailure(sessionId),
+      readLatestCompactionCheckpoint: (sessionId) =>
+        this.input.historyCompaction.readLatestCheckpoint(sessionId),
       readReceipt: (operationId) => this.input.store.readExtractionReceipt(operationId),
       generate: ({ snapshot, prompt, stage, abortSignal }) =>
         this.input.model.generate({ snapshot, prompt, stage, abortSignal }),
       commit: (request) => this.input.store.commitExtraction(request),
+      settleFailure: (request) => this.input.store.settleExtractionFailure(request),
       ...(input.now ? { now: input.now } : {}),
     });
   }

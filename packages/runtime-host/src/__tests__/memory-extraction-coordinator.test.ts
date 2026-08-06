@@ -16,7 +16,11 @@ import {
   type InteractiveRootOwner,
 } from '@maka/storage/root-authority';
 import type { RuntimePolicyReader } from '@maka/storage/runtime-policy-stores';
-import type { MemoryExtractionSourceSnapshot } from '@maka/runtime';
+import {
+  buildHistoryCompactCheckpoint,
+  type HistoryCompactCheckpoint,
+  type MemoryExtractionSourceSnapshot,
+} from '@maka/runtime';
 
 import { HostMemoryExtractionCoordinator } from '../server/memory-extraction-coordinator.js';
 import { MemoryExtractionSessionLane } from '../server/memory-extraction-session-lane.js';
@@ -27,7 +31,13 @@ describe('HostMemoryExtractionCoordinator', () => {
       const entries: Array<{ ordinal: number; event: RuntimeEvent }> = [];
       const outputs = [
         proposal('The user prefers concise Chinese.', 'global', 'event-user-1'),
+        canonicalization(
+          proposalItem('The user prefers concise Chinese.', 'global', 'event-user-1'),
+        ),
         proposal('The user prefers detailed English.', 'workspace', 'event-user-2'),
+        canonicalization(
+          proposalItem('The user prefers detailed English.', 'workspace', 'event-user-2'),
+        ),
       ];
       const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
       const coordinator = createCoordinator({ writer, entries, outputs, observed });
@@ -79,7 +89,7 @@ describe('HostMemoryExtractionCoordinator', () => {
 
       const replay = await coordinator.sourceCapabilities().remember(firstSnapshot);
       assert.deepEqual(replay, first);
-      assert.equal(observed.length, 2, 'receipt replay must not call the provider');
+      assert.equal(observed.length, 4, 'receipt replay must not call the provider');
       assert.deepEqual(Object.keys(observed[0]!.snapshot.sourceTools), ['memory_remember']);
       assert.deepEqual(observed[0]!.snapshot.sourceActiveTools, ['memory_remember']);
       assert.doesNotMatch(observed[0]!.prompt, /Prefer concise Chinese\./);
@@ -95,6 +105,7 @@ describe('HostMemoryExtractionCoordinator', () => {
         { ordinal: 1, event: textEvent('event-user-1', 'run-1', 'turn-1', 'Prefer Rust.') },
         { ordinal: 2, event: toolCallEvent('event-call-1', 'run-1', 'turn-1', 'call-1') },
       ];
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
       const coordinator = createCoordinator({
         writer,
         entries,
@@ -118,7 +129,7 @@ describe('HostMemoryExtractionCoordinator', () => {
     });
   });
 
-  test('drops invalid Items individually while committing valid requested Items and the Cursor', async () => {
+  test('drops invalid incidental Items while committing valid requested Items and the Cursor', async () => {
     await withMemoryWriter(async (writer) => {
       const entries = [
         { ordinal: 1, event: textEvent('event-user-1', 'run-1', 'turn-1', 'Prefer Rust.') },
@@ -139,14 +150,10 @@ describe('HostMemoryExtractionCoordinator', () => {
         kind: 'note',
       };
       const unconfirmedAssistant = {
-        ...proposalItem(
-          'The account balance is 42.',
-          'workspace',
-          'event-assistant-1',
-          'account balance is 42',
-        ),
+        ...proposalItem('The account balance is 42.', 'workspace', 'event-user-1', 'Prefer Rust.'),
         kind: 'knowledge',
       };
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
       const coordinator = createCoordinator({
         writer,
         entries,
@@ -158,12 +165,23 @@ describe('HostMemoryExtractionCoordinator', () => {
             requestedItems: [valid],
             incidentalItems: [invalid, unconfirmedAssistant],
           }),
+          JSON.stringify({
+            results: [
+              canonicalizationResult('candidate_0', valid),
+              { candidateId: 'candidate_1', status: 'rejected' },
+            ],
+          }),
         ],
+        observed,
       });
 
-      const result = await coordinator
-        .sourceCapabilities()
-        .remember(snapshot('run-1', 'turn-1', 'call-1', 'Prefer Rust.'));
+      const result = await coordinator.sourceCapabilities().remember({
+        ...snapshot('run-1', 'turn-1', 'call-1', 'Prefer Rust.', 'event-user-1'),
+        sourceMessages: [
+          { role: 'user', content: 'Prefer Rust.' },
+          { role: 'assistant', content: 'The account balance is 42.' },
+        ],
+      });
 
       assert.equal(result.status, 'remembered');
       assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 2);
@@ -171,6 +189,192 @@ describe('HostMemoryExtractionCoordinator', () => {
       assert.deepEqual(
         stored.map(({ item }) => item.content),
         ['The user prefers Rust.'],
+      );
+      assert.match(JSON.stringify(observed[0]!.snapshot.sourceMessages), /account balance is 42/);
+      assert.doesNotMatch(observed[1]!.prompt, /account balance is 42|The account balance is 42/);
+      await coordinator.close();
+    });
+  });
+
+  test('does not receipt or advance an explicit request when requested admission fails', async () => {
+    await withMemoryWriter(async (writer) => {
+      const entries = [
+        { ordinal: 1, event: textEvent('event-user-1', 'run-1', 'turn-1', 'Prefer Rust.') },
+        { ordinal: 2, event: toolCallEvent('event-call-1', 'run-1', 'turn-1', 'call-1') },
+      ];
+      const coordinator = createCoordinator({
+        writer,
+        entries,
+        outputs: Array.from({ length: 3 }, () =>
+          JSON.stringify({
+            status: 'complete',
+            coverageStatus: 'processed',
+            requestedStatus: 'resolved',
+            requestedItems: [
+              proposalItem('The user prefers Rust.', 'global', 'missing-event', 'Prefer Rust.'),
+            ],
+            incidentalItems: [],
+          }),
+        ),
+      });
+
+      const result = await coordinator
+        .sourceCapabilities()
+        .remember(snapshot('run-1', 'turn-1', 'call-1', 'Prefer Rust.'));
+
+      assert.deepEqual(result, { status: 'unavailable', requestedItems: [] });
+      assert.equal(await writer.readExtractionCursor('session-1'), undefined);
+      assert.equal(
+        (await writer.readPendingExtractionFailure('session-1'))?.firstFailureClass,
+        'evidence',
+      );
+      assert.deepEqual(
+        await writer.searchByKeys({ terms: ['response preference'], match: 'exact' }),
+        [],
+      );
+      await coordinator.close();
+    });
+  });
+
+  test('uses the third model call to retry canonicalization without rerunning Proposal', async () => {
+    await withMemoryWriter(async (writer) => {
+      const entries = [
+        { ordinal: 1, event: textEvent('event-user-1', 'run-1', 'turn-1', 'Prefer Rust.') },
+        { ordinal: 2, event: toolCallEvent('event-call-1', 'run-1', 'turn-1', 'call-1') },
+      ];
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const coordinator = createCoordinator({
+        writer,
+        entries,
+        outputs: [
+          proposal('The user prefers Rust.', 'global', 'event-user-1'),
+          '{"results":',
+          canonicalization(proposalItem('The user prefers Rust.', 'global', 'event-user-1')),
+        ],
+        observed,
+      });
+
+      const result = await coordinator
+        .sourceCapabilities()
+        .remember(snapshot('run-1', 'turn-1', 'call-1', 'Prefer Rust.', 'event-user-1'));
+
+      assert.equal(result.status, 'remembered');
+      assert.equal(observed.length, 3);
+      assert.notEqual(observed[0]!.prompt, observed[1]!.prompt);
+      assert.equal(observed[1]!.prompt, observed[2]!.prompt);
+      await coordinator.close();
+    });
+  });
+
+  test('rejects a sensitive requested batch before a Proposal can omit the secret', async () => {
+    await withMemoryWriter(async (writer) => {
+      const secret = 'sk-live-secret-token-value';
+      const entries = [
+        {
+          ordinal: 1,
+          event: textEvent(
+            'event-user-1',
+            'run-1',
+            'turn-1',
+            `Prefer Rust and remember ${secret}.`,
+          ),
+        },
+        { ordinal: 2, event: toolCallEvent('event-call-1', 'run-1', 'turn-1', 'call-1') },
+      ];
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const coordinator = createCoordinator({
+        writer,
+        entries,
+        outputs: [],
+        observed,
+      });
+
+      const source = snapshot('run-1', 'turn-1', 'call-1', `Prefer Rust and remember ${secret}.`);
+      const result = await coordinator.sourceCapabilities().remember(source);
+
+      assert.deepEqual(result, {
+        status: 'not_applicable',
+        requestedItems: [],
+        reason: 'sensitive_information',
+      });
+      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 1);
+      assert.deepEqual(
+        await writer.searchByKeys({ terms: ['response preference'], match: 'exact' }),
+        [],
+      );
+      assert.deepEqual(await coordinator.sourceCapabilities().remember(source), result);
+      assert.equal(observed.length, 0, 'sensitive evidence must be rejected before model dispatch');
+      await coordinator.close();
+    });
+  });
+
+  test('rejects sensitive localized evidence before the localized Proposal can omit it', async () => {
+    await withMemoryWriter(async (writer) => {
+      const secret = 'sk-live-historical-secret';
+      await writer.initializeExtractionCursor('session-1', 1);
+      const entries = [
+        {
+          ordinal: 1,
+          event: textEvent(
+            'event-old',
+            'run-old',
+            'turn-old',
+            `My API key is ${secret}, and I prefer Rust.`,
+          ),
+        },
+        {
+          ordinal: 2,
+          event: textEvent(
+            'event-current',
+            'run-current',
+            'turn-current',
+            'Remember my earlier API key and Rust preference.',
+          ),
+        },
+        {
+          ordinal: 3,
+          event: toolCallEvent('event-current-call', 'run-current', 'turn-current', 'current-call'),
+        },
+      ];
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const coordinator = createCoordinator({
+        writer,
+        entries,
+        outputs: [
+          JSON.stringify({
+            status: 'search_required',
+            coverageStatus: 'processed',
+            requestedStatus: 'unresolved',
+            requestedItems: [],
+            incidentalItems: [],
+            search: { terms: ['API key', 'Rust'], roles: ['user'] },
+          }),
+        ],
+        observed,
+      });
+
+      const result = await coordinator
+        .sourceCapabilities()
+        .remember(
+          snapshot(
+            'run-current',
+            'turn-current',
+            'current-call',
+            'Remember my earlier API key and Rust preference.',
+            'event-current',
+          ),
+        );
+
+      assert.deepEqual(result, {
+        status: 'not_applicable',
+        requestedItems: [],
+        reason: 'sensitive_information',
+      });
+      assert.equal(observed.length, 1, 'sensitive localized evidence must stop model dispatch');
+      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 2);
+      assert.deepEqual(
+        await writer.searchByKeys({ terms: ['response preference'], match: 'exact' }),
+        [],
       );
       await coordinator.close();
     });
@@ -186,7 +390,10 @@ describe('HostMemoryExtractionCoordinator', () => {
       const coordinator = createCoordinator({
         writer,
         entries,
-        outputs: [proposal('The user prefers Rust.', 'global', 'event-user-1')],
+        outputs: [
+          proposal('The user prefers Rust.', 'global', 'event-user-1'),
+          canonicalization(proposalItem('The user prefers Rust.', 'global', 'event-user-1')),
+        ],
         observed,
       });
 
@@ -204,12 +411,12 @@ describe('HostMemoryExtractionCoordinator', () => {
           .remember(snapshot('run-1', 'turn-1', 'call-2', 'Prefer Rust.')),
         { status: 'not_applicable', requestedItems: [] },
       );
-      assert.equal(observed.length, 1);
+      assert.equal(observed.length, 2);
       await coordinator.close();
     });
   });
 
-  test('drains every bounded batch through a frozen boundary before receipting the trigger', async () => {
+  test('processes more than 120 Events as one complete coverage operation', async () => {
     await withMemoryWriter(async (writer) => {
       const entries: Array<{ ordinal: number; event: RuntimeEvent }> = Array.from(
         { length: 120 },
@@ -241,8 +448,10 @@ describe('HostMemoryExtractionCoordinator', () => {
           JSON.stringify({
             status: 'complete',
             coverageStatus: 'processed',
-            requestedStatus: 'not_applicable',
-            requestedItems: [],
+            requestedStatus: 'resolved',
+            requestedItems: [
+              proposalItem('The user prefers concise Chinese.', 'global', 'event-trigger'),
+            ],
             incidentalItems: [
               {
                 ...proposalItem('Historical detail one.', 'global', 'e1', 'old1'),
@@ -250,44 +459,234 @@ describe('HostMemoryExtractionCoordinator', () => {
               },
             ],
           }),
-          new Error('provider unavailable'),
-          proposal('The user prefers concise Chinese.', 'global', 'event-trigger'),
+          canonicalization(
+            proposalItem('The user prefers concise Chinese.', 'global', 'event-trigger'),
+            {
+              ...proposalItem('Historical detail one.', 'global', 'e1', 'old1'),
+              kind: 'note',
+            },
+          ),
         ],
         observed,
       });
-      const source = snapshot(
-        'run-current',
-        'turn-current',
-        'memory-call',
-        'Remember that I prefer concise Chinese.',
-        'event-trigger',
+      const visibleUserEntries = entries.filter(
+        ({ event }) => event.role === 'user' && event.content?.kind === 'text',
       );
-
-      const failed = await coordinator.sourceCapabilities().remember(source);
-
-      assert.equal(failed.status, 'unavailable');
-      assert.equal(observed.length, 2, 'the failed final batch was reached once');
-      assert.doesNotMatch(observed[0]!.prompt, /event:event-trigger/);
-      assert.match(observed[1]!.prompt, /event:event-trigger/);
-      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 120);
-
+      const source = {
+        ...snapshot(
+          'run-current',
+          'turn-current',
+          'memory-call',
+          'Remember that I prefer concise Chinese.',
+        ),
+        sourceMessages: visibleUserEntries.map(({ event }) => ({
+          role: 'user' as const,
+          content: event.content?.kind === 'text' ? event.content.text : '',
+        })),
+        sourceEventMessagePositions: Object.fromEntries(
+          visibleUserEntries.map(({ event }, index) => [event.id, [index]]),
+        ),
+      } satisfies MemoryExtractionSourceSnapshot;
       const result = await coordinator.sourceCapabilities().remember(source);
 
       assert.equal(result.status, 'remembered');
-      assert.equal(observed.length, 3, 'retry resumes at the failed batch');
-      assert.match(observed[2]!.prompt, /event:event-trigger/);
+      assert.equal(observed.length, 2);
+      assert.match(observed[0]!.prompt, /event:e1/);
+      assert.match(observed[0]!.prompt, /event:event-trigger/);
       assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 121);
       const stored = await writer.searchByKeys({
         terms: ['response preference'],
         match: 'exact',
       });
-      assert.deepEqual(
-        stored.map(({ item }) => item.content),
-        ['The user prefers concise Chinese.', 'Historical detail one.'],
-      );
+      assert.deepEqual(stored.map(({ item }) => item.content).sort(), [
+        'Historical detail one.',
+        'The user prefers concise Chinese.',
+      ]);
 
       assert.deepEqual(await coordinator.sourceCapabilities().remember(source), result);
-      assert.equal(observed.length, 3, 'the final trigger receipt must replay exactly');
+      assert.equal(observed.length, 2, 'the trigger receipt must replay exactly');
+      await coordinator.close();
+    });
+  });
+
+  test('bootstraps the first Cursor at the latest valid compaction boundary', async () => {
+    await withMemoryWriter(async (writer) => {
+      const old = textEvent(
+        'event-old',
+        'run-old',
+        'turn-old',
+        'Old detail that was already compacted.',
+      );
+      const current = textEvent(
+        'event-current',
+        'run-current',
+        'turn-current',
+        'Remember that I prefer concise Chinese.',
+      );
+      const entries = [
+        { ordinal: 1, event: old },
+        { ordinal: 2, event: toolCallEvent('event-old-call', 'run-old', 'turn-old', 'old-call') },
+        { ordinal: 3, event: current },
+        {
+          ordinal: 4,
+          event: toolCallEvent('event-current-call', 'run-current', 'turn-current', 'current-call'),
+        },
+      ];
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const coordinator = createCoordinator({
+        writer,
+        entries,
+        outputs: [
+          proposal('The user prefers concise Chinese.', 'global', 'event-current'),
+          canonicalization(
+            proposalItem('The user prefers concise Chinese.', 'global', 'event-current'),
+          ),
+        ],
+        observed,
+        checkpoint: buildHistoryCompactCheckpoint({
+          sessionId: 'session-1',
+          coveredRuntimeEvents: [old],
+          summary: 'The older context was compacted.',
+          now: 1_500,
+        }),
+      });
+
+      const result = await coordinator
+        .sourceCapabilities()
+        .remember(
+          snapshot(
+            'run-current',
+            'turn-current',
+            'current-call',
+            'Remember that I prefer concise Chinese.',
+            'event-current',
+          ),
+        );
+
+      assert.equal(result.status, 'remembered');
+      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 3);
+      assert.doesNotMatch(observed[0]!.prompt, /Old detail that was already compacted/);
+      await coordinator.close();
+    });
+  });
+
+  test('keeps a mid-turn compaction head anchor eligible for first extraction', async () => {
+    await withMemoryWriter(async (writer) => {
+      const old = textEvent('event-old', 'run-old', 'turn-old', 'Old compacted detail.');
+      const anchor = textEvent(
+        'event-anchor',
+        'run-current',
+        'turn-current',
+        'Remember that I prefer concise Chinese.',
+      );
+      const coordinator = createCoordinator({
+        writer,
+        entries: [
+          { ordinal: 1, event: old },
+          { ordinal: 2, event: anchor },
+          {
+            ordinal: 3,
+            event: toolCallEvent(
+              'event-current-call',
+              'run-current',
+              'turn-current',
+              'current-call',
+            ),
+          },
+        ],
+        outputs: [
+          proposal('The user prefers concise Chinese.', 'global', 'event-anchor'),
+          canonicalization(
+            proposalItem('The user prefers concise Chinese.', 'global', 'event-anchor'),
+          ),
+        ],
+        checkpoint: buildHistoryCompactCheckpoint({
+          sessionId: 'session-1',
+          coveredRuntimeEvents: [old, anchor],
+          summary: 'The older context and current-turn prefix were compacted.',
+          phase: 'mid_turn',
+          headAnchor: { runtimeEventId: anchor.id, turnId: anchor.turnId },
+          now: 1_500,
+        }),
+      });
+
+      const result = await coordinator
+        .sourceCapabilities()
+        .remember(
+          snapshot(
+            'run-current',
+            'turn-current',
+            'current-call',
+            'Remember that I prefer concise Chinese.',
+            'event-anchor',
+          ),
+        );
+
+      assert.equal(result.status, 'remembered');
+      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 2);
+      await coordinator.close();
+    });
+  });
+
+  test('does not bootstrap across a compaction checkpoint whose evidence digest is invalid', async () => {
+    await withMemoryWriter(async (writer) => {
+      const old = textEvent('event-old', 'run-old', 'turn-old', 'Old uncompacted detail.');
+      const current = textEvent(
+        'event-current',
+        'run-current',
+        'turn-current',
+        'Remember that I prefer concise Chinese.',
+      );
+      const checkpoint = buildHistoryCompactCheckpoint({
+        sessionId: 'session-1',
+        coveredRuntimeEvents: [old],
+        summary: 'Purported compacted context.',
+        now: 1_500,
+      });
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const coordinator = createCoordinator({
+        writer,
+        entries: [
+          { ordinal: 1, event: old },
+          { ordinal: 2, event: current },
+          {
+            ordinal: 3,
+            event: toolCallEvent(
+              'event-current-call',
+              'run-current',
+              'turn-current',
+              'current-call',
+            ),
+          },
+        ],
+        outputs: [
+          proposal('The user prefers concise Chinese.', 'global', 'event-current'),
+          canonicalization(
+            proposalItem('The user prefers concise Chinese.', 'global', 'event-current'),
+          ),
+        ],
+        observed,
+        checkpoint: {
+          ...checkpoint,
+          coverage: { ...checkpoint.coverage, sourceDigest: '0'.repeat(64) },
+        },
+      });
+
+      const result = await coordinator
+        .sourceCapabilities()
+        .remember(
+          snapshot(
+            'run-current',
+            'turn-current',
+            'current-call',
+            'Remember that I prefer concise Chinese.',
+            'event-current',
+          ),
+        );
+
+      assert.equal(result.status, 'remembered');
+      assert.match(observed[0]!.prompt, /Old uncompacted detail/);
+      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 2);
       await coordinator.close();
     });
   });
@@ -307,6 +706,9 @@ describe('HostMemoryExtractionCoordinator', () => {
         entries,
         outputs: [
           proposal('The user prefers violet as an accent color.', 'global', 'event-old'),
+          canonicalization(
+            proposalItem('The user prefers violet as an accent color.', 'global', 'event-old'),
+          ),
           JSON.stringify({
             status: 'search_required',
             coverageStatus: 'processed',
@@ -326,6 +728,14 @@ describe('HostMemoryExtractionCoordinator', () => {
               ),
             ],
           }),
+          canonicalization(
+            proposalItem(
+              'The user prefers violet as an accent color.',
+              'global',
+              'event-old',
+              'violet',
+            ),
+          ),
         ],
         observed,
       });
@@ -358,9 +768,10 @@ describe('HostMemoryExtractionCoordinator', () => {
         );
 
       assert.equal(remembered.status, 'remembered');
-      assert.equal(observed.length, 3);
-      assert.doesNotMatch(observed[1]!.prompt, /violet/);
-      assert.match(observed[2]!.prompt, /violet/);
+      assert.equal(observed.length, 5);
+      assert.doesNotMatch(observed[2]!.prompt, /violet/);
+      assert.match(observed[3]!.prompt, /violet/);
+      assert.match(observed[4]!.prompt, /violet/);
       assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 3);
       await coordinator.close();
     });
@@ -409,49 +820,55 @@ describe('HostMemoryExtractionCoordinator', () => {
     });
   });
 
-  test('keeps the Cursor unchanged across provider and schema failures, then commits a valid empty result', async () => {
+  test('retries at most three calls per range, discards on the next trigger, then processes its tail', async () => {
     await withMemoryWriter(async (writer) => {
       const entries = [
         { ordinal: 1, event: textEvent('event-user-1', 'run-1', 'turn-1', 'Remember this.') },
         { ordinal: 2, event: toolCallEvent('event-call-1', 'run-1', 'turn-1', 'call-1') },
       ];
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
       const coordinator = createCoordinator({
         writer,
         entries,
         outputs: [
           new Error('provider unavailable'),
           '{"status":"complete"}',
-          JSON.stringify({
-            status: 'search_required',
-            coverageStatus: 'processed',
-            requestedStatus: 'unresolved',
-            requestedItems: [],
-            incidentalItems: [],
-            search: { terms: ['Remember this'], roles: ['user'] },
-          }),
-          JSON.stringify({ status: 'cannot_resolve', requestedItems: [] }),
-          JSON.stringify({
-            status: 'complete',
-            coverageStatus: 'processed',
-            requestedStatus: 'not_applicable',
-            requestedItems: [],
-            incidentalItems: [],
-          }),
+          '{"status":"complete"}',
+          '{"status":"complete"}',
+          '{"status":"complete"}',
+          '{"status":"complete"}',
+          proposal('The user prefers detailed English.', 'global', 'event-user-2'),
+          canonicalization(
+            proposalItem('The user prefers detailed English.', 'global', 'event-user-2'),
+          ),
         ],
+        observed,
       });
-      const source = snapshot('run-1', 'turn-1', 'call-1', 'Remember this.');
-      assert.equal((await coordinator.sourceCapabilities().remember(source)).status, 'unavailable');
+      const first = snapshot('run-1', 'turn-1', 'call-1', 'Remember this.');
+      assert.equal((await coordinator.sourceCapabilities().remember(first)).status, 'unavailable');
+      assert.equal(observed.length, 3);
       assert.equal(await writer.readExtractionCursor('session-1'), undefined);
-      assert.equal((await coordinator.sourceCapabilities().remember(source)).status, 'unavailable');
+      assert.equal(
+        (await writer.readPendingExtractionFailure('session-1'))?.firstFailureClass,
+        'schema',
+      );
+
+      assert.equal((await coordinator.sourceCapabilities().remember(first)).status, 'unavailable');
+      assert.equal(observed.length, 3, 'the same trigger must replay without another model call');
       assert.equal(await writer.readExtractionCursor('session-1'), undefined);
-      assert.equal((await coordinator.sourceCapabilities().remember(source)).status, 'unavailable');
-      assert.equal(await writer.readExtractionCursor('session-1'), undefined);
-      assert.deepEqual(await coordinator.sourceCapabilities().remember(source), {
-        status: 'not_applicable',
-        requestedItems: [],
-      });
-      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 1);
-      assert.deepEqual(await writer.searchByKeys({ terms: ['anything'], match: 'exact' }), []);
+
+      entries.push(
+        {
+          ordinal: 3,
+          event: textEvent('event-user-2', 'run-2', 'turn-2', 'Prefer detailed English.'),
+        },
+        { ordinal: 4, event: toolCallEvent('event-call-2', 'run-2', 'turn-2', 'call-2') },
+      );
+      const second = snapshot('run-2', 'turn-2', 'call-2', 'Prefer detailed English.');
+      assert.equal((await coordinator.sourceCapabilities().remember(second)).status, 'remembered');
+      assert.equal(observed.length, 8);
+      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 3);
+      assert.equal(await writer.readPendingExtractionFailure('session-1'), undefined);
       await coordinator.close();
     });
   });
@@ -464,6 +881,7 @@ function createCoordinator(input: {
   observed?: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }>;
   policyState?: { incognito: boolean };
   afterModelCall?: () => void;
+  checkpoint?: HistoryCompactCheckpoint;
 }): HostMemoryExtractionCoordinator {
   const policyState = input.policyState ?? { incognito: false };
   let call = 0;
@@ -481,14 +899,15 @@ function createCoordinator(input: {
     },
     sessions: { readHeader: async () => header() },
     runtimeEvents: { readSessionRuntimeEventEntries: async () => [...input.entries] },
+    historyCompaction: { readLatestCheckpoint: async () => input.checkpoint },
     model: {
       generate: async ({ snapshot: source, prompt }) => {
         input.observed?.push({ snapshot: source, prompt });
         const output = input.outputs[call++];
         if (output === undefined) throw new Error('Unexpected model call');
-        if (output instanceof Error) throw output;
+        if (output instanceof Error) return { ok: false, errorClass: 'provider' };
         input.afterModelCall?.();
-        return output;
+        return { ok: true, text: output };
       },
     },
     lane: new MemoryExtractionSessionLane(),
@@ -556,6 +975,19 @@ function proposalItem(
     keys: [{ key: 'response preference', type: 'concept' }],
     evidence: [{ sourceRef: `event:${eventId}`, quote }],
   };
+}
+
+function canonicalization(...items: Array<ReturnType<typeof proposalItem>>): string {
+  return JSON.stringify({
+    results: items.map((item, index) => canonicalizationResult(`candidate_${index}`, item)),
+  });
+}
+
+function canonicalizationResult(
+  candidateId: string,
+  { evidence: _evidence, ...item }: ReturnType<typeof proposalItem>,
+) {
+  return { candidateId, status: 'accepted', item } as const;
 }
 
 function header(): SessionHeader {

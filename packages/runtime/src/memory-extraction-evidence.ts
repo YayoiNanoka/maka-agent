@@ -1,4 +1,5 @@
 import type { RuntimeEvent } from '@maka/core/runtime-event';
+import type { ModelMessage } from './model-protocol.js';
 
 export interface MemoryExtractionEventEntry {
   readonly ordinal: number;
@@ -11,6 +12,8 @@ export interface MemoryExtractionEvidence {
   /** Exact bounded text shown to the model and used for admission. */
   readonly text: string;
   readonly events: readonly RuntimeEvent[];
+  /** Full text actually visible in indexed Provider user messages. */
+  readonly providerVisibleTexts?: readonly string[];
 }
 
 export interface MemoryCoveragePlan {
@@ -19,25 +22,30 @@ export interface MemoryCoveragePlan {
 }
 
 export const MAX_MEMORY_EVIDENCE_JSON_CHARS = 12_000;
-const MAX_COVERAGE_EVENTS = 120;
 const MAX_EVIDENCE_TEXT_CHARS = 4_000;
 const MIN_EVIDENCE_TEXT_CHARS = 64;
 const MAX_LOCALIZED_TURNS = 7;
 
 /**
- * Select the largest bounded, continuous Event prefix whose user-authored
- * evidence fits. Tool and Runtime-control Events deliberately produce no
- * evidence, but remain in the selected prefix so the Session Cursor crosses
- * them instead of repeatedly reconsidering them.
+ * Plan one complete trigger range. Tool and Runtime-control Events deliberately
+ * produce no evidence, but remain in the range so the Session Cursor crosses
+ * them instead of repeatedly reconsidering them. If every User evidence record
+ * cannot fit the bounded Evidence Index, fail closed instead of silently
+ * consuming only part of the range.
  */
 export function planMemoryCoverage(input: {
   readonly pendingEntries: readonly MemoryExtractionEventEntry[];
   readonly priorityEvidence?: readonly MemoryExtractionEvidence[];
   readonly maxEvidenceJsonChars?: number;
   readonly sourceEventMessagePositions?: Readonly<Record<string, readonly number[]>>;
+  readonly sourceMessages?: readonly ModelMessage[];
 }): MemoryCoveragePlan | undefined {
-  const limit = Math.min(input.pendingEntries.length, MAX_COVERAGE_EVENTS);
-  const priority = input.priorityEvidence ?? [];
+  if (input.pendingEntries.length === 0) return undefined;
+  const priority = bindProviderVisibleEvidence(
+    input.priorityEvidence ?? [],
+    input.sourceMessages,
+    input.sourceEventMessagePositions,
+  );
   const budget = input.maxEvidenceJsonChars ?? MAX_MEMORY_EVIDENCE_JSON_CHARS;
   const fittedPriority = fitMemoryExtractionEvidence(
     priority,
@@ -45,55 +53,21 @@ export function planMemoryCoverage(input: {
     input.sourceEventMessagePositions,
   );
   if (!fittedPriority) return undefined;
-  let selected: MemoryCoveragePlan | undefined;
-  const candidateCounts: number[] = [];
-  for (let count = 1; count <= limit; count += 1) candidateCounts.push(count);
-
-  for (const count of candidateCounts) {
-    const candidateEntries = input.pendingEntries.slice(0, count);
-    const coverage = projectMemoryExtractionEvidence(candidateEntries.map(({ event }) => event));
-    const fitted = fitCoverageAroundPriority(
-      fittedPriority,
-      coverage,
-      budget,
-      input.sourceEventMessagePositions,
-    );
-    if (!fitted) continue;
-
-    const fittedRefs = new Set(fitted.map(({ sourceRef }) => sourceRef));
-    const firstOmitted = coverage.find(({ sourceRef }) => !fittedRefs.has(sourceRef));
-    if (!firstOmitted) {
-      selected = { entries: candidateEntries, evidence: fitted };
-      continue;
-    }
-
-    const firstOmittedOrdinal = Math.min(
-      ...firstOmitted.events.map(
-        (event) =>
-          input.pendingEntries.find((entry) => entry.event.id === event.id)?.ordinal ?? Infinity,
-      ),
-    );
-    const safeCount = candidateCounts
-      .filter(
-        (candidateCount) =>
-          candidateCount < count &&
-          input.pendingEntries[candidateCount - 1]!.ordinal < firstOmittedOrdinal,
-      )
-      .at(-1);
-    if (!safeCount) continue;
-    const entries = input.pendingEntries.slice(0, safeCount);
-    const includedEventIds = new Set(entries.map(({ event }) => event.id));
-    const priorityRefs = new Set(fittedPriority.map(({ sourceRef }) => sourceRef));
-    selected = {
-      entries,
-      evidence: fitted.filter(
-        (entry) =>
-          priorityRefs.has(entry.sourceRef) ||
-          entry.events.every((event) => includedEventIds.has(event.id)),
-      ),
-    };
-  }
-  return selected;
+  const coverage = bindProviderVisibleEvidence(
+    projectMemoryExtractionEvidence(input.pendingEntries.map(({ event }) => event)),
+    input.sourceMessages,
+    input.sourceEventMessagePositions,
+  );
+  const fitted = fitCoverageAroundPriority(
+    fittedPriority,
+    coverage,
+    budget,
+    input.sourceEventMessagePositions,
+  );
+  if (!fitted) return undefined;
+  const fittedRefs = new Set(fitted.map(({ sourceRef }) => sourceRef));
+  if (coverage.some(({ sourceRef }) => !fittedRefs.has(sourceRef))) return undefined;
+  return { entries: [...input.pendingEntries], evidence: fitted };
 }
 
 /** Projects only stable user-authored text into Memory evidence. */
@@ -108,7 +82,7 @@ export function projectMemoryExtractionEvidence(
   for (const event of stable) {
     const content = event.content;
     if (!content) continue;
-    if (content.kind === 'text' && event.role === 'user') {
+    if (content.kind === 'text' && event.role === 'user' && event.author === 'user') {
       const fullText = normalizeEvidenceText(content.text);
       if (!fullText) continue;
       projected.push({
@@ -167,13 +141,11 @@ export function renderMemoryExtractionEvidence(
   evidence: readonly MemoryExtractionEvidence[],
   sourceEventMessagePositions?: Readonly<Record<string, readonly number[]>>,
 ) {
-  return evidence.map(({ sourceRef, type, text, events }) => {
+  return evidence.map(({ sourceRef, type, text, events, providerVisibleTexts }) => {
     const messagePositions = uniqueSorted(
       events.flatMap((event) => sourceEventMessagePositions?.[event.id] ?? []),
     );
-    const everyEventIndexed =
-      sourceEventMessagePositions !== undefined &&
-      events.every((event) => (sourceEventMessagePositions[event.id]?.length ?? 0) > 0);
+    const everyEventIndexed = providerVisibleTexts !== undefined;
     return {
       sourceRef,
       type,
@@ -183,7 +155,43 @@ export function renderMemoryExtractionEvidence(
   });
 }
 
-/** Preserve requested evidence once fitted; only coverage text may shrink. */
+export function bindProviderVisibleEvidence(
+  evidence: readonly MemoryExtractionEvidence[],
+  sourceMessages: readonly ModelMessage[] | undefined,
+  sourceEventMessagePositions: Readonly<Record<string, readonly number[]>> | undefined,
+): readonly MemoryExtractionEvidence[] {
+  if (!sourceMessages || !sourceEventMessagePositions) return evidence;
+  return evidence.map((entry) => {
+    const positions = uniqueSorted(
+      entry.events.flatMap((event) => sourceEventMessagePositions[event.id] ?? []),
+    );
+    if (
+      positions.length === 0 ||
+      entry.events.some((event) => (sourceEventMessagePositions[event.id]?.length ?? 0) === 0)
+    ) {
+      return entry;
+    }
+    const visibleByPosition = positions.map((position) => {
+      const message = sourceMessages[position];
+      if (!message || message.role !== 'user') return [];
+      if (typeof message.content === 'string') {
+        const text = normalizeEvidenceText(message.content);
+        return text ? [text] : [];
+      }
+      return message.content.flatMap((part) => {
+        if (part.type !== 'text') return [];
+        const text = normalizeEvidenceText(part.text);
+        return text ? [text] : [];
+      });
+    });
+    if (visibleByPosition.some((texts) => texts.length === 0)) {
+      return entry;
+    }
+    return { ...entry, providerVisibleTexts: visibleByPosition.flat() };
+  });
+}
+
+/** Preserve requested evidence once fitted; all coverage records must fit. */
 function fitCoverageAroundPriority(
   priority: readonly MemoryExtractionEvidence[],
   coverage: readonly MemoryExtractionEvidence[],
@@ -220,27 +228,7 @@ function fitCoverageAroundPriority(
     return best;
   };
 
-  const fitted = fit(remaining);
-  if (fitted) return fitted;
-
-  // Keep only a continuous evidence prefix. If a record no longer fits, later
-  // records must not remain visible while the Cursor silently consumes the
-  // omitted Event. planMemoryCoverage moves the Cursor to the preceding safe
-  // boundary and leaves the remainder for the next extraction.
-  let low = 0;
-  let high = remaining.length - 1;
-  let best: readonly MemoryExtractionEvidence[] | undefined;
-  while (low <= high) {
-    const keepCount = Math.floor((low + high) / 2);
-    const candidate = fit(remaining.slice(0, keepCount));
-    if (candidate) {
-      best = candidate;
-      low = keepCount + 1;
-    } else {
-      high = keepCount - 1;
-    }
-  }
-  return best;
+  return fit(remaining);
 }
 
 /** Rank matching Turns by term coverage and recency, then add a one-Turn neighborhood. */
@@ -254,7 +242,8 @@ export function searchSameSessionMemoryHistory(
       ordinal <= throughOrdinal &&
       !event.partial &&
       event.content?.kind === 'text' &&
-      event.role === 'user',
+      event.role === 'user' &&
+      event.author === 'user',
   );
   const turns: Array<{ key: string; entries: MemoryExtractionEventEntry[] }> = [];
   for (const entry of eligible) {
