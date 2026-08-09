@@ -266,7 +266,13 @@ export function createHostExecutionModelComposition(
         joinFragments([
           environment,
           renderTaskLedgerTail(tasks),
-          input.plan ? renderPlanTail(input.plan.state, input.plan.mode) : undefined,
+          input.plan
+            ? renderPlanTail(
+                input.plan.state,
+                input.plan.mode,
+                input.plan.permissionMode === 'bypass',
+              )
+            : undefined,
         ]) ?? environment
       );
     },
@@ -790,7 +796,11 @@ export function resolveCollaborationPermissionMode(input: {
     : input.permissionMode;
 }
 
-function renderPlanTail(state: PlanSessionState, mode: 'agent' | 'plan'): string | undefined {
+function renderPlanTail(
+  state: PlanSessionState,
+  mode: 'agent' | 'plan',
+  fullAccess: boolean,
+): string | undefined {
   const active = activePlanExecution(state);
   const execution =
     active ??
@@ -804,7 +814,7 @@ function renderPlanTail(state: PlanSessionState, mode: 'agent' | 'plan'): string
   if (!proposal) return undefined;
   return active
     ? renderPlanExecutionPrompt({ proposal, execution: active })
-    : renderInterruptedPlanContext({ proposal, execution });
+    : renderInterruptedPlanContext({ proposal, execution, fullAccess });
 }
 
 function filterToolGroups(groups: readonly ToolGroup[], names: ReadonlySet<string>): ToolGroup[] {

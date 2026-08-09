@@ -78,6 +78,7 @@ export function renderPlanModePrompt(input: { fullAccess?: boolean } = {}): stri
 export function renderInterruptedPlanContext(input: {
   proposal: PlanProposal;
   execution: PlanExecution;
+  fullAccess?: boolean;
 }): string {
   const steps = input.execution.steps.map((step) => renderExecutionStep(step)).join('\n');
   return [
@@ -91,7 +92,9 @@ export function renderInterruptedPlanContext(input: {
       : '',
     'Progress at interruption:',
     steps,
-    'The user entered Plan Mode to replan the remaining work. Do not resume execution or modify files. A submitted proposal will supersede this interrupted execution when approved.',
+    input.fullAccess
+      ? 'The user entered Plan Mode to replan the remaining work. Do not resume the interrupted execution automatically. Full access remains active; modify files or perform side effects only when the user explicitly requests them during replanning. A submitted proposal will supersede this interrupted execution when approved.'
+      : 'The user entered Plan Mode to replan the remaining work. Do not resume execution or modify files. A submitted proposal will supersede this interrupted execution when approved.',
     '</interrupted_plan_context>',
   ]
     .filter(Boolean)

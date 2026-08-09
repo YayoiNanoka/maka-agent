@@ -71,6 +71,7 @@ import {
   registerPermissionOverlayIpc,
 } from "./permission-overlay/permission-overlay-main.js";
 import { resolveProjectContextRoot } from "./project-context-root.js";
+import { resolveDefaultPermissionMode } from "./permission-mode-default.js";
 import { createProjectManagementService } from "./project-management-service.js";
 import type { ProjectManagementService } from "./project-management-service.js";
 import { createProjectRootController } from "./project-root-controller.js";
@@ -639,6 +640,8 @@ function registerHostClientIpc(
     workspaceRoot,
     mainWindowController,
     getCurrentProjectRoot: () => projectRoot.current(),
+    getDefaultPermissionMode: () =>
+      resolveDefaultPermissionMode(() => loadRuntimeHostSettings(settingsIpcDeps)),
     openPath: (path) => shell.openPath(path),
   });
   registerRuntimeHostSearchIpc({ ipcMain: scopedIpc, client });

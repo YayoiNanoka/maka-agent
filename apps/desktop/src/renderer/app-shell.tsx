@@ -1818,6 +1818,9 @@ function AppShellContent({
     projectPath: projectInfo?.projectPath,
     newSessionModel: newChatModel,
     newSessionCollaborationMode: newChatPlanModeActive ? 'plan' : 'agent',
+    // Refresh only; Desktop Main re-reads the authoritative default before
+    // constructing the Runtime Host preview target.
+    newSessionPermissionMode: defaultPermissionMode,
   });
 
   const { applyE2eFixture } = useStableActions(createAppShellE2eFixtureActions, {

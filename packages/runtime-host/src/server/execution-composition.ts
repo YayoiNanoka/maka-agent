@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { generalizedErrorMessage } from '@maka/core/redaction';
 import { emptyPlanSessionState } from '@maka/core/plan';
+import type { PermissionMode } from '@maka/core/permission';
 import { isDeepResearchSession } from '@maka/core/session';
 import { filterModelVisibleTaskLedgerTasks } from '@maka/core/task-ledger';
 import {
@@ -366,6 +367,7 @@ export async function createExecutionRuntimeHostComposition(
       | ((
           previewSessionId: string,
           collaborationMode: 'agent' | 'plan',
+          permissionMode: PermissionMode,
           initiatingConnectionId: string,
         ) => Promise<string[]>)
       | undefined;
@@ -397,6 +399,7 @@ export async function createExecutionRuntimeHostComposition(
             await requireNewSessionToolNameResolver(resolveNewSessionToolNames)(
               previewSessionId,
               input.target.collaborationMode,
+              input.target.permissionMode,
               connection.connectionId,
             ),
           ),
@@ -673,6 +676,7 @@ export async function createExecutionRuntimeHostComposition(
     resolveNewSessionToolNames = async (
       previewSessionId,
       collaborationMode,
+      permissionMode,
       initiatingConnectionId,
     ) => {
       const preview = await requireClientCapabilities(
@@ -696,6 +700,7 @@ export async function createExecutionRuntimeHostComposition(
               store: openedPlanStore,
               state: emptyPlanSessionState(previewSessionId),
               mode: collaborationMode,
+              permissionMode,
             },
           }).tools.map((tool) => tool.name);
         } finally {
@@ -1542,12 +1547,14 @@ function requireNewSessionToolNameResolver(
     | ((
         previewSessionId: string,
         collaborationMode: 'agent' | 'plan',
+        permissionMode: PermissionMode,
         initiatingConnectionId: string,
       ) => Promise<string[]>)
     | undefined,
 ): (
   previewSessionId: string,
   collaborationMode: 'agent' | 'plan',
+  permissionMode: PermissionMode,
   initiatingConnectionId: string,
 ) => Promise<string[]> {
   if (!resolver) throw new Error('Runtime Host new Session tool resolver is not composed');

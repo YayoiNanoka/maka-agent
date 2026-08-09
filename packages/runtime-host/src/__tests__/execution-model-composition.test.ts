@@ -2434,6 +2434,33 @@ test('Plan composition admits only planning tools before approval and execution 
     startedAt: 2,
     updatedAt: 2,
   };
+  const interrupted: PlanSessionState = {
+    ...pending,
+    storeVersion: 2,
+    proposals: [{ ...proposal, status: 'approved' }],
+    executions: [
+      {
+        ...execution,
+        status: 'interrupted',
+        interruptedAt: 3,
+        interruptionReason: 'User requested replanning',
+        updatedAt: 3,
+      },
+    ],
+  };
+  const fullAccessReplanning = createHostExecutionModelComposition({
+    ...base,
+    plan: { store, state: interrupted, mode: 'plan', permissionMode: 'bypass' },
+  });
+  const replanningTail = await fullAccessReplanning.turnTailPrompt({
+    sessionId: 'session-1',
+    turnId: 'turn-full-access-replanning',
+    cwd: process.cwd(),
+    workspaceRoot: process.cwd(),
+  });
+  assert.match(replanningTail, /Full access remains active/);
+  assert.doesNotMatch(replanningTail, /Do not resume execution or modify files/);
+
   const active: PlanSessionState = {
     ...pending,
     storeVersion: 2,
