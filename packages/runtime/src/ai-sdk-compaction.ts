@@ -45,6 +45,7 @@ import {
   buildHistoryCompactCheckpoint,
   matchHistoryCompactCheckpointPrefix,
   type HistoryCompactCheckpoint,
+  type HistoryCompactMemoryExtractionBoundary,
 } from './history-compact-checkpoint.js';
 
 import { createHash } from 'node:crypto';
@@ -118,6 +119,18 @@ export interface ProviderImageBudget {
 export interface ProviderRequestOrigin {
   runId: string | undefined;
   imageBudget: ProviderImageBudget;
+}
+
+export interface AutomaticMemoryCompactionDispatch {
+  readonly checkpoint: HistoryCompactCheckpoint;
+  readonly activeTools: readonly string[];
+}
+
+export interface AutomaticMemoryCompactionDecision {
+  /** Frozen into the durable checkpoint before it is recorded. */
+  readonly disposition: 'eligible' | 'policy_denied';
+  /** False for policy denial and transient gate unavailability. */
+  readonly dispatch: boolean;
 }
 
 /** Constructor dependencies for AiSdkCompaction. */
@@ -423,6 +436,7 @@ export class AiSdkCompaction {
 
   public async writeHistoryCompactCheckpoint(input: {
     requestShapeHashBefore?: string;
+    automaticMemoryBoundary?: HistoryCompactMemoryExtractionBoundary;
     turnId: string;
     /**
      * The run this summarization is billed to. Always stated by the caller:
@@ -554,6 +568,9 @@ export class AiSdkCompaction {
         highWaterName: input.draftBlock.highWaterName,
         highWaterSeq: input.draftBlock.highWaterSeq,
         ...(previousCheckpoint ? { previousCheckpointId: previousCheckpoint.checkpointId } : {}),
+        ...(input.automaticMemoryBoundary
+          ? { memoryExtractionBoundary: input.automaticMemoryBoundary }
+          : {}),
         charsPerToken: input.contextBudget.charsPerToken,
         now: this.now(),
       });
@@ -1309,6 +1326,8 @@ export class AiSdkCompaction {
     systemPromptChars: number,
     onDiagnosticPatch: (patch: Partial<ContextBudgetDiagnostic>) => void,
     origin: ProviderRequestOrigin,
+    memoryCompactionDecision?: () => Promise<AutomaticMemoryCompactionDecision>,
+    onMemoryCompaction?: (input: AutomaticMemoryCompactionDispatch) => void,
     abortSignal?: AbortSignal,
   ): RequestProjectionStage | undefined {
     if (!state) return undefined;
@@ -1448,6 +1467,8 @@ export class AiSdkCompaction {
         activeToolsForStep,
         systemPromptChars,
         turnTailPrompt,
+        memoryCompactionDecision,
+        onMemoryCompaction,
         abortSignal,
       });
       if (outcome.decision === 'skip') return keepProjection();
@@ -1496,6 +1517,8 @@ export class AiSdkCompaction {
     activeToolsForStep: readonly string[];
     systemPromptChars: number;
     turnTailPrompt: string | undefined;
+    memoryCompactionDecision?: () => Promise<AutomaticMemoryCompactionDecision>;
+    onMemoryCompaction?: (input: AutomaticMemoryCompactionDispatch) => void;
     abortSignal?: AbortSignal;
   }): Promise<MidTurnCompactionOutcome> {
     const {
@@ -1588,7 +1611,9 @@ export class AiSdkCompaction {
       };
     }
     const orderedEvents = [...state.priorContentEvents, ...currentTurnEvents];
-
+    const memoryDecision = input.memoryCompactionDecision
+      ? await input.memoryCompactionDecision()
+      : undefined;
     const plan = await planMidTurnCapacityCompaction({
       sessionId: this.sessionId,
       orderedEvents,
@@ -1603,6 +1628,16 @@ export class AiSdkCompaction {
         ? { highWaterName: compactPolicy.highWaterName }
         : {}),
       ...(state.previousCheckpoint ? { previousCheckpoint: state.previousCheckpoint } : {}),
+      ...(memoryDecision && orderedEvents.at(-1)
+        ? {
+            memoryExtractionBoundary: {
+              runId: orderedEvents.at(-1)!.runId,
+              turnId: orderedEvents.at(-1)!.turnId,
+              runtimeEventId: orderedEvents.at(-1)!.id,
+              disposition: memoryDecision.disposition,
+            },
+          }
+        : {}),
       summarize: async ({ coveredRuntimeEvents, newlyFoldedRuntimeEvents, previousCheckpoint }) => {
         return await Promise.resolve(
           summarizer({
@@ -1711,6 +1746,16 @@ export class AiSdkCompaction {
         recorderCounters: { historyCompactWritesAttempted: 1, historyCompactWriteFailures: 1 },
       };
     }
+    if (memoryDecision?.dispatch && input.onMemoryCompaction) {
+      try {
+        input.onMemoryCompaction({
+          checkpoint: plan.checkpoint,
+          activeTools: activeToolsForStep,
+        });
+      } catch {
+        // Memory extraction is fail-open and must never perturb Compaction.
+      }
+    }
     state.previousCheckpoint = plan.checkpoint;
     return {
       decision: 'compacted',
@@ -1746,6 +1791,8 @@ export class AiSdkCompaction {
     queue: AsyncEventQueue<SessionEvent>;
     onDiagnosticPatch: (patch: Partial<ContextBudgetDiagnostic>) => void;
     origin: ProviderRequestOrigin;
+    memoryCompactionDecision?: () => Promise<AutomaticMemoryCompactionDecision>;
+    onMemoryCompaction?: (input: AutomaticMemoryCompactionDispatch) => void;
     abortSignal?: AbortSignal;
   }): Promise<{ messages: ModelMessage[] } | undefined> {
     const state = input.midTurnState;
@@ -1784,6 +1831,8 @@ export class AiSdkCompaction {
       activeToolsForStep: input.activeTools,
       systemPromptChars: input.systemPromptChars,
       turnTailPrompt: input.turnTailPrompt,
+      memoryCompactionDecision: input.memoryCompactionDecision,
+      onMemoryCompaction: input.onMemoryCompaction,
       abortSignal: input.abortSignal,
     });
     if (outcome.decision !== 'compacted') {

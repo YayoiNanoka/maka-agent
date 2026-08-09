@@ -147,7 +147,11 @@ import type { ActiveToolResultPruneDiagnosticPatch } from './active-tool-result-
 import { toolResultOutput } from './tool-result-output.js';
 import { buildActiveCompactionHeadAnchor } from './active-full-compact.js';
 import { compactionDecisionDiagnosticPatch } from './compaction-boundary.js';
-import type { ProviderImageBudget } from './ai-sdk-compaction.js';
+import type {
+  AutomaticMemoryCompactionDecision,
+  AutomaticMemoryCompactionDispatch,
+  ProviderImageBudget,
+} from './ai-sdk-compaction.js';
 import {
   AiSdkCompaction,
   composeActiveCompactionProjection,
@@ -1118,6 +1122,76 @@ export class AiSdkBackend implements AgentBackend {
     };
   }
 
+  private dispatchAutomaticMemoryCompaction(
+    scope: TurnScope,
+    dispatch: AutomaticMemoryCompactionDispatch,
+    sourceSystemPrompt: string | undefined,
+    sourceTools: ModelToolSet,
+  ): void {
+    const capabilities = this.input.memoryExtraction;
+    const boundary = dispatch.checkpoint.memoryExtractionBoundary;
+    if (
+      !capabilities ||
+      !scope.runId ||
+      !boundary ||
+      modelUsesNativeOpenAiResponses(this.input.connection, this.input.modelId)
+    ) {
+      return;
+    }
+    try {
+      capabilities.extract({
+        trigger: 'compaction',
+        sourceHeader: memoryExtractionModelHeader(this.input.header),
+        ...(sourceSystemPrompt ? { sourceSystemPrompt } : {}),
+        // Compaction messages are rebuilt from the durable RuntimeEvent prefix
+        // inside the background lane, avoiding a full Memory projection here.
+        sourceMessages: [],
+        rebuildSourceContextFromCompactionCheckpoint: true,
+        sourceTools: { ...sourceTools },
+        sourceActiveTools: [...dispatch.activeTools],
+        ...(this.input.providerOptions
+          ? { sourceProviderOptions: structuredClone(this.input.providerOptions) }
+          : {}),
+        ...(this.modelAdapter.maxOutputTokens() !== undefined
+          ? { sourceMaxOutputTokens: this.modelAdapter.maxOutputTokens() }
+          : {}),
+        sessionId: this.sessionId,
+        runId: scope.runId,
+        turnId: scope.turnId,
+        workspaceKey: this.input.header.workspaceRoot,
+        compactionCheckpointId: dispatch.checkpoint.checkpointId,
+        compactionBoundaryEventId: boundary.runtimeEventId,
+      });
+    } catch {
+      // Automatic memory extraction is fail-open and must never perturb the caller.
+    }
+  }
+
+  private automaticMemoryCompactionSupported(): boolean {
+    return (
+      this.input.memoryExtraction !== undefined &&
+      !modelUsesNativeOpenAiResponses(this.input.connection, this.input.modelId)
+    );
+  }
+
+  private async automaticMemoryCompactionDecision(): Promise<AutomaticMemoryCompactionDecision> {
+    const capabilities = this.input.memoryExtraction;
+    if (!capabilities) return { disposition: 'eligible', dispatch: false };
+    if (this.input.header.subagentParent || this.input.header.isArchived) {
+      return { disposition: 'policy_denied', dispatch: false };
+    }
+    try {
+      const gate = await capabilities.gate();
+      if (gate.allowed) return { disposition: 'eligible', dispatch: true };
+      return gate.reason === 'unavailable'
+        ? { disposition: 'eligible', dispatch: false }
+        : { disposition: 'policy_denied', dispatch: false };
+    } catch {
+      // A transient gate read must stay recoverable, not become a durable deny.
+      return { disposition: 'eligible', dispatch: false };
+    }
+  }
+
   /**
    * One ToolRuntime per `send()`, bound to that turn's identity for its whole
    * lifetime. The scope is passed in rather than read back so a tool settling
@@ -1513,8 +1587,39 @@ export class AiSdkBackend implements AgentBackend {
           };
     }
 
+    // Resolve the stable Provider envelope before automatic Compaction freezes
+    // its source. The same value is reused by the primary request; Memory does
+    // not resolve or mutate Agent configuration after the checkpoint commits.
+    let systemPrompt: string | undefined;
+    try {
+      systemPrompt = joinPromptFragments([
+        await this.resolveSystemPrompt(scope),
+        scope.orchestration?.mode === 'swarm' ? renderSwarmModePrompt() : undefined,
+        scope.orchestration?.mode === 'graph' ? renderGraphModePrompt() : undefined,
+      ]);
+    } catch (err) {
+      trace.modelStreamFailed(this.modelAdapter.classifyError(err), err);
+      queue.push(this.makeErrorEvent(turnId, err));
+      queue.push({
+        type: 'complete',
+        id: this.newId(),
+        turnId,
+        ts: this.now(),
+        stopReason: 'error',
+      } satisfies CompleteEvent);
+      queue.close();
+      yield* this.drain(queue);
+      return;
+    }
+
     // --- Build messages from RuntimeEvent history and its compatibility projection. ---
-    const priorReplayResult = await this.buildPriorMessages(scope, input);
+    const priorReplayResult = await this.buildPriorMessages(
+      scope,
+      input,
+      this.automaticMemoryCompactionSupported()
+        ? { systemPrompt, sourceTools: modelTools, activeTools: plan.activeTools }
+        : undefined,
+    );
     if (scope.aborted) {
       queue.push({
         type: 'abort',
@@ -1603,11 +1708,6 @@ export class AiSdkBackend implements AgentBackend {
           next.start();
         };
         const activeTools = plan.activeTools;
-        const systemPrompt = joinPromptFragments([
-          await this.resolveSystemPrompt(scope),
-          scope.orchestration?.mode === 'swarm' ? renderSwarmModePrompt() : undefined,
-          scope.orchestration?.mode === 'graph' ? renderGraphModePrompt() : undefined,
-        ]);
         const turnTailPrompt = input.continuation
           ? undefined
           : joinPromptFragments([
@@ -1861,6 +1961,13 @@ export class AiSdkBackend implements AgentBackend {
           midTurnSystemPromptChars,
           onMidTurnDiagnosticPatch,
           scope,
+          this.automaticMemoryCompactionSupported()
+            ? () => this.automaticMemoryCompactionDecision()
+            : undefined,
+          this.automaticMemoryCompactionSupported()
+            ? (dispatch) =>
+                this.dispatchAutomaticMemoryCompaction(scope, dispatch, systemPrompt, modelTools)
+            : undefined,
           turnAbortController.signal,
         );
         // When mid-turn capacity compaction is active, the prune must also cover
@@ -2240,6 +2347,19 @@ export class AiSdkBackend implements AgentBackend {
                       queue,
                       onDiagnosticPatch: onMidTurnDiagnosticPatch,
                       origin: scope,
+                      ...(this.automaticMemoryCompactionSupported()
+                        ? {
+                            memoryCompactionDecision: () =>
+                              this.automaticMemoryCompactionDecision(),
+                            onMemoryCompaction: (dispatch: AutomaticMemoryCompactionDispatch) =>
+                              this.dispatchAutomaticMemoryCompaction(
+                                scope,
+                                dispatch,
+                                systemPrompt,
+                                modelTools,
+                              ),
+                          }
+                        : {}),
                       abortSignal: turnAbortController.signal,
                     })
                   : undefined;
@@ -3138,6 +3258,11 @@ export class AiSdkBackend implements AgentBackend {
   private async buildPriorMessages(
     scope: TurnScope,
     input: BackendSendInput,
+    automaticMemory?: {
+      readonly systemPrompt: string | undefined;
+      readonly sourceTools: ModelToolSet;
+      readonly activeTools: readonly string[];
+    },
   ): Promise<PriorReplayResult> {
     const priorStored = input.context.filter((message) => message.turnId !== input.turnId);
     if (!input.runtimeContext) {
@@ -3215,6 +3340,12 @@ export class AiSdkBackend implements AgentBackend {
       );
       if (draftBlocks.length > 0) {
         if (this.input.summarizeHistoryCompact && this.input.recordHistoryCompactCheckpoint) {
+          const automaticMemoryDecision = automaticMemory
+            ? await this.automaticMemoryCompactionDecision()
+            : undefined;
+          const automaticMemoryBoundary = automaticMemoryDecision
+            ? lastNonCompactRuntimeEvent(priorRuntimeContext)
+            : undefined;
           const writePatch = await this.compaction.writeHistoryCompactCheckpoint({
             turnId: input.turnId,
             // Stated, not resolved: this runs inside a send, and the backend
@@ -3225,9 +3356,30 @@ export class AiSdkBackend implements AgentBackend {
             draftBlock: draftBlocks[0]!,
             abortSignal: scope.abortController.signal,
             requestShapeHashBefore: this.priorRequestShape?.requestShapeHash,
+            ...(automaticMemoryBoundary
+              ? {
+                  automaticMemoryBoundary: {
+                    runId: automaticMemoryBoundary.runId,
+                    turnId: automaticMemoryBoundary.turnId,
+                    runtimeEventId: automaticMemoryBoundary.id,
+                    disposition: automaticMemoryDecision!.disposition,
+                  },
+                }
+              : {}),
           });
           if (writePatch.replacementCheckpoint) {
             latestHistoryCompactCheckpoint = writePatch.replacementCheckpoint;
+            if (automaticMemoryDecision?.dispatch && automaticMemory) {
+              this.dispatchAutomaticMemoryCompaction(
+                scope,
+                {
+                  checkpoint: writePatch.replacementCheckpoint,
+                  activeTools: automaticMemory.activeTools,
+                },
+                automaticMemory.systemPrompt,
+                automaticMemory.sourceTools,
+              );
+            }
             runtimeContext = [
               historyCompactCheckpointToRuntimeEvent(writePatch.replacementCheckpoint),
               ...runtimeContext.filter((event) => !event.id.startsWith('history-compact:')),
@@ -4560,6 +4712,14 @@ function projectMemoryConversationPrefix(
     messages: [...messages],
     ...(eventMessagePositions ? { eventMessagePositions } : {}),
   };
+}
+
+function lastNonCompactRuntimeEvent(events: readonly RuntimeEvent[]): RuntimeEvent | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (!event.id.startsWith('history-compact:')) return event;
+  }
+  return undefined;
 }
 
 function memoryExtractionModelHeader(

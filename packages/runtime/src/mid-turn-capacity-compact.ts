@@ -10,6 +10,7 @@ import {
   matchHistoryCompactCheckpointPrefix,
   projectHistoryCompactCheckpointReplay,
   type HistoryCompactCheckpoint,
+  type HistoryCompactMemoryExtractionBoundary,
 } from './history-compact-checkpoint.js';
 
 /**
@@ -220,6 +221,8 @@ export interface PlanMidTurnCapacityCompactionInput {
   highWaterName?: string;
   highWaterSeq?: number;
   previousCheckpoint?: HistoryCompactCheckpoint;
+  /** Present only when this automatic Compaction should create a Memory task. */
+  memoryExtractionBoundary?: HistoryCompactMemoryExtractionBoundary;
   summarize: MidTurnSummarizer;
 }
 
@@ -331,6 +334,9 @@ export async function planMidTurnCapacityCompaction(
     summary,
     phase: 'mid_turn',
     headAnchor: input.headAnchor,
+    ...(input.memoryExtractionBoundary
+      ? { memoryExtractionBoundary: input.memoryExtractionBoundary }
+      : {}),
     ...(input.highWaterName !== undefined ? { highWaterName: input.highWaterName } : {}),
     ...(input.highWaterSeq !== undefined ? { highWaterSeq: input.highWaterSeq } : {}),
     ...(previousCheckpoint ? { previousCheckpointId: previousCheckpoint.checkpointId } : {}),

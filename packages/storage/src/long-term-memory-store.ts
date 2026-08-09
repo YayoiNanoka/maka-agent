@@ -157,7 +157,11 @@ function snapshotCommitExtractionRequest(
     items: Object.freeze(request.items.map(snapshotItemWrite)),
     requestedItemIndexes: Object.freeze([...request.requestedItemIndexes]),
     ...(request.noOpReason ? { noOpReason: request.noOpReason } : {}),
+    ...(request.skipReason ? { skipReason: request.skipReason } : {}),
     trigger: request.trigger,
+    ...(request.compactionCheckpointId
+      ? { compactionCheckpointId: request.compactionCheckpointId }
+      : {}),
   });
 }
 

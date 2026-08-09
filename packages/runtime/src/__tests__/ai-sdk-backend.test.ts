@@ -87,6 +87,311 @@ import type { OpenAiResponsesSemanticBaseline } from '../openai-responses-contin
 import type { OpenAiResponsesTransportState } from '../openai-responses-websocket.js';
 
 describe('AiSdkBackend Memory Extraction triggers', () => {
+  test('dispatches a pre-turn Compaction recipe without projecting history or awaiting it', async () => {
+    const model = completionModel();
+    const recorded: HistoryCompactCheckpoint[] = [];
+    let snapshot: MemoryExtractionSourceSnapshot | undefined;
+    let systemPromptResolutions = 0;
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      systemPrompt: async () => {
+        systemPromptResolutions += 1;
+        return 'CURRENT_MEMORY_SYSTEM_PROMPT';
+      },
+      tools: [],
+      contextBudget: {
+        maxHistoryEstimatedTokens: 1_500,
+        charsPerToken: 1,
+        historyCompact: {
+          enabled: true,
+          mode: 'read_write',
+          highWaterRatio: 0.01,
+          tailEstimatedTokens: 20,
+          maxSummaryEstimatedTokens: 500,
+        },
+      },
+      summarizeHistoryCompact: async () => 'AUTOMATIC_MEMORY_SUMMARY',
+      recordHistoryCompactCheckpoint: (checkpoint) => {
+        recorded.push(checkpoint);
+      },
+      memoryExtraction: {
+        gate: async () => ({ allowed: true }),
+        remember: async () => ({ status: 'unavailable', requestedItems: [] }),
+        extract: (value) => {
+          snapshot = value;
+          return new Promise<void>(() => {});
+        },
+      },
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+    const runtimeContext = [
+      runtimeTextEvent({
+        id: 'memory-compact-old-user',
+        turnId: 'memory-compact-turn-1',
+        role: 'user',
+        author: 'user',
+        text: 'The project uses SQLite. '.repeat(40),
+      }),
+      runtimeTextEvent({
+        id: 'memory-compact-old-model',
+        turnId: 'memory-compact-turn-2',
+        role: 'model',
+        author: 'agent',
+        text: 'Acknowledged. '.repeat(70),
+      }),
+      runtimeTextEvent({
+        id: 'memory-compact-boundary',
+        turnId: 'memory-compact-turn-3',
+        role: 'user',
+        author: 'user',
+        text: 'Keep this retained context.',
+      }),
+    ];
+
+    await drain(
+      backend.send({
+        turnId: 'memory-compact-current',
+        runId: 'memory-compact-current-run',
+        text: 'continue',
+        context: [],
+        runtimeContext,
+      }),
+    );
+
+    assert.equal(recorded.length, 1);
+    assert.equal(recorded[0]?.memoryExtractionBoundary?.runtimeEventId, 'memory-compact-boundary');
+    assert.equal(snapshot?.trigger, 'compaction');
+    assert.equal(snapshot?.compactionCheckpointId, recorded[0]?.checkpointId);
+    assert.equal(snapshot?.compactionBoundaryEventId, 'memory-compact-boundary');
+    assert.equal(snapshot?.sourceSystemPrompt, 'CURRENT_MEMORY_SYSTEM_PROMPT');
+    assert.deepEqual(snapshot?.sourceMessages, []);
+    assert.equal(snapshot?.rebuildSourceContextFromCompactionCheckpoint, true);
+    assert.equal(systemPromptResolutions, 1);
+    assert.match(JSON.stringify(model.doStreamCalls[0]), /CURRENT_MEMORY_SYSTEM_PROMPT/);
+    assert.equal(model.doStreamCalls.length, 1, 'the unresolved extraction must not block Agent');
+  });
+
+  test('terminates cleanly when the dynamic system prompt rejects before Compaction', async () => {
+    const model = completionModel();
+    const recorded: HistoryCompactCheckpoint[] = [];
+    let dispatches = 0;
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      systemPrompt: async () => {
+        throw new Error('dynamic system prompt failed');
+      },
+      tools: [],
+      contextBudget: {
+        maxHistoryEstimatedTokens: 1_500,
+        charsPerToken: 1,
+        historyCompact: { enabled: true, mode: 'read_write' },
+      },
+      summarizeHistoryCompact: async () => 'must not summarize',
+      recordHistoryCompactCheckpoint: (checkpoint) => {
+        recorded.push(checkpoint);
+      },
+      memoryExtraction: {
+        gate: async () => ({ allowed: true }),
+        remember: async () => ({ status: 'unavailable', requestedItems: [] }),
+        extract: () => {
+          dispatches += 1;
+        },
+      },
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    const events: SessionEvent[] = [];
+    for await (const event of backend.send({
+      turnId: 'prompt-failure-turn',
+      runId: 'prompt-failure-run',
+      text: 'continue',
+      context: [],
+      runtimeContext: [],
+    })) {
+      events.push(event);
+    }
+
+    assert.equal(model.doStreamCalls.length, 0);
+    assert.equal(recorded.length, 0);
+    assert.equal(dispatches, 0);
+    assert.equal(
+      events.some((event) => event.type === 'error'),
+      true,
+    );
+    assert.equal(
+      events.some((event) => event.type === 'complete' && event.stopReason === 'error'),
+      true,
+    );
+  });
+
+  for (const gate of [
+    { allowed: false as const, reason: 'disabled' as const },
+    { allowed: false as const, reason: 'incognito' as const },
+  ]) {
+    test(`persists a denied marker and does not dispatch when automatic Compaction is ${gate.reason}`, async () => {
+      const recorded: HistoryCompactCheckpoint[] = [];
+      let dispatches = 0;
+      const backend = createTestAiSdkBackend({
+        sessionId: 'session-1',
+        header: header(),
+        appendMessage: async () => {},
+        connection: connection(),
+        apiKey: 'sk-test',
+        modelId: 'mock-model-id',
+        modelFactory: () => completionModel(),
+        tools: [],
+        contextBudget: {
+          maxHistoryEstimatedTokens: 1_500,
+          charsPerToken: 1,
+          historyCompact: {
+            enabled: true,
+            mode: 'read_write',
+            highWaterRatio: 0.01,
+            tailEstimatedTokens: 20,
+            maxSummaryEstimatedTokens: 500,
+          },
+        },
+        summarizeHistoryCompact: async () => 'DENIED_MEMORY_SUMMARY',
+        recordHistoryCompactCheckpoint: (checkpoint) => {
+          recorded.push(checkpoint);
+        },
+        memoryExtraction: {
+          gate: async () => gate,
+          remember: async () => ({ status: 'unavailable', requestedItems: [] }),
+          extract: () => {
+            dispatches += 1;
+          },
+        },
+        newId: idGenerator(),
+        now: monotonicClock(),
+      });
+
+      await drain(
+        backend.send({
+          turnId: `denied-${gate.reason}-current`,
+          runId: `denied-${gate.reason}-run`,
+          text: 'continue',
+          context: [],
+          runtimeContext: [
+            runtimeTextEvent({
+              id: `denied-${gate.reason}-old-user`,
+              turnId: 'denied-old-1',
+              role: 'user',
+              author: 'user',
+              text: 'Private disabled-period context. '.repeat(50),
+            }),
+            runtimeTextEvent({
+              id: `denied-${gate.reason}-old-model`,
+              turnId: 'denied-old-2',
+              role: 'model',
+              author: 'agent',
+              text: 'Acknowledged. '.repeat(70),
+            }),
+            runtimeTextEvent({
+              id: `denied-${gate.reason}-boundary`,
+              turnId: 'denied-old-3',
+              role: 'user',
+              author: 'user',
+              text: 'Retained tail.',
+            }),
+          ],
+        }),
+      );
+
+      assert.equal(recorded.length, 1);
+      assert.equal(recorded[0]?.memoryExtractionBoundary?.disposition, 'policy_denied');
+      assert.equal(dispatches, 0);
+    });
+  }
+
+  test('keeps a transiently unavailable automatic Compaction checkpoint recoverable', async () => {
+    const recorded: HistoryCompactCheckpoint[] = [];
+    let dispatches = 0;
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => completionModel(),
+      tools: [],
+      contextBudget: {
+        maxHistoryEstimatedTokens: 1_500,
+        charsPerToken: 1,
+        historyCompact: {
+          enabled: true,
+          mode: 'read_write',
+          highWaterRatio: 0.01,
+          tailEstimatedTokens: 20,
+          maxSummaryEstimatedTokens: 500,
+        },
+      },
+      summarizeHistoryCompact: async () => 'UNAVAILABLE_MEMORY_SUMMARY',
+      recordHistoryCompactCheckpoint: (checkpoint) => {
+        recorded.push(checkpoint);
+      },
+      memoryExtraction: {
+        gate: async () => ({ allowed: false, reason: 'unavailable' }),
+        remember: async () => ({ status: 'unavailable', requestedItems: [] }),
+        extract: () => {
+          dispatches += 1;
+        },
+      },
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    await drain(
+      backend.send({
+        turnId: 'unavailable-current',
+        runId: 'unavailable-run',
+        text: 'continue',
+        context: [],
+        runtimeContext: [
+          runtimeTextEvent({
+            id: 'unavailable-old-user',
+            turnId: 'unavailable-old-1',
+            role: 'user',
+            author: 'user',
+            text: 'Recoverable context. '.repeat(50),
+          }),
+          runtimeTextEvent({
+            id: 'unavailable-old-model',
+            turnId: 'unavailable-old-2',
+            role: 'model',
+            author: 'agent',
+            text: 'Acknowledged. '.repeat(70),
+          }),
+          runtimeTextEvent({
+            id: 'unavailable-boundary',
+            turnId: 'unavailable-old-3',
+            role: 'user',
+            author: 'user',
+            text: 'Retained tail.',
+          }),
+        ],
+      }),
+    );
+
+    assert.equal(recorded[0]?.memoryExtractionBoundary?.disposition, 'eligible');
+    assert.equal(dispatches, 0);
+  });
+
   test('exposes explicitly unsupported Memory triggers on the native OpenAI Responses lane', async () => {
     const model = completionModel();
     let memoryCalled = false;
@@ -4518,6 +4823,7 @@ describe('AiSdkBackend model history', () => {
 
   test('manual compactHistory writes a V2 checkpoint without the legacy artifact writer', async () => {
     const recorded: HistoryCompactCheckpoint[] = [];
+    let memoryDispatches = 0;
     const backend = createTestAiSdkBackend({
       sessionId: 'session-1',
       header: header(),
@@ -4538,6 +4844,13 @@ describe('AiSdkBackend model history', () => {
       summarizeHistoryCompact: async () => 'MANUAL_V2_HISTORY_COMPACT_SENTINEL',
       recordHistoryCompactCheckpoint: (checkpoint) => {
         recorded.push(checkpoint);
+      },
+      memoryExtraction: {
+        gate: async () => ({ allowed: true }),
+        remember: async () => ({ status: 'unavailable', requestedItems: [] }),
+        extract: () => {
+          memoryDispatches += 1;
+        },
       },
     });
 
@@ -4572,6 +4885,8 @@ describe('AiSdkBackend model history', () => {
     assert.equal(recorded.length, 1);
     assert.equal(recorded[0]?.summary, 'MANUAL_V2_HISTORY_COMPACT_SENTINEL');
     assert.deepEqual(recorded[0]?.coverage.eventCount, 2);
+    assert.equal(recorded[0]?.memoryExtractionBoundary, undefined);
+    assert.equal(memoryDispatches, 0);
     assert.equal(result.contextBudget?.historyCompactBlocksWritten, 1);
     assert.equal(result.contextBudget?.compactionDecisions?.[0]?.decision, 'replaced');
   });

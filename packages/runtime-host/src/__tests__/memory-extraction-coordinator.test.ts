@@ -991,6 +991,467 @@ describe('HostMemoryExtractionCoordinator', () => {
       await coordinator.close();
     });
   });
+
+  test('retries failed Compaction coverage from its checkpoint with current Session configuration', async () => {
+    await withMemoryWriter(async (writer) => {
+      const oldUser = textEvent(
+        'event-old-user',
+        'run-old',
+        'turn-old',
+        'The old conversation prefers concise Chinese.',
+      );
+      const oldBoundary = modelTextEvent(
+        'event-old-boundary',
+        'run-old',
+        'turn-old',
+        'Old response.',
+      );
+      const firstCheckpoint = buildHistoryCompactCheckpoint({
+        sessionId: 'session-1',
+        coveredRuntimeEvents: [oldUser],
+        summary: 'Old context.',
+        memoryExtractionBoundary: {
+          runId: oldBoundary.runId,
+          turnId: oldBoundary.turnId,
+          runtimeEventId: oldBoundary.id,
+        },
+        now: 1_500,
+      });
+      const entries = [
+        { ordinal: 1, event: oldUser },
+        { ordinal: 2, event: oldBoundary },
+      ];
+      const checkpoints = [firstCheckpoint];
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const firstRelease = completionSignal();
+      const secondRelease = completionSignal();
+      let releases = 0;
+      const coordinator = createCoordinator({
+        writer,
+        entries,
+        checkpoints,
+        outputs: [
+          new Error('provider unavailable'),
+          new Error('provider unavailable'),
+          new Error('provider unavailable'),
+          emptyIncidentalProposal(),
+          emptyIncidentalProposal(),
+        ],
+        observed,
+        onResidencyRelease: () => {
+          releases += 1;
+          (releases === 1 ? firstRelease : secondRelease).resolve();
+        },
+      });
+
+      coordinator.sourceCapabilities().extract(
+        compactionSnapshot(firstCheckpoint, {
+          sourceSystemPrompt: 'old system',
+          sourceText: 'The old conversation prefers concise Chinese.',
+          sourceEventId: oldUser.id,
+        }),
+      );
+      await firstRelease.promise;
+      assert.equal(
+        (await writer.readPendingExtractionFailure('session-1'))?.compactionCheckpointId,
+        firstCheckpoint.checkpointId,
+      );
+
+      const newUser = textEvent(
+        'event-new-user',
+        'run-new',
+        'turn-new',
+        'The new conversation prefers detailed English.',
+      );
+      const newBoundary = modelTextEvent(
+        'event-new-boundary',
+        'run-new',
+        'turn-new',
+        'New response.',
+      );
+      entries.push({ ordinal: 3, event: newUser }, { ordinal: 4, event: newBoundary });
+      const secondCheckpoint = buildHistoryCompactCheckpoint({
+        sessionId: 'session-1',
+        coveredRuntimeEvents: [oldUser, oldBoundary, newUser],
+        summary: 'Old and new context.',
+        previousCheckpointId: firstCheckpoint.checkpointId,
+        memoryExtractionBoundary: {
+          runId: newBoundary.runId,
+          turnId: newBoundary.turnId,
+          runtimeEventId: newBoundary.id,
+        },
+        now: 2_500,
+      });
+      checkpoints.push(secondCheckpoint);
+      coordinator.sourceCapabilities().extract(
+        compactionSnapshot(secondCheckpoint, {
+          sourceSystemPrompt: 'current system',
+          sourceText: 'The new conversation prefers detailed English.',
+          sourceEventId: newUser.id,
+        }),
+      );
+      await secondRelease.promise;
+
+      assert.equal(observed.length, 5);
+      assert.equal(observed[3]!.snapshot.compactionCheckpointId, firstCheckpoint.checkpointId);
+      assert.equal(observed[3]!.snapshot.sourceSystemPrompt, 'current system');
+      assert.match(JSON.stringify(observed[3]!.snapshot.sourceMessages), /old conversation/);
+      assert.doesNotMatch(JSON.stringify(observed[3]!.snapshot.sourceMessages), /new conversation/);
+      assert.equal(observed[4]!.snapshot.compactionCheckpointId, secondCheckpoint.checkpointId);
+      assert.match(JSON.stringify(observed[4]!.snapshot.sourceMessages), /new conversation/);
+      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 4);
+      assert.equal(await writer.readPendingExtractionFailure('session-1'), undefined);
+      await coordinator.close();
+    });
+  });
+
+  test('recovers an unstarted Compaction checkpoint before processing the new trigger tail', async () => {
+    await withMemoryWriter(async (writer) => {
+      const oldUser = textEvent('crash-old-user', 'run-old', 'turn-old', 'Old durable context.');
+      const oldBoundary = modelTextEvent(
+        'crash-old-boundary',
+        'run-old',
+        'turn-old',
+        'Old response.',
+      );
+      const newUser = textEvent('crash-new-user', 'run-new', 'turn-new', 'New durable context.');
+      const newBoundary = modelTextEvent(
+        'crash-new-boundary',
+        'run-new',
+        'turn-new',
+        'New response.',
+      );
+      const firstCheckpoint = buildHistoryCompactCheckpoint({
+        sessionId: 'session-1',
+        coveredRuntimeEvents: [oldUser],
+        summary: 'Old context.',
+        memoryExtractionBoundary: {
+          runId: oldBoundary.runId,
+          turnId: oldBoundary.turnId,
+          runtimeEventId: oldBoundary.id,
+        },
+      });
+      const secondCheckpoint = buildHistoryCompactCheckpoint({
+        sessionId: 'session-1',
+        coveredRuntimeEvents: [oldUser, oldBoundary, newUser],
+        summary: 'Old and new context.',
+        previousCheckpointId: firstCheckpoint.checkpointId,
+        memoryExtractionBoundary: {
+          runId: newBoundary.runId,
+          turnId: newBoundary.turnId,
+          runtimeEventId: newBoundary.id,
+        },
+      });
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const completed = completionSignal();
+      const coordinator = createCoordinator({
+        writer,
+        entries: [
+          { ordinal: 1, event: oldUser },
+          { ordinal: 2, event: oldBoundary },
+          { ordinal: 3, event: newUser },
+          { ordinal: 4, event: newBoundary },
+        ],
+        checkpoints: [firstCheckpoint, secondCheckpoint],
+        outputs: [emptyIncidentalProposal(), emptyIncidentalProposal()],
+        observed,
+        onResidencyRelease: completed.resolve,
+      });
+
+      coordinator.sourceCapabilities().extract(
+        compactionSnapshot(secondCheckpoint, {
+          sourceSystemPrompt: 'current system',
+          sourceText: 'New durable context.',
+          sourceEventId: newUser.id,
+        }),
+      );
+      await completed.promise;
+
+      assert.deepEqual(
+        observed.map(({ snapshot: source }) => source.compactionCheckpointId),
+        [firstCheckpoint.checkpointId, secondCheckpoint.checkpointId],
+      );
+      assert.match(JSON.stringify(observed[0]!.snapshot.sourceMessages), /Old durable context/);
+      assert.doesNotMatch(
+        JSON.stringify(observed[0]!.snapshot.sourceMessages),
+        /New durable context/,
+      );
+      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 4);
+      await coordinator.close();
+    });
+  });
+
+  test('durably skips a policy-denied checkpoint before extracting a later eligible tail', async () => {
+    await withMemoryWriter(async (writer) => {
+      const deniedUser = textEvent(
+        'denied-user',
+        'run-denied',
+        'turn-denied',
+        'Private detail from the disabled period.',
+      );
+      const deniedBoundary = modelTextEvent(
+        'denied-boundary',
+        'run-denied',
+        'turn-denied',
+        'Denied response.',
+      );
+      const eligibleUser = textEvent(
+        'eligible-user',
+        'run-eligible',
+        'turn-eligible',
+        'New eligible durable context.',
+      );
+      const eligibleBoundary = modelTextEvent(
+        'eligible-boundary',
+        'run-eligible',
+        'turn-eligible',
+        'Eligible response.',
+      );
+      const deniedCheckpoint = buildHistoryCompactCheckpoint({
+        sessionId: 'session-1',
+        coveredRuntimeEvents: [deniedUser],
+        summary: 'Denied period.',
+        memoryExtractionBoundary: {
+          runId: deniedBoundary.runId,
+          turnId: deniedBoundary.turnId,
+          runtimeEventId: deniedBoundary.id,
+          disposition: 'policy_denied',
+        },
+      });
+      const eligibleCheckpoint = buildHistoryCompactCheckpoint({
+        sessionId: 'session-1',
+        coveredRuntimeEvents: [deniedUser, deniedBoundary, eligibleUser],
+        summary: 'Eligible tail.',
+        previousCheckpointId: deniedCheckpoint.checkpointId,
+        memoryExtractionBoundary: {
+          runId: eligibleBoundary.runId,
+          turnId: eligibleBoundary.turnId,
+          runtimeEventId: eligibleBoundary.id,
+          disposition: 'eligible',
+        },
+      });
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const completed = completionSignal();
+      const coordinator = createCoordinator({
+        writer,
+        entries: [
+          { ordinal: 1, event: deniedUser },
+          { ordinal: 2, event: deniedBoundary },
+          { ordinal: 3, event: eligibleUser },
+          { ordinal: 4, event: eligibleBoundary },
+        ],
+        checkpoints: [deniedCheckpoint, eligibleCheckpoint],
+        outputs: [emptyIncidentalProposal()],
+        observed,
+        onResidencyRelease: completed.resolve,
+      });
+
+      coordinator.sourceCapabilities().extract(
+        compactionSnapshot(eligibleCheckpoint, {
+          sourceSystemPrompt: 'current system',
+          sourceText: 'New eligible durable context.',
+          sourceEventId: eligibleUser.id,
+        }),
+      );
+      await completed.promise;
+
+      assert.equal(observed.length, 1, 'the denied checkpoint must never call the model');
+      assert.equal(observed[0]!.snapshot.compactionCheckpointId, eligibleCheckpoint.checkpointId);
+      assert.doesNotMatch(observed[0]!.prompt, /Private detail from the disabled period/);
+      assert.match(
+        JSON.stringify(observed[0]!.snapshot.sourceMessages),
+        /New eligible durable context/,
+      );
+      assert.match(observed[0]!.prompt, /event:eligible-user/);
+      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 4);
+      assert.deepEqual(
+        await writer.searchByKeys({ terms: ['response preference'], match: 'exact' }),
+        [],
+      );
+      await coordinator.close();
+    });
+  });
+
+  test('fails closed when a Compaction checkpoint boundary tuple does not match the ledger', async () => {
+    await withMemoryWriter(async (writer) => {
+      const user = textEvent('tuple-user', 'run-1', 'turn-1', 'Durable context.');
+      const boundary = modelTextEvent('tuple-boundary', 'run-1', 'turn-1', 'Response.');
+      const checkpoint = buildHistoryCompactCheckpoint({
+        sessionId: 'session-1',
+        coveredRuntimeEvents: [user],
+        summary: 'Context.',
+        memoryExtractionBoundary: {
+          runId: 'wrong-run',
+          turnId: boundary.turnId,
+          runtimeEventId: boundary.id,
+        },
+      });
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const completed = completionSignal();
+      const coordinator = createCoordinator({
+        writer,
+        entries: [
+          { ordinal: 1, event: user },
+          { ordinal: 2, event: boundary },
+        ],
+        checkpoints: [checkpoint],
+        outputs: [],
+        observed,
+        onResidencyRelease: completed.resolve,
+      });
+
+      coordinator.sourceCapabilities().extract(
+        compactionSnapshot(checkpoint, {
+          sourceSystemPrompt: 'system',
+          sourceText: 'Durable context.',
+          sourceEventId: user.id,
+        }),
+      );
+      await completed.promise;
+
+      assert.equal(observed.length, 0);
+      assert.equal(await writer.readExtractionCursor('session-1'), undefined);
+      await coordinator.close();
+    });
+  });
+
+  test('fails closed over malformed Compaction and non-Compaction source-context recipes', async () => {
+    await withMemoryWriter(async (writer) => {
+      const user = textEvent('recipe-user', 'run-1', 'turn-1', 'Durable context.');
+      const boundary = modelTextEvent('recipe-boundary', 'run-1', 'turn-1', 'Response.');
+      const checkpoint = buildHistoryCompactCheckpoint({
+        sessionId: 'session-1',
+        coveredRuntimeEvents: [user],
+        summary: 'Context.',
+        memoryExtractionBoundary: {
+          runId: boundary.runId,
+          turnId: boundary.turnId,
+          runtimeEventId: boundary.id,
+        },
+      });
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const firstCompleted = completionSignal();
+      const secondCompleted = completionSignal();
+      let completions = 0;
+      const coordinator = createCoordinator({
+        writer,
+        entries: [
+          { ordinal: 1, event: user },
+          { ordinal: 2, event: boundary },
+        ],
+        checkpoints: [checkpoint],
+        outputs: [],
+        observed,
+        onResidencyRelease: () => {
+          completions += 1;
+          (completions === 1 ? firstCompleted : secondCompleted).resolve();
+        },
+      });
+
+      coordinator.sourceCapabilities().extract({
+        ...compactionSnapshot(checkpoint, {
+          sourceSystemPrompt: 'system',
+          sourceText: 'Durable context.',
+          sourceEventId: user.id,
+        }),
+        sourceMessages: [{ role: 'user', content: 'must not be accepted beside a recipe' }],
+      });
+      await firstCompleted.promise;
+
+      coordinator.sourceCapabilities().extract({
+        ...extractSnapshot('run-1', 'turn-extract', boundary.id, 'Durable context.', user.id),
+        rebuildSourceContextFromCompactionCheckpoint: true,
+      });
+      await secondCompleted.promise;
+
+      assert.equal(observed.length, 0);
+      assert.equal(await writer.readExtractionCursor('session-1'), undefined);
+      await coordinator.close();
+    });
+  });
+
+  test('keeps a late Compaction recoverable when drain is the only unavailable gate', async () => {
+    await withMemoryWriter(async (writer) => {
+      const user = textEvent('drain-user', 'run-1', 'turn-1', 'Durable context.');
+      const boundary = modelTextEvent('drain-boundary', 'run-1', 'turn-1', 'Response.');
+      const checkpoint = buildHistoryCompactCheckpoint({
+        sessionId: 'session-1',
+        coveredRuntimeEvents: [user],
+        summary: 'Context.',
+        memoryExtractionBoundary: {
+          runId: boundary.runId,
+          turnId: boundary.turnId,
+          runtimeEventId: boundary.id,
+        },
+      });
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const coordinator = createCoordinator({
+        writer,
+        entries: [
+          { ordinal: 1, event: user },
+          { ordinal: 2, event: boundary },
+        ],
+        checkpoints: [checkpoint],
+        outputs: [],
+        observed,
+      });
+
+      coordinator.beginDrain();
+      coordinator.sourceCapabilities().extract(
+        compactionSnapshot(checkpoint, {
+          sourceSystemPrompt: 'system',
+          sourceText: 'Durable context.',
+          sourceEventId: user.id,
+        }),
+      );
+      await coordinator.close();
+
+      assert.equal(observed.length, 0);
+      assert.equal(await writer.readExtractionCursor('session-1'), undefined);
+    });
+  });
+
+  test('settles an explicit Incognito denial for a late Compaction during drain', async () => {
+    await withMemoryWriter(async (writer) => {
+      const user = textEvent('drain-denied-user', 'run-1', 'turn-1', 'Private context.');
+      const boundary = modelTextEvent('drain-denied-boundary', 'run-1', 'turn-1', 'Response.');
+      const checkpoint = buildHistoryCompactCheckpoint({
+        sessionId: 'session-1',
+        coveredRuntimeEvents: [user],
+        summary: 'Context.',
+        memoryExtractionBoundary: {
+          runId: boundary.runId,
+          turnId: boundary.turnId,
+          runtimeEventId: boundary.id,
+        },
+      });
+      const observed: Array<{ snapshot: MemoryExtractionSourceSnapshot; prompt: string }> = [];
+      const coordinator = createCoordinator({
+        writer,
+        entries: [
+          { ordinal: 1, event: user },
+          { ordinal: 2, event: boundary },
+        ],
+        checkpoints: [checkpoint],
+        outputs: [],
+        observed,
+        policyState: { incognito: true },
+      });
+
+      coordinator.beginDrain();
+      coordinator.sourceCapabilities().extract(
+        compactionSnapshot(checkpoint, {
+          sourceSystemPrompt: 'system',
+          sourceText: 'Private context.',
+          sourceEventId: user.id,
+        }),
+      );
+      await coordinator.close();
+
+      assert.equal(observed.length, 0);
+      assert.equal((await writer.readExtractionCursor('session-1'))?.processedOrdinal, 2);
+    });
+  });
 });
 
 function createCoordinator(input: {
@@ -1002,6 +1463,7 @@ function createCoordinator(input: {
   afterModelCall?: () => void;
   onResidencyRelease?: () => void;
   checkpoint?: HistoryCompactCheckpoint;
+  checkpoints?: HistoryCompactCheckpoint[];
 }): HostMemoryExtractionCoordinator {
   const policyState = input.policyState ?? { incognito: false };
   let call = 0;
@@ -1019,7 +1481,11 @@ function createCoordinator(input: {
     },
     sessions: { readHeader: async () => header() },
     runtimeEvents: { readSessionRuntimeEventEntries: async () => [...input.entries] },
-    historyCompaction: { readLatestCheckpoint: async () => input.checkpoint },
+    historyCompaction: {
+      readLatestCheckpoint: async () => input.checkpoints?.at(-1) ?? input.checkpoint,
+      readCheckpoints: async () =>
+        input.checkpoints ?? (input.checkpoint ? [input.checkpoint] : []),
+    },
     model: {
       generate: async ({ snapshot: source, prompt }) => {
         input.observed?.push({ snapshot: source, prompt });
@@ -1089,6 +1555,45 @@ function extractSnapshot(
     workspaceKey: '/workspace/maka',
     terminalEventId,
   };
+}
+
+function compactionSnapshot(
+  checkpoint: HistoryCompactCheckpoint,
+  input: {
+    sourceSystemPrompt: string;
+    sourceText: string;
+    sourceEventId: string;
+  },
+): MemoryExtractionSourceSnapshot {
+  const boundary = checkpoint.memoryExtractionBoundary;
+  assert.ok(boundary);
+  return {
+    trigger: 'compaction',
+    sourceHeader: header(),
+    sourceSystemPrompt: input.sourceSystemPrompt,
+    sourceMessages: [],
+    rebuildSourceContextFromCompactionCheckpoint: true,
+    sourceTools: { Read: { description: 'Current tool schema', inputSchema: {} } },
+    sourceActiveTools: ['Read'],
+    sourceProviderOptions: { openai: { reasoningEffort: 'high' } },
+    sourceMaxOutputTokens: 2_048,
+    sessionId: 'session-1',
+    runId: 'run-current-trigger',
+    turnId: 'turn-current-trigger',
+    workspaceKey: '/workspace/maka',
+    compactionCheckpointId: checkpoint.checkpointId,
+    compactionBoundaryEventId: boundary.runtimeEventId,
+  };
+}
+
+function emptyIncidentalProposal(): string {
+  return JSON.stringify({
+    status: 'complete',
+    coverageStatus: 'processed',
+    requestedStatus: 'not_applicable',
+    requestedItems: [],
+    incidentalItems: [],
+  });
 }
 
 function extractProposal(item: ReturnType<typeof proposalItem>): string {

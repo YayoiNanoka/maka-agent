@@ -157,6 +157,7 @@ interface MemoryExtractionFailureRow {
   coverage_hash: unknown;
   first_operation_id: unknown;
   first_trigger: unknown;
+  compaction_checkpoint_id: unknown;
   first_failure_class: unknown;
   failed_at: unknown;
 }
@@ -295,17 +296,26 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       items.length,
     );
     const noOpReason = normalizeExtractionNoOpReason(request.noOpReason);
-    if (request.trigger !== 'remember' && request.trigger !== 'extract') {
-      throw new Error('Memory extraction trigger is invalid');
-    }
-    if (request.trigger === 'extract' && requestedItemIndexes.length > 0) {
+    const skipReason = normalizeExtractionSkipReason(request.skipReason);
+    const trigger = normalizeExtractionTrigger(request.trigger);
+    const compactionCheckpointId = normalizeCompactionCheckpointId(
+      trigger,
+      request.compactionCheckpointId,
+    );
+    if (trigger !== 'remember' && requestedItemIndexes.length > 0) {
       throw new Error('Incidental extraction cannot expose requested Items');
     }
     if (
       noOpReason &&
-      (request.trigger !== 'remember' || items.length > 0 || requestedItemIndexes.length > 0)
+      (trigger !== 'remember' || items.length > 0 || requestedItemIndexes.length > 0)
     ) {
       throw new Error('A rejected explicit Memory request must commit as an empty no-op');
+    }
+    if (
+      skipReason &&
+      (trigger !== 'compaction' || items.length > 0 || requestedItemIndexes.length > 0)
+    ) {
+      throw new Error('A policy-skipped Memory extraction must be an empty Compaction commit');
     }
     validateExtractionObservedAtForCommit(items, committedAt);
     const requestHash = hashCanonical({
@@ -317,7 +327,9 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       items,
       requestedItemIndexes,
       noOpReason: noOpReason ?? null,
-      trigger: request.trigger,
+      skipReason: skipReason ?? null,
+      trigger,
+      compactionCheckpointId: compactionCheckpointId ?? null,
     });
 
     this.#database.exec('BEGIN IMMEDIATE');
@@ -361,13 +373,17 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       const pendingFailure = this.#readPendingExtractionFailureRow(sessionId);
       if (pendingFailure) {
         const pending = decodePendingExtractionFailure(pendingFailure);
-        if (
-          pending.firstOperationId === operationId ||
-          pending.fromOrdinal !== expectedCursorOrdinal + 1 ||
-          pending.throughOrdinal !== nextCursorOrdinal ||
-          pending.coverageHash !== coverageHash ||
-          pending.firstTrigger !== request.trigger
-        ) {
+        const pendingMatchesCommit = skipReason
+          ? pending.firstTrigger === 'compaction' &&
+            pending.fromOrdinal === expectedCursorOrdinal + 1 &&
+            pending.throughOrdinal <= nextCursorOrdinal
+          : pending.firstOperationId !== operationId &&
+            pending.fromOrdinal === expectedCursorOrdinal + 1 &&
+            pending.throughOrdinal === nextCursorOrdinal &&
+            pending.coverageHash === coverageHash &&
+            pending.firstTrigger === trigger &&
+            pending.compactionCheckpointId === compactionCheckpointId;
+        if (!pendingMatchesCommit) {
           throw new MemoryItemStoreConflictError(
             'cursor_conflict',
             `Memory extraction pending range for Session ${sessionId} does not match the commit`,
@@ -383,14 +399,16 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       const receipt: MemoryExtractionReceipt = {
         operationId,
         sessionId,
-        status:
-          request.trigger === 'extract'
+        status: skipReason
+          ? 'skipped'
+          : trigger !== 'remember'
             ? 'extracted'
             : requestedItems.length > 0
               ? 'remembered'
               : 'not_applicable',
         requestedItems,
         ...(noOpReason ? { noOpReason } : {}),
+        ...(skipReason ? { skipReason } : {}),
         committedAt,
       };
 
@@ -532,9 +550,11 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
     }
     const coverageHash = requiredHash(request.coverageHash, 'coverageHash');
     const failureClass = normalizeExtractionFailureClass(request.failureClass);
-    if (request.trigger !== 'remember' && request.trigger !== 'extract') {
-      throw new Error('Memory extraction trigger is invalid');
-    }
+    const trigger = normalizeExtractionTrigger(request.trigger);
+    const compactionCheckpointId = normalizeCompactionCheckpointId(
+      trigger,
+      request.compactionCheckpointId,
+    );
     const recordedAt = normalizeTimestamp((this.#options.now ?? Date.now)(), 'current time');
 
     this.#database.exec('BEGIN IMMEDIATE');
@@ -552,7 +572,8 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
         const replayHash = hashCanonical({
           kind: 'memory_extraction_discard',
           sessionId,
-          trigger: request.trigger,
+          trigger,
+          compactionCheckpointId: compactionCheckpointId ?? null,
           discardedRange: discarded,
         });
         if (
@@ -598,7 +619,8 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
           throughOrdinal: failedThroughOrdinal,
           coverageHash,
           firstOperationId: operationId,
-          firstTrigger: request.trigger,
+          firstTrigger: trigger,
+          ...(compactionCheckpointId ? { compactionCheckpointId } : {}),
           firstFailureClass: failureClass,
           failedAt: recordedAt,
         };
@@ -606,8 +628,9 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
           .prepare(
             `INSERT INTO memory_extraction_failures(
                session_id, from_ordinal, through_ordinal, coverage_hash,
-               first_operation_id, first_trigger, first_failure_class, failed_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+               first_operation_id, first_trigger, compaction_checkpoint_id,
+               first_failure_class, failed_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             sessionId,
@@ -616,6 +639,7 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
             pending.coverageHash,
             pending.firstOperationId,
             pending.firstTrigger,
+            pending.compactionCheckpointId ?? null,
             pending.firstFailureClass,
             pending.failedAt,
           );
@@ -629,7 +653,8 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
           pending.fromOrdinal !== expectedCursorOrdinal + 1 ||
           pending.throughOrdinal !== failedThroughOrdinal ||
           pending.coverageHash !== coverageHash ||
-          pending.firstTrigger !== request.trigger ||
+          pending.firstTrigger !== trigger ||
+          pending.compactionCheckpointId !== compactionCheckpointId ||
           pending.firstFailureClass !== failureClass
         ) {
           throw new MemoryItemStoreConflictError(
@@ -644,7 +669,8 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
         pending.fromOrdinal !== expectedCursorOrdinal + 1 ||
         pending.throughOrdinal !== failedThroughOrdinal ||
         pending.coverageHash !== coverageHash ||
-        pending.firstTrigger !== request.trigger
+        pending.firstTrigger !== trigger ||
+        pending.compactionCheckpointId !== compactionCheckpointId
       ) {
         throw new MemoryItemStoreConflictError(
           'cursor_conflict',
@@ -670,7 +696,8 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       const requestHash = hashCanonical({
         kind: 'memory_extraction_discard',
         sessionId,
-        trigger: request.trigger,
+        trigger,
+        compactionCheckpointId: compactionCheckpointId ?? null,
         discardedRange,
       });
 
@@ -1038,7 +1065,8 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
     return this.#database
       .prepare(
         `SELECT session_id, from_ordinal, through_ordinal, coverage_hash,
-                first_operation_id, first_trigger, first_failure_class, failed_at
+                first_operation_id, first_trigger, compaction_checkpoint_id,
+                first_failure_class, failed_at
          FROM memory_extraction_failures WHERE session_id = ?`,
       )
       .get(sessionId) as MemoryExtractionFailureRow | undefined;
@@ -1379,17 +1407,38 @@ function normalizeExtractionFailureClass(value: unknown): MemoryExtractionFailur
   return value;
 }
 
-function normalizeExtractionTrigger(value: unknown): 'remember' | 'extract' {
-  if (value !== 'remember' && value !== 'extract') {
+function normalizeExtractionTrigger(value: unknown): 'remember' | 'extract' | 'compaction' {
+  if (value !== 'remember' && value !== 'extract' && value !== 'compaction') {
     throw new Error('Invalid Memory extraction trigger');
   }
   return value;
+}
+
+function normalizeCompactionCheckpointId(
+  trigger: 'remember' | 'extract' | 'compaction',
+  value: unknown,
+): string | undefined {
+  if (trigger === 'compaction') {
+    return normalizeIdentifier(value, 'compactionCheckpointId');
+  }
+  if (value !== undefined) {
+    throw new Error('Only Compaction extraction may carry a checkpoint ID');
+  }
+  return undefined;
 }
 
 function normalizeExtractionNoOpReason(value: unknown): 'sensitive_information' | undefined {
   if (value === undefined) return undefined;
   if (value !== 'sensitive_information') {
     throw new Error('Invalid Memory extraction no-op reason');
+  }
+  return value;
+}
+
+function normalizeExtractionSkipReason(value: unknown): 'policy_denied' | undefined {
+  if (value === undefined) return undefined;
+  if (value !== 'policy_denied') {
+    throw new Error('Invalid Memory extraction skip reason');
   }
   return value;
 }
@@ -1558,6 +1607,14 @@ function decodePendingExtractionFailure(
     coverageHash: requiredHash(row.coverage_hash, 'coverage_hash'),
     firstOperationId: requiredIdentifierString(row.first_operation_id, 'first_operation_id'),
     firstTrigger: normalizeExtractionTrigger(row.first_trigger),
+    ...(row.compaction_checkpoint_id === null
+      ? {}
+      : {
+          compactionCheckpointId: requiredIdentifierString(
+            row.compaction_checkpoint_id,
+            'compaction_checkpoint_id',
+          ),
+        }),
     firstFailureClass: normalizeExtractionFailureClass(row.first_failure_class),
     failedAt: requiredNonNegativeInteger(row.failed_at, 'failed_at'),
   };
@@ -1585,7 +1642,9 @@ function decodeExtractionReceipt(row: MemoryExtractionReceiptRow): MemoryExtract
   if (
     receipt.operationId !== operationId ||
     receipt.sessionId !== sessionId ||
-    !['remembered', 'not_applicable', 'extracted', 'discarded'].includes(String(receipt.status)) ||
+    !['remembered', 'not_applicable', 'extracted', 'discarded', 'skipped'].includes(
+      String(receipt.status),
+    ) ||
     receipt.committedAt !== committedAt ||
     !Array.isArray(receipt.requestedItems)
   ) {
@@ -1614,6 +1673,10 @@ function decodeExtractionReceipt(row: MemoryExtractionReceiptRow): MemoryExtract
   if (noOpReason && receipt.status !== 'not_applicable') {
     throw new Error(`Memory extraction ${operationId} has an invalid no-op reason`);
   }
+  const skipReason = normalizeExtractionSkipReason(receipt.skipReason);
+  if ((receipt.status === 'skipped') !== Boolean(skipReason)) {
+    throw new Error(`Memory extraction ${operationId} has an invalid skip reason`);
+  }
   let discardedRange: MemoryExtractionReceipt['discardedRange'];
   if (receipt.status === 'discarded') {
     const value = receipt.discardedRange;
@@ -1640,6 +1703,7 @@ function decodeExtractionReceipt(row: MemoryExtractionReceiptRow): MemoryExtract
     status: receipt.status as MemoryExtractionReceipt['status'],
     requestedItems,
     ...(noOpReason ? { noOpReason } : {}),
+    ...(skipReason ? { skipReason } : {}),
     ...(discardedRange ? { discardedRange } : {}),
     committedAt,
   };

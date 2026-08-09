@@ -992,7 +992,10 @@ export {
   renderHistoryCompactCheckpoint,
   validateHistoryCompactCheckpointShape,
 } from './history-compact-checkpoint.js';
-export { loadLatestHistoryCompactCheckpointFromRunLedger } from './history-compact-ledger.js';
+export {
+  loadHistoryCompactCheckpointsFromRunLedger,
+  loadLatestHistoryCompactCheckpointFromRunLedger,
+} from './history-compact-ledger.js';
 export type {
   BuildHistoryCompactCheckpointInput,
   HistoryCompactCheckpoint,

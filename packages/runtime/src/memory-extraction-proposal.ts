@@ -195,7 +195,7 @@ export function buildMemoryCanonicalizationPrompt(input: {
 }
 
 export function buildFirstMemoryProposalPrompt(input: {
-  readonly trigger: 'remember' | 'extract';
+  readonly trigger: 'remember' | 'extract' | 'compaction';
   readonly now: number;
   readonly evidence: readonly MemoryExtractionEvidence[];
   readonly sourceEventMessagePositions?: Readonly<Record<string, readonly number[]>>;
