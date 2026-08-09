@@ -5,11 +5,22 @@ import type { PlanExecution, PlanProposal } from '@maka/core/plan';
 import type { MakaTool } from './tool-runtime.js';
 
 const PLAN_CONTROL_TOOLS = new Set(['SubmitPlan', 'update_plan', 'cancel_plan']);
+const PLAN_AUTONOMOUS_WORKFLOW_TOOLS = new Set([
+  'Automation',
+  'GoalSet',
+  'GoalClear',
+  'GoalStatus',
+  'GoalPause',
+  'GoalResume',
+  'update_agent_graph',
+  'yield_agent_graph',
+]);
 
 export function selectCollaborationTools(input: {
   mode: CollaborationMode;
   tools: readonly MakaTool[];
   hasActiveExecution: boolean;
+  fullAccess?: boolean;
 }): MakaTool[] {
   if (input.mode === 'plan') {
     return input.tools.filter((tool) => {
@@ -20,6 +31,9 @@ export function selectCollaborationTools(input: {
         args: {},
         ...(tool.categoryHint ? { categoryHint: tool.categoryHint } : {}),
       });
+      if (input.fullAccess) {
+        return category !== 'subagent' && !PLAN_AUTONOMOUS_WORKFLOW_TOOLS.has(tool.name);
+      }
       return category === 'read' || category === 'web_read';
     });
   }
@@ -34,7 +48,21 @@ export function selectCollaborationTools(input: {
   });
 }
 
-export function renderPlanModePrompt(): string {
+export function renderPlanModePrompt(input: { fullAccess?: boolean } = {}): string {
+  if (input.fullAccess) {
+    return [
+      '<collaboration_mode>',
+      '# Collaboration Mode: Plan',
+      'You are planning. Inspect the repository, discuss tradeoffs, and prepare a concrete plan for approval.',
+      'Full access is active. Do not impose Plan Mode read-only restrictions; mutating tools are available when the user explicitly requests side effects during planning.',
+      'Full access does not approve implementation by itself. Keep the planning workflow active until the user approves a submitted plan or explicitly asks you to act now.',
+      'Use AskUserQuestion only when a bounded answer is required. Subagents and automations are unavailable in this mode.',
+      'When the plan is ready for approval, call SubmitPlan exactly once with a concise title, overview, ordered steps, and material risks.',
+      'Every step must have a short title (30 characters or fewer) and a detailed description. Both fields must be plain text without Markdown formatting.',
+      'Do not claim that implementation has started or completed unless the user explicitly asked for those side effects.',
+      '</collaboration_mode>',
+    ].join('\n');
+  }
   return [
     '<collaboration_mode>',
     '# Collaboration Mode: Plan',

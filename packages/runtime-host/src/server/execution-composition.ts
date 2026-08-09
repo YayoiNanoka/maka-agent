@@ -656,6 +656,7 @@ export async function createExecutionRuntimeHostComposition(
             store: openedPlanStore,
             state: planState,
             mode: header.collaborationMode ?? 'agent',
+            permissionMode: header.permissionMode,
           },
           ...(isDeepResearchSession(header.labels)
             ? {

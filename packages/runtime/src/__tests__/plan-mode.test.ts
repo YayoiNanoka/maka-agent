@@ -112,6 +112,36 @@ describe('Plan Mode tool surface', () => {
     );
   });
 
+  test('restores mutating tools for full access without enabling autonomous workflows', () => {
+    const selected = selectCollaborationTools({
+      mode: 'plan',
+      hasActiveExecution: false,
+      fullAccess: true,
+      tools: [
+        tool('Read', 'read'),
+        tool('Write', 'file_write'),
+        tool('Bash', 'shell_unsafe'),
+        tool('Browser', 'browser'),
+        tool('CustomTool'),
+        tool('Automation'),
+        tool('GoalSet'),
+        tool('ExploreAgent', 'subagent'),
+        tool('AskUserQuestion'),
+        tool('SubmitPlan'),
+        tool('update_plan'),
+      ],
+    });
+    assert.deepEqual(
+      selected.map((tool) => tool.name),
+      ['Read', 'Write', 'Bash', 'Browser', 'CustomTool', 'AskUserQuestion', 'SubmitPlan'],
+    );
+
+    const prompt = renderPlanModePrompt({ fullAccess: true });
+    assert.match(prompt, /Full access is active/);
+    assert.doesNotMatch(prompt, /do not modify files/);
+    assert.match(prompt, /planning workflow active/);
+  });
+
   test('active execution exposes progress controls and removes subagents', () => {
     const selected = selectCollaborationTools({
       mode: 'agent',

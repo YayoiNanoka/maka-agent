@@ -8,6 +8,7 @@ import { resolveModelVisionSupport } from '@maka/core/model-metadata';
 import { relayModelProfile } from '@maka/core/model-thinking';
 import { activePlanExecution, type PlanSessionState, type PlanStore } from '@maka/core/plan';
 import type { ModelCallAttempt } from '@maka/core/model-call-attempt';
+import type { PermissionMode } from '@maka/core/permission';
 import type { RuntimePolicy } from '@maka/core/runtime-policy';
 import {
   filterModelVisibleTaskLedgerTasks,
@@ -134,6 +135,7 @@ export interface HostExecutionModelCompositionInput {
     readonly store: PlanStore;
     readonly state: PlanSessionState;
     readonly mode: 'agent' | 'plan';
+    readonly permissionMode?: PermissionMode;
   };
   readonly deepResearch?: {
     readonly tools: readonly MakaTool[];
@@ -169,6 +171,7 @@ export function createHostExecutionModelComposition(
         mode: input.plan.mode,
         tools: candidateTools,
         hasActiveExecution: activeExecution !== undefined,
+        fullAccess: input.plan.permissionMode === 'bypass',
       })
     : candidateTools;
   const productSurface = projectEffectiveProductToolSurface({
@@ -234,7 +237,9 @@ export function createHostExecutionModelComposition(
         skills.text,
         workspaceInstructions,
         promptState.memory,
-        input.plan?.mode === 'plan' ? renderPlanModePrompt() : undefined,
+        input.plan?.mode === 'plan'
+          ? renderPlanModePrompt({ fullAccess: input.plan.permissionMode === 'bypass' })
+          : undefined,
         input.deepResearch
           ? buildDeepResearchSystemPromptFragment({
               exploreAgentAvailable: tools.some(({ name }) => name === 'ExploreAgent'),
@@ -421,6 +426,7 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
               store: input.planStore,
               state: planState,
               mode: input.context.header.collaborationMode ?? 'agent',
+              permissionMode: input.context.header.permissionMode,
             },
           }
         : {}),
@@ -542,10 +548,10 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
         header: {
           ...input.context.header,
           model: target.model,
-          permissionMode:
-            input.context.header.collaborationMode === 'plan'
-              ? 'explore'
-              : input.context.header.permissionMode,
+          permissionMode: resolveCollaborationPermissionMode({
+            collaborationMode: input.context.header.collaborationMode ?? 'agent',
+            permissionMode: input.context.header.permissionMode,
+          }),
         },
         appendMessage:
           input.context.appendMessage ??
@@ -773,6 +779,15 @@ function buildDefaultHostTools(
 function requireDeepResearchTools(tools: readonly MakaTool[] | undefined): readonly MakaTool[] {
   if (!tools) throw new Error('Runtime Host Deep Research tools are not composed');
   return tools;
+}
+
+export function resolveCollaborationPermissionMode(input: {
+  readonly collaborationMode: 'agent' | 'plan';
+  readonly permissionMode: PermissionMode;
+}): PermissionMode {
+  return input.collaborationMode === 'plan' && input.permissionMode !== 'bypass'
+    ? 'explore'
+    : input.permissionMode;
 }
 
 function renderPlanTail(state: PlanSessionState, mode: 'agent' | 'plan'): string | undefined {
