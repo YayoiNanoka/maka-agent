@@ -24,6 +24,7 @@ import {
   type ApplyMemoryMutationsRequest,
   type CommitMemoryExtractionRequest,
   type MemoryExtractionCommitResult,
+  type MemoryCompactionPolicyDenial,
   type MemoryExtractionCursor,
   type MemoryExtractionFailureClass,
   type MemoryExtractionReceipt,
@@ -471,6 +472,60 @@ export class SqliteMemoryItemStore implements MemoryItemStore {
       rollback(this.#database);
       throw error;
     }
+  }
+
+  async recordCompactionPolicyDenial(
+    denial: MemoryCompactionPolicyDenial,
+  ): Promise<MemoryCompactionPolicyDenial> {
+    this.#assertOpen();
+    const normalized = {
+      sessionId: normalizeIdentifier(denial.sessionId, 'sessionId'),
+      compactionCheckpointId: normalizeIdentifier(
+        denial.compactionCheckpointId,
+        'compactionCheckpointId',
+      ),
+      deniedAt: normalizeTimestamp(denial.deniedAt, 'deniedAt'),
+    };
+    this.#database
+      .prepare(
+        `INSERT INTO memory_compaction_policy_denials(
+           session_id, compaction_checkpoint_id, denied_at
+         ) VALUES (?, ?, ?)
+         ON CONFLICT(session_id, compaction_checkpoint_id) DO NOTHING`,
+      )
+      .run(normalized.sessionId, normalized.compactionCheckpointId, normalized.deniedAt);
+    const row = this.#database
+      .prepare(
+        `SELECT session_id, compaction_checkpoint_id, denied_at
+         FROM memory_compaction_policy_denials
+         WHERE session_id = ? AND compaction_checkpoint_id = ?`,
+      )
+      .get(normalized.sessionId, normalized.compactionCheckpointId) as
+      | { session_id: unknown; compaction_checkpoint_id: unknown; denied_at: unknown }
+      | undefined;
+    if (!row) throw new Error('Compaction policy denial was not persisted');
+    return decodeCompactionPolicyDenial(row);
+  }
+
+  async readCompactionPolicyDenials(
+    sessionId: string,
+  ): Promise<readonly MemoryCompactionPolicyDenial[]> {
+    this.#assertOpen();
+    const normalizedSessionId = normalizeIdentifier(sessionId, 'sessionId');
+    return (
+      this.#database
+        .prepare(
+          `SELECT session_id, compaction_checkpoint_id, denied_at
+           FROM memory_compaction_policy_denials
+           WHERE session_id = ?
+           ORDER BY denied_at ASC, compaction_checkpoint_id ASC`,
+        )
+        .all(normalizedSessionId) as Array<{
+        session_id: unknown;
+        compaction_checkpoint_id: unknown;
+        denied_at: unknown;
+      }>
+    ).map(decodeCompactionPolicyDenial);
   }
 
   async initializeExtractionCursor(
@@ -1594,6 +1649,21 @@ function decodeExtractionCursor(row: MemoryExtractionCursorRow): MemoryExtractio
     sessionId: requiredIdentifierString(row.session_id, 'session_id'),
     processedOrdinal: requiredPositiveInteger(row.processed_ordinal, 'processed_ordinal'),
     updatedAt: requiredNonNegativeInteger(row.updated_at, 'updated_at'),
+  };
+}
+
+function decodeCompactionPolicyDenial(row: {
+  readonly session_id: unknown;
+  readonly compaction_checkpoint_id: unknown;
+  readonly denied_at: unknown;
+}): MemoryCompactionPolicyDenial {
+  return {
+    sessionId: requiredIdentifierString(row.session_id, 'session_id'),
+    compactionCheckpointId: requiredIdentifierString(
+      row.compaction_checkpoint_id,
+      'compaction_checkpoint_id',
+    ),
+    deniedAt: requiredNonNegativeInteger(row.denied_at, 'denied_at'),
   };
 }
 

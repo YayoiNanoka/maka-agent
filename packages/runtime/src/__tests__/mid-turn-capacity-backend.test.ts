@@ -445,6 +445,7 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
       ? {
           memoryExtraction: {
             gate: async () => options.memoryGate ?? { allowed: true as const },
+            automaticGate: () => options.memoryGate ?? { allowed: true as const },
             remember: async () => ({ status: 'unavailable' as const, requestedItems: [] }),
             extract: (snapshot: MemoryExtractionSourceSnapshot) => {
               memorySnapshots.push(snapshot);
@@ -1272,7 +1273,9 @@ describe('mid-turn capacity compaction in the streaming backend', () => {
     );
     assert.deepEqual(snapshot.sourceMessages, []);
     assert.equal(snapshot.rebuildSourceContextFromCompactionCheckpoint, true);
-    assert.equal(snapshot.sourceSystemPrompt, 'S'.repeat(32));
+    assert.equal(snapshot.sourceSystemPrompt, undefined);
+    assert.deepEqual(snapshot.sourceTools, {});
+    assert.deepEqual(snapshot.sourceActiveTools, []);
     assert.equal(fixture.model.doStreamCalls.length, 3, 'the unresolved extraction must not block');
   });
 

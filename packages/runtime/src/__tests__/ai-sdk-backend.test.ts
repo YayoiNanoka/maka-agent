@@ -121,7 +121,8 @@ describe('AiSdkBackend Memory Extraction triggers', () => {
         recorded.push(checkpoint);
       },
       memoryExtraction: {
-        gate: async () => ({ allowed: true }),
+        gate: () => new Promise(() => {}),
+        automaticGate: () => ({ allowed: true }),
         remember: async () => ({ status: 'unavailable', requestedItems: [] }),
         extract: (value) => {
           snapshot = value;
@@ -170,8 +171,11 @@ describe('AiSdkBackend Memory Extraction triggers', () => {
     assert.equal(snapshot?.trigger, 'compaction');
     assert.equal(snapshot?.compactionCheckpointId, recorded[0]?.checkpointId);
     assert.equal(snapshot?.compactionBoundaryEventId, 'memory-compact-boundary');
-    assert.equal(snapshot?.sourceSystemPrompt, 'CURRENT_MEMORY_SYSTEM_PROMPT');
+    assert.equal(snapshot?.sourceSystemPrompt, undefined);
     assert.deepEqual(snapshot?.sourceMessages, []);
+    assert.deepEqual(snapshot?.sourceTools, {});
+    assert.deepEqual(snapshot?.sourceActiveTools, []);
+    assert.equal(snapshot?.sourceProviderOptions, undefined);
     assert.equal(snapshot?.rebuildSourceContextFromCompactionCheckpoint, true);
     assert.equal(systemPromptResolutions, 1);
     assert.match(JSON.stringify(model.doStreamCalls[0]), /CURRENT_MEMORY_SYSTEM_PROMPT/);
@@ -205,6 +209,7 @@ describe('AiSdkBackend Memory Extraction triggers', () => {
       },
       memoryExtraction: {
         gate: async () => ({ allowed: true }),
+        automaticGate: () => ({ allowed: true }),
         remember: async () => ({ status: 'unavailable', requestedItems: [] }),
         extract: () => {
           dispatches += 1;
@@ -271,6 +276,7 @@ describe('AiSdkBackend Memory Extraction triggers', () => {
         },
         memoryExtraction: {
           gate: async () => gate,
+          automaticGate: () => gate,
           remember: async () => ({ status: 'unavailable', requestedItems: [] }),
           extract: () => {
             dispatches += 1;
@@ -347,6 +353,7 @@ describe('AiSdkBackend Memory Extraction triggers', () => {
       },
       memoryExtraction: {
         gate: async () => ({ allowed: false, reason: 'unavailable' }),
+        automaticGate: () => ({ allowed: false, reason: 'unavailable' }),
         remember: async () => ({ status: 'unavailable', requestedItems: [] }),
         extract: () => {
           dispatches += 1;

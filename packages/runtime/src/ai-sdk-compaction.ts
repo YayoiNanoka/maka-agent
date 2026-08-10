@@ -1326,7 +1326,7 @@ export class AiSdkCompaction {
     systemPromptChars: number,
     onDiagnosticPatch: (patch: Partial<ContextBudgetDiagnostic>) => void,
     origin: ProviderRequestOrigin,
-    memoryCompactionDecision?: () => Promise<AutomaticMemoryCompactionDecision>,
+    memoryCompactionDecision?: () => AutomaticMemoryCompactionDecision,
     onMemoryCompaction?: (input: AutomaticMemoryCompactionDispatch) => void,
     abortSignal?: AbortSignal,
   ): RequestProjectionStage | undefined {
@@ -1517,7 +1517,7 @@ export class AiSdkCompaction {
     activeToolsForStep: readonly string[];
     systemPromptChars: number;
     turnTailPrompt: string | undefined;
-    memoryCompactionDecision?: () => Promise<AutomaticMemoryCompactionDecision>;
+    memoryCompactionDecision?: () => AutomaticMemoryCompactionDecision;
     onMemoryCompaction?: (input: AutomaticMemoryCompactionDispatch) => void;
     abortSignal?: AbortSignal;
   }): Promise<MidTurnCompactionOutcome> {
@@ -1611,9 +1611,7 @@ export class AiSdkCompaction {
       };
     }
     const orderedEvents = [...state.priorContentEvents, ...currentTurnEvents];
-    const memoryDecision = input.memoryCompactionDecision
-      ? await input.memoryCompactionDecision()
-      : undefined;
+    const memoryDecision = input.memoryCompactionDecision?.();
     const plan = await planMidTurnCapacityCompaction({
       sessionId: this.sessionId,
       orderedEvents,
@@ -1791,7 +1789,7 @@ export class AiSdkCompaction {
     queue: AsyncEventQueue<SessionEvent>;
     onDiagnosticPatch: (patch: Partial<ContextBudgetDiagnostic>) => void;
     origin: ProviderRequestOrigin;
-    memoryCompactionDecision?: () => Promise<AutomaticMemoryCompactionDecision>;
+    memoryCompactionDecision?: () => AutomaticMemoryCompactionDecision;
     onMemoryCompaction?: (input: AutomaticMemoryCompactionDispatch) => void;
     abortSignal?: AbortSignal;
   }): Promise<{ messages: ModelMessage[] } | undefined> {

@@ -151,6 +151,12 @@ export interface MemoryExtractionCursor {
   readonly updatedAt: number;
 }
 
+export interface MemoryCompactionPolicyDenial {
+  readonly sessionId: string;
+  readonly compactionCheckpointId: string;
+  readonly deniedAt: number;
+}
+
 export type MemoryExtractionFailureClass =
   | 'provider'
   | 'schema'
@@ -294,6 +300,10 @@ export interface MemoryItemStore {
   readPendingExtractionFailure(
     sessionId: string,
   ): Promise<PendingMemoryExtractionFailure | undefined>;
+  recordCompactionPolicyDenial(
+    denial: MemoryCompactionPolicyDenial,
+  ): Promise<MemoryCompactionPolicyDenial>;
+  readCompactionPolicyDenials(sessionId: string): Promise<readonly MemoryCompactionPolicyDenial[]>;
   settleExtractionFailure(
     request: SettleMemoryExtractionFailureRequest,
   ): Promise<SettleMemoryExtractionFailureResult>;

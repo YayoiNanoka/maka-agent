@@ -600,7 +600,15 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
         !input.context.header.subagentParent &&
         input.context.header.collaborationMode !== 'plan' &&
         input.memoryExtraction
-          ? { memoryExtraction: input.memoryExtraction.sourceCapabilities() }
+          ? {
+              memoryExtraction: input.memoryExtraction.sourceCapabilities(
+                runtimePolicySnapshot.policy.privacy.incognitoActive
+                  ? { allowed: false, reason: 'incognito' }
+                  : runtimePolicySnapshot.policy.memory.enabled
+                    ? { allowed: true }
+                    : { allowed: false, reason: 'disabled' },
+              ),
+            }
           : {}),
         loadHistoryCompactCheckpoint: input.context.loadHistoryCompactCheckpoint,
         summarizeHistoryCompact: buildLlmHistorySummarizer({

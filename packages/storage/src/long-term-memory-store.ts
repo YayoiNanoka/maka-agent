@@ -123,6 +123,12 @@ function createWriterFacade(
     readExtractionCursor: (sessionId) => run(() => store.readExtractionCursor(sessionId)),
     readPendingExtractionFailure: (sessionId) =>
       run(() => store.readPendingExtractionFailure(sessionId)),
+    recordCompactionPolicyDenial: (denial) => {
+      const snapshot = Object.freeze({ ...denial });
+      return run(() => store.recordCompactionPolicyDenial(snapshot));
+    },
+    readCompactionPolicyDenials: (sessionId) =>
+      run(() => store.readCompactionPolicyDenials(sessionId)),
     settleExtractionFailure: (request) => {
       const snapshot = Object.freeze({ ...request });
       return run(() => store.settleExtractionFailure(snapshot));

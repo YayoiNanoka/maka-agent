@@ -17,6 +17,7 @@ import {
   modelUsesAnthropicMessages,
   getAIModel,
   llmCallUsageFields,
+  memoryExtractionMaxOutputTokens,
   recordLlmCallStrict,
   SESSION_TITLE_GENERATION_TIMEOUT_MS,
   type BackendFactoryContext,
@@ -136,6 +137,7 @@ export function createHostMemoryExtractionModel(
       abortSignal,
     }: Parameters<HostMemoryExtractionModel['generate']>[0]) => {
       try {
+        const maxOutputTokens = memoryExtractionMaxOutputTokens(snapshot);
         const result = await runHostAuxiliaryModelCall(authority, {
           transportContextId: snapshot.sessionId,
           telemetrySessionId: snapshot.sessionId,
@@ -147,21 +149,25 @@ export function createHostMemoryExtractionModel(
             stage === 'canonicalize'
               ? {
                   prompt,
-                  maxOutputTokens: snapshot.sourceMaxOutputTokens ?? 2_048,
+                  maxOutputTokens,
                   maxRetries: 0,
                 }
-              : {
-                  ...(snapshot.sourceSystemPrompt ? { system: snapshot.sourceSystemPrompt } : {}),
-                  messages: [...snapshot.sourceMessages, { role: 'user', content: prompt }],
-                  tools: snapshot.sourceTools,
-                  activeTools: snapshot.sourceActiveTools,
-                  ...(snapshot.sourceProviderOptions
-                    ? { providerOptions: snapshot.sourceProviderOptions }
-                    : {}),
-                  ...(snapshot.sourceMaxOutputTokens !== undefined
-                    ? { maxOutputTokens: snapshot.sourceMaxOutputTokens }
-                    : {}),
-                },
+              : snapshot.trigger === 'compaction'
+                ? {
+                    messages: [...snapshot.sourceMessages, { role: 'user', content: prompt }],
+                    maxOutputTokens,
+                    maxRetries: 0,
+                  }
+                : {
+                    ...(snapshot.sourceSystemPrompt ? { system: snapshot.sourceSystemPrompt } : {}),
+                    messages: [...snapshot.sourceMessages, { role: 'user', content: prompt }],
+                    tools: snapshot.sourceTools,
+                    activeTools: snapshot.sourceActiveTools,
+                    ...(snapshot.sourceProviderOptions
+                      ? { providerOptions: snapshot.sourceProviderOptions }
+                      : {}),
+                    maxOutputTokens,
+                  },
         });
         return { ok: true as const, text: result.text };
       } catch (error) {

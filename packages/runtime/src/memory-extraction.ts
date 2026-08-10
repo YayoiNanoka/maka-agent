@@ -18,6 +18,7 @@ import {
   isMemoryToolName,
   planMemoryCoverage,
   projectMemoryExtractionEvidence,
+  renderMemoryLocalizationContext,
   searchSameSessionMemoryHistory,
   type MemoryExtractionEventEntry,
   type MemoryCoveragePlan,
@@ -38,14 +39,9 @@ import {
 import { isHistoryCompactContentEvent } from './history-compact.js';
 import {
   matchHistoryCompactCheckpointPrefix,
+  renderHistoryCompactCheckpoint,
   type HistoryCompactCheckpoint,
 } from './history-compact-checkpoint.js';
-import {
-  buildRuntimeEventModelReplayPlan,
-  buildSteeringEnvelope,
-  formatTextWithInlineRefs,
-  type RuntimeEventModelReplayItem,
-} from './model-history.js';
 import type { ModelMessage, ModelToolSet } from './model-protocol.js';
 import type { MakaTool, MakaToolContext } from './tool-runtime.js';
 
@@ -73,6 +69,8 @@ export interface MemoryExtractionSourceSnapshot {
   readonly sourceActiveTools: readonly string[];
   readonly sourceProviderOptions?: Record<string, unknown>;
   readonly sourceMaxOutputTokens?: number;
+  /** Frozen model input capacity used for deterministic auxiliary-request preflight. */
+  readonly sourceContextWindowTokens?: number;
   readonly sessionId: string;
   readonly runId: string;
   readonly turnId: string;
@@ -112,6 +110,8 @@ export type MemoryRememberResult =
 
 export interface MemoryExtractionSourceCapabilities {
   readonly gate: () => Promise<MemoryExtractionGate>;
+  /** Synchronous policy snapshot frozen with the backend; never performs I/O. */
+  readonly automaticGate?: () => MemoryExtractionGate;
   readonly remember: (snapshot: MemoryExtractionSourceSnapshot) => Promise<MemoryRememberResult>;
   readonly extract: (snapshot: MemoryExtractionSourceSnapshot) => void;
 }
@@ -127,6 +127,14 @@ export interface MemoryExtractionEnginePorts {
   readonly readPendingFailure: (
     sessionId: string,
   ) => Promise<PendingMemoryExtractionFailure | undefined>;
+  readonly recordCompactionPolicyDenial: (input: {
+    readonly sessionId: string;
+    readonly compactionCheckpointId: string;
+    readonly deniedAt: number;
+  }) => Promise<unknown>;
+  readonly readCompactionPolicyDenials: (
+    sessionId: string,
+  ) => Promise<readonly { readonly compactionCheckpointId: string }[]>;
   readonly readLatestCompactionCheckpoint: (
     sessionId: string,
   ) => Promise<HistoryCompactCheckpoint | undefined>;
@@ -161,6 +169,19 @@ export interface MemoryExtractionEnginePorts {
   readonly now?: () => number;
 }
 
+/** Keep most of a small context window available for the bounded source slice. */
+export function memoryExtractionMaxOutputTokens(
+  snapshot: Pick<
+    MemoryExtractionSourceSnapshot,
+    'sourceMaxOutputTokens' | 'sourceContextWindowTokens'
+  >,
+): number {
+  const configured = Math.max(1, snapshot.sourceMaxOutputTokens ?? 2_048);
+  return snapshot.sourceContextWindowTokens === undefined
+    ? configured
+    : Math.min(configured, Math.max(1, Math.floor(snapshot.sourceContextWindowTokens / 6)));
+}
+
 /**
  * Build the attachment-free normalized history used by automatic extraction and crash recovery.
  * RuntimeEvents remain the evidence authority; this projection is context only.
@@ -168,160 +189,47 @@ export interface MemoryExtractionEnginePorts {
 export function buildMemoryCompactionSourceContext(
   events: readonly MemoryExtractionEventEntry['event'][],
   boundaryEventId: string,
+  options: {
+    readonly afterEventId?: string;
+    readonly previousCheckpoint?: HistoryCompactCheckpoint;
+  } = {},
 ): MemoryCompactionSourceContext | undefined {
   const boundaryIndex = events.findIndex((event) => event.id === boundaryEventId);
   if (boundaryIndex < 0) return undefined;
-  const plan = buildRuntimeEventModelReplayPlan(events.slice(0, boundaryIndex + 1));
-  const eventsById = new Map(events.map((event) => [event.id, event]));
+  const afterIndex = options.afterEventId
+    ? events.findIndex((event) => event.id === options.afterEventId)
+    : -1;
+  if (options.afterEventId && afterIndex < 0) return undefined;
+  if (afterIndex >= boundaryIndex) return undefined;
   const messages: ModelMessage[] = [];
   const positions: Record<string, number[]> = {};
-  const push = (eventIds: readonly string[], message: ModelMessage): void => {
+  const push = (eventId: string | undefined, message: ModelMessage): void => {
     const index = messages.length;
     messages.push(message);
-    for (const eventId of eventIds) (positions[eventId] ??= []).push(index);
+    if (eventId) (positions[eventId] ??= []).push(index);
   };
-  type TextItem = Extract<RuntimeEventModelReplayItem, { kind: 'text' }>;
-  type ToolCallItem = Extract<RuntimeEventModelReplayItem, { kind: 'tool_call' }>;
-  type ToolResultItem = Extract<RuntimeEventModelReplayItem, { kind: 'tool_result' }>;
-  const textWithoutAttachments = (item: TextItem): string | undefined => {
-    const event = eventsById.get(item.eventId);
-    if (!event || event.content?.kind !== 'text') return undefined;
-    const text = formatTextWithInlineRefs(event.content.text, {
-      ...(event.content.quotes ? { quotes: event.content.quotes } : {}),
+  if (options.previousCheckpoint) {
+    push(undefined, {
+      role: 'user',
+      content: [{ type: 'text', text: renderHistoryCompactCheckpoint(options.previousCheckpoint) }],
     });
-    return event.content.steering === true && item.role === 'user'
-      ? buildSteeringEnvelope(text)
-      : text;
-  };
-  const results = new Map<string, ToolResultItem>();
-  for (const item of plan.items) {
-    if (item.kind === 'tool_result') results.set(item.toolCallId, item);
   }
-  let bufferedCalls: ToolCallItem[] = [];
-  const textByStep = new Map<string, TextItem>();
-  const emitStep = (text: TextItem | undefined, calls: readonly ToolCallItem[]): void => {
-    const content: Extract<ModelMessage, { role: 'assistant' }>['content'] = [];
-    const eventIds = [...(text ? [text.eventId] : []), ...calls.map((call) => call.eventId)];
-    if (text) {
-      const rendered = textWithoutAttachments(text);
-      if (rendered === undefined) return;
-      if (rendered.length > 0) content.push({ type: 'text', text: rendered });
-    }
-    for (const call of calls) {
-      content.push({
-        type: 'text',
-        text: portableMemoryToolCallText(call),
-      });
-      const result = results.get(call.toolCallId);
-      if (!result) continue;
-      results.delete(call.toolCallId);
-      eventIds.push(result.eventId);
-      content.push({
-        type: 'text',
-        text: portableMemoryToolResultText(result),
-      });
-    }
-    if (content.length > 0) push(eventIds, { role: 'assistant', content });
-  };
-  const emitGroupedCalls = (calls: readonly ToolCallItem[]): void => {
-    let group: ToolCallItem[] = [];
-    const emitGroup = (): void => {
-      if (group.length === 0) return;
-      const stepId = group[0]!.stepId;
-      const text = stepId ? textByStep.get(stepId) : undefined;
-      if (stepId) textByStep.delete(stepId);
-      emitStep(text, group);
-      group = [];
-    };
-    for (const call of calls) {
-      if (group.length > 0 && group[0]!.stepId !== call.stepId) emitGroup();
-      group.push(call);
-    }
-    emitGroup();
-  };
-  const flushPendingSteps = (): void => {
-    if (bufferedCalls.length > 0) {
-      const calls = bufferedCalls;
-      bufferedCalls = [];
-      emitGroupedCalls(calls);
-    }
-    for (const [stepId, text] of textByStep) {
-      textByStep.delete(stepId);
-      emitStep(text, []);
-    }
-  };
-  for (const item of plan.items) {
-    if (item.kind === 'thinking' || item.kind === 'tool_result') continue;
-    if (item.kind === 'tool_call') {
-      bufferedCalls.push(item);
+  for (const event of events.slice(afterIndex + 1, boundaryIndex + 1)) {
+    if (event.partial || event.content?.kind !== 'text') continue;
+    if (event.role === 'user' && event.author === 'user') {
+      push(event.id, { role: 'user', content: [{ type: 'text', text: event.content.text }] });
       continue;
     }
-    if (item.role === 'system') continue;
-    if (item.role !== 'assistant') {
-      flushPendingSteps();
-      const rendered = textWithoutAttachments(item);
-      if (rendered === undefined) return undefined;
-      push([item.eventId], { role: item.role, content: [{ type: 'text', text: rendered }] });
-      continue;
+    if (event.role === 'model' && event.author === 'agent') {
+      push(event.id, { role: 'assistant', content: [{ type: 'text', text: event.content.text }] });
     }
-    if (item.stepId) {
-      const calls = bufferedCalls.filter((call) => call.stepId === item.stepId);
-      const otherCalls = bufferedCalls.filter((call) => call.stepId !== item.stepId);
-      bufferedCalls = [];
-      if (otherCalls.length > 0) emitGroupedCalls(otherCalls);
-      if (calls.length > 0) emitStep(item, calls);
-      else textByStep.set(item.stepId, item);
-      continue;
-    }
-    flushPendingSteps();
-    emitStep(item, []);
   }
-  flushPendingSteps();
-  // Thinking and all attachment refs/bytes are intentionally outside PR 2-B context.
-  if (messages.length === 0) return undefined;
+  // Tool calls/results, Thinking, attachment metadata/bytes, quotes, and provider-native
+  // metadata are intentionally outside the portable Memory interpretation context.
   return {
     messages: structuredClone(messages),
     ...(Object.keys(positions).length > 0 ? { eventMessagePositions: positions } : {}),
   };
-}
-
-function portableMemoryToolCallText(
-  call: Extract<RuntimeEventModelReplayItem, { kind: 'tool_call' }>,
-): string {
-  return `<tool_call name=${JSON.stringify(call.toolName)}>${portableJson(call.input)}</tool_call>`;
-}
-
-function portableMemoryToolResultText(
-  result: Extract<RuntimeEventModelReplayItem, { kind: 'tool_result' }>,
-): string {
-  return `<tool_result name=${JSON.stringify(result.toolName)} error=${String(
-    result.isError,
-  )}>${portableJson(stripMemoryAttachmentPayloads(result.output))}</tool_result>`;
-}
-
-function portableJson(value: unknown): string {
-  try {
-    return JSON.stringify(value) ?? String(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function stripMemoryAttachmentPayloads(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stripMemoryAttachmentPayloads);
-  if (!value || typeof value !== 'object') return value;
-  const record = value as Record<string, unknown>;
-  const mediaKind = typeof record.kind === 'string' ? record.kind : record.type;
-  if (
-    typeof mediaKind === 'string' &&
-    ['attachment', 'audio', 'file', 'image', 'pdf', 'video'].includes(mediaKind.toLowerCase()) &&
-    ('ref' in record || 'data' in record || 'bytes' in record || 'mimeType' in record)
-  ) {
-    return '[attachment result omitted from Memory extraction context]';
-  }
-  return Object.fromEntries(
-    Object.entries(record).map(([key, child]) => [key, stripMemoryAttachmentPayloads(child)]),
-  );
 }
 
 const MAX_MEMORY_EXTRACTION_MODEL_CALLS = 3;
@@ -332,7 +240,15 @@ type CoverageProcessingResult =
       readonly receipt: MemoryExtractionReceipt;
       readonly nextCursorOrdinal: number;
     }
-  | { readonly kind: 'counted_failure'; readonly failureClass: MemoryExtractionFailureClass }
+  | {
+      readonly kind: 'counted_failure';
+      readonly failureClass: MemoryExtractionFailureClass;
+      readonly failedTrigger?: MemoryExtractionTrigger;
+      readonly failedOperationId?: string;
+      readonly failedExpectedCursorOrdinal?: number;
+      readonly failedThroughOrdinal?: number;
+      readonly coverageHash?: string;
+    }
   | { readonly kind: 'blocked' };
 
 interface MemoryModelCallBudget {
@@ -411,6 +327,11 @@ export class MemoryExtractionEngine {
     }
     const entries = await this.ports.readSessionEvents(snapshot.sessionId);
     const compactionCheckpoints = await this.ports.readCompactionCheckpoints(snapshot.sessionId);
+    const policyDeniedCheckpointIds = new Set(
+      (await this.ports.readCompactionPolicyDenials(snapshot.sessionId)).map(
+        ({ compactionCheckpointId }) => compactionCheckpointId,
+      ),
+    );
     const currentCompactionCheckpoint =
       snapshot.trigger === 'compaction'
         ? compactionCheckpoints.find(
@@ -428,12 +349,15 @@ export class MemoryExtractionEngine {
       ? compactionBoundaryEntry(entries, currentCompactionCheckpoint)
       : findExtractionBoundary(entries, snapshot);
     if (!boundary) return unavailableMemoryResult();
-    if (currentCompactionCheckpoint?.memoryExtractionBoundary?.disposition === 'policy_denied') {
+    if (
+      currentCompactionCheckpoint &&
+      isPolicyDeniedCheckpoint(currentCompactionCheckpoint, policyDeniedCheckpointIds)
+    ) {
       await this.settlePolicyDeniedCheckpoint(snapshot, currentCompactionCheckpoint, entries);
       return unavailableMemoryResult();
     }
     const currentSnapshot = currentCompactionCheckpoint
-      ? rebuildCompactionSnapshot(snapshot, currentCompactionCheckpoint, entries)
+      ? rebuildCompactionSnapshot(snapshot, currentCompactionCheckpoint)
       : snapshot;
     if (!currentSnapshot) return unavailableMemoryResult();
     if (!(await this.allowedOrSettleCompaction(snapshot, operationId))) {
@@ -480,15 +404,20 @@ export class MemoryExtractionEngine {
         : undefined;
       const pendingBoundary = pendingCheckpoint
         ? compactionBoundaryEntry(entries, pendingCheckpoint)
-        : undefined;
+        : entries.find(({ ordinal }) => ordinal === pendingFailure.throughOrdinal);
       if (pendingCheckpoint && pendingBoundary?.ordinal !== pendingFailure.throughOrdinal) {
         return unavailableMemoryResult();
       }
       const retrySnapshot = pendingCheckpoint
-        ? rebuildCompactionSnapshot(currentSnapshot, pendingCheckpoint, entries)
+        ? rebuildCompactionSnapshot(currentSnapshot, pendingCheckpoint)
         : pendingFailure.compactionCheckpointId
           ? undefined
-          : currentSnapshot;
+          : rebuildExplicitPendingSnapshot(
+              currentSnapshot,
+              pendingFailure,
+              pendingBoundary,
+              entries,
+            );
       if (!retrySnapshot) return unavailableMemoryResult();
       const retryOperationId = pendingRetryOperationId(operationId, pendingFailure);
       const retry = await this.processRange({
@@ -499,7 +428,9 @@ export class MemoryExtractionEngine {
         targetBoundaryOrdinal: pendingFailure.throughOrdinal,
         expectedCoverageHash: pendingFailure.coverageHash,
         entries,
-        prioritizeCurrentTurn: false,
+        compactionCheckpoints,
+        policyDeniedCheckpointIds,
+        prioritizeCurrentTurn: pendingFailure.firstTrigger === 'remember',
       });
       if (retry.kind === 'blocked') {
         await this.settleCompactionIfCurrentlyDenied(snapshot, operationId);
@@ -510,11 +441,11 @@ export class MemoryExtractionEngine {
       } else {
         const settled = await this.settleCountedFailure({
           snapshot: retrySnapshot,
-          trigger: pendingFailure.firstTrigger,
-          operationId: retryOperationId,
-          expectedCursorOrdinal,
-          throughOrdinal: pendingFailure.throughOrdinal,
-          coverageHash: pendingFailure.coverageHash,
+          trigger: retry.failedTrigger ?? pendingFailure.firstTrigger,
+          operationId: retry.failedOperationId ?? retryOperationId,
+          expectedCursorOrdinal: retry.failedExpectedCursorOrdinal ?? expectedCursorOrdinal,
+          throughOrdinal: retry.failedThroughOrdinal ?? pendingFailure.throughOrdinal,
+          coverageHash: retry.coverageHash ?? pendingFailure.coverageHash,
           failureClass: retry.failureClass,
         });
         if (!settled) {
@@ -524,72 +455,71 @@ export class MemoryExtractionEngine {
         if (settled.status !== 'discarded') return unavailableMemoryResult();
         expectedCursorOrdinal = settled.cursor.processedOrdinal;
       }
-    } else {
-      for (;;) {
-        const recoveredCheckpoint = earliestUnprocessedCompactionCheckpoint(
-          compactionCheckpoints,
+    }
+    for (;;) {
+      const recoveredCheckpoint = earliestUnprocessedCompactionCheckpoint(
+        compactionCheckpoints,
+        entries,
+        expectedCursorOrdinal,
+        boundary.ordinal,
+        snapshot.compactionCheckpointId,
+      );
+      if (!recoveredCheckpoint) break;
+      if (isPolicyDeniedCheckpoint(recoveredCheckpoint, policyDeniedCheckpointIds)) {
+        const nextCursorOrdinal = await this.settlePolicyDeniedCheckpoint(
+          snapshot,
+          recoveredCheckpoint,
           entries,
-          expectedCursorOrdinal,
-          boundary.ordinal,
-          snapshot.compactionCheckpointId,
         );
-        if (!recoveredCheckpoint) break;
-        if (recoveredCheckpoint.memoryExtractionBoundary?.disposition === 'policy_denied') {
-          const nextCursorOrdinal = await this.settlePolicyDeniedCheckpoint(
-            snapshot,
-            recoveredCheckpoint,
-            entries,
-          );
-          if (nextCursorOrdinal === undefined) return unavailableMemoryResult();
-          expectedCursorOrdinal = nextCursorOrdinal;
-        } else {
-          const recoveredSnapshot = rebuildCompactionSnapshot(
-            currentSnapshot,
-            recoveredCheckpoint,
-            entries,
-          );
-          const recoveredBoundary = compactionBoundaryEntry(entries, recoveredCheckpoint);
-          const recoveredOperationId = recoveredSnapshot
-            ? memoryExtractionOperationId(recoveredSnapshot)
-            : undefined;
-          if (!recoveredSnapshot || !recoveredBoundary || !recoveredOperationId) {
-            return unavailableMemoryResult();
-          }
-          const recovered = await this.processRange({
+        if (nextCursorOrdinal === undefined) return unavailableMemoryResult();
+        expectedCursorOrdinal = nextCursorOrdinal;
+      } else {
+        const recoveredSnapshot = rebuildCompactionSnapshot(currentSnapshot, recoveredCheckpoint);
+        const recoveredBoundary = compactionBoundaryEntry(entries, recoveredCheckpoint);
+        const recoveredOperationId = recoveredSnapshot
+          ? memoryExtractionOperationId(recoveredSnapshot)
+          : undefined;
+        if (!recoveredSnapshot || !recoveredBoundary || !recoveredOperationId) {
+          return unavailableMemoryResult();
+        }
+        const recovered = await this.processRange({
+          snapshot: recoveredSnapshot,
+          trigger: 'compaction',
+          operationId: recoveredOperationId,
+          expectedCursorOrdinal,
+          targetBoundaryOrdinal: recoveredBoundary.ordinal,
+          entries,
+          compactionCheckpoints,
+          policyDeniedCheckpointIds,
+          prioritizeCurrentTurn: false,
+        });
+        if (recovered.kind === 'blocked') {
+          await this.settleCompactionIfCurrentlyDenied(snapshot, operationId);
+          return unavailableMemoryResult();
+        }
+        if (recovered.kind === 'counted_failure') {
+          const settled = await this.settleCountedFailure({
             snapshot: recoveredSnapshot,
-            trigger: 'compaction',
-            operationId: recoveredOperationId,
-            expectedCursorOrdinal,
-            targetBoundaryOrdinal: recoveredBoundary.ordinal,
-            entries,
-            prioritizeCurrentTurn: false,
-          });
-          if (recovered.kind === 'blocked') {
-            await this.settleCompactionIfCurrentlyDenied(snapshot, operationId);
-            return unavailableMemoryResult();
-          }
-          if (recovered.kind === 'counted_failure') {
-            const settled = await this.settleCountedFailure({
-              snapshot: recoveredSnapshot,
-              trigger: 'compaction',
-              operationId: recoveredOperationId,
-              expectedCursorOrdinal,
-              throughOrdinal: recoveredBoundary.ordinal,
-              coverageHash: memoryCoverageHash(
+            trigger: recovered.failedTrigger ?? 'compaction',
+            operationId: recovered.failedOperationId ?? recoveredOperationId,
+            expectedCursorOrdinal: recovered.failedExpectedCursorOrdinal ?? expectedCursorOrdinal,
+            throughOrdinal: recovered.failedThroughOrdinal ?? recoveredBoundary.ordinal,
+            coverageHash:
+              recovered.coverageHash ??
+              memoryCoverageHash(
                 entries.filter(
                   ({ ordinal }) =>
                     ordinal > expectedCursorOrdinal && ordinal <= recoveredBoundary.ordinal,
                 ),
               ),
-              failureClass: recovered.failureClass,
-            });
-            if (!settled) {
-              await this.settleCompactionIfCurrentlyDenied(snapshot, operationId);
-            }
-            return unavailableMemoryResult();
+            failureClass: recovered.failureClass,
+          });
+          if (!settled) {
+            await this.settleCompactionIfCurrentlyDenied(snapshot, operationId);
           }
-          expectedCursorOrdinal = recovered.nextCursorOrdinal;
+          return unavailableMemoryResult();
         }
+        expectedCursorOrdinal = recovered.nextCursorOrdinal;
       }
     }
 
@@ -606,6 +536,8 @@ export class MemoryExtractionEngine {
       expectedCursorOrdinal,
       targetBoundaryOrdinal: boundary.ordinal,
       entries,
+      compactionCheckpoints,
+      policyDeniedCheckpointIds,
       prioritizeCurrentTurn: snapshot.trigger === 'remember',
     });
     if (processed.kind === 'committed') {
@@ -614,15 +546,17 @@ export class MemoryExtractionEngine {
     if (processed.kind === 'counted_failure') {
       const settled = await this.settleCountedFailure({
         snapshot: currentSnapshot,
-        trigger: snapshot.trigger,
-        operationId,
-        expectedCursorOrdinal,
-        throughOrdinal: boundary.ordinal,
-        coverageHash: memoryCoverageHash(
-          entries.filter(
-            ({ ordinal }) => ordinal > expectedCursorOrdinal && ordinal <= boundary.ordinal,
+        trigger: processed.failedTrigger ?? snapshot.trigger,
+        operationId: processed.failedOperationId ?? operationId,
+        expectedCursorOrdinal: processed.failedExpectedCursorOrdinal ?? expectedCursorOrdinal,
+        throughOrdinal: processed.failedThroughOrdinal ?? boundary.ordinal,
+        coverageHash:
+          processed.coverageHash ??
+          memoryCoverageHash(
+            entries.filter(
+              ({ ordinal }) => ordinal > expectedCursorOrdinal && ordinal <= boundary.ordinal,
+            ),
           ),
-        ),
         failureClass: processed.failureClass,
       });
       if (!settled) {
@@ -642,7 +576,10 @@ export class MemoryExtractionEngine {
     readonly targetBoundaryOrdinal: number;
     readonly expectedCoverageHash?: string;
     readonly entries: readonly MemoryExtractionEventEntry[];
+    readonly compactionCheckpoints: readonly HistoryCompactCheckpoint[];
+    readonly policyDeniedCheckpointIds: ReadonlySet<string>;
     readonly prioritizeCurrentTurn: boolean;
+    readonly allowSplit?: boolean;
   }): Promise<CoverageProcessingResult> {
     const pendingEntries = input.entries.filter(
       ({ ordinal }) =>
@@ -652,12 +589,164 @@ export class MemoryExtractionEngine {
     if (input.expectedCoverageHash && input.expectedCoverageHash !== coverageHash) {
       return { kind: 'blocked' };
     }
+    const processSplit = async (): Promise<CoverageProcessingResult | undefined> => {
+      if (input.allowSplit === false) return undefined;
+      let maximumSplitIndex: number | undefined;
+      if (input.trigger === 'remember') {
+        const requestedTurnStart = pendingEntries.findIndex(
+          ({ event }) =>
+            event.runId === input.snapshot.runId && event.turnId === input.snapshot.turnId,
+        );
+        if (requestedTurnStart <= 0) return undefined;
+        maximumSplitIndex = requestedTurnStart;
+      }
+      const split = memoryRangeSplitCandidates(pendingEntries, maximumSplitIndex).find(
+        ({ first, second }) => {
+          const firstThroughOrdinal = first.at(-1)!.ordinal;
+          const firstTrigger: MemoryExtractionTrigger = 'extract';
+          const firstPrepared = this.prepareRange({
+            ...input,
+            trigger: firstTrigger,
+            targetBoundaryOrdinal: firstThroughOrdinal,
+            prioritizeCurrentTurn: false,
+            pendingEntries: first,
+            coverageHash: memoryCoverageHash(first),
+          });
+          const secondPrepared = this.prepareRange({
+            ...input,
+            expectedCursorOrdinal: firstThroughOrdinal,
+            pendingEntries: second,
+            coverageHash: memoryCoverageHash(second),
+          });
+          return (
+            preparedMemoryRangeFits(firstPrepared, firstTrigger) &&
+            preparedMemoryRangeFits(secondPrepared, input.trigger)
+          );
+        },
+      );
+      if (!split) {
+        return undefined;
+      }
+      const firstThroughOrdinal = split.first.at(-1)!.ordinal;
+      const first = await this.processRange({
+        ...input,
+        // A split prefix is an independent incidental range. It cannot retain
+        // the full Compaction checkpoint identity because its boundary is
+        // earlier than that checkpoint, and it cannot retain remember semantics
+        // because the requested Turn is deliberately kept in the final segment.
+        trigger: 'extract',
+        operationId: memorySegmentOperationId(
+          input.operationId,
+          input.expectedCursorOrdinal,
+          firstThroughOrdinal,
+          input.snapshot.trigger === 'compaction',
+        ),
+        targetBoundaryOrdinal: firstThroughOrdinal,
+        expectedCoverageHash: memoryCoverageHash(split.first),
+        prioritizeCurrentTurn: false,
+        allowSplit: false,
+      });
+      if (first.kind !== 'committed') return first;
+      return this.processRange({
+        ...input,
+        expectedCursorOrdinal: first.nextCursorOrdinal,
+        expectedCoverageHash: memoryCoverageHash(split.second),
+        allowSplit: false,
+      });
+    };
+    const prepared = this.prepareRange({ ...input, pendingEntries, coverageHash });
+    if (!prepared) {
+      const split = await processSplit();
+      if (split) return split;
+      return {
+        kind: 'counted_failure',
+        failureClass: 'evidence',
+        failedTrigger: input.trigger,
+        failedOperationId: input.operationId,
+        failedExpectedCursorOrdinal: input.expectedCursorOrdinal,
+        failedThroughOrdinal: input.targetBoundaryOrdinal,
+        coverageHash,
+      };
+    }
+    if (
+      (prepared.coverage.evidence.length > 0 || input.trigger === 'remember') &&
+      !memoryRequestFits(prepared.snapshot, prepared.firstPrompt, 'proposal')
+    ) {
+      const split = await processSplit();
+      if (split) return split;
+      return {
+        kind: 'counted_failure',
+        failureClass: 'provider',
+        failedTrigger: input.trigger,
+        failedOperationId: input.operationId,
+        failedExpectedCursorOrdinal: input.expectedCursorOrdinal,
+        failedThroughOrdinal: input.targetBoundaryOrdinal,
+        coverageHash,
+      };
+    }
+    const processed = await this.processCoverage({
+      snapshot: prepared.snapshot,
+      trigger: input.trigger,
+      operationId: input.operationId,
+      expectedCursorOrdinal: input.expectedCursorOrdinal,
+      coverage: prepared.coverage,
+      entries: input.entries,
+      boundaryOrdinal: input.targetBoundaryOrdinal,
+      coverageHash,
+      localizationAfterOrdinal: latestPolicyDeniedBoundaryOrdinal(
+        input.compactionCheckpoints,
+        input.entries,
+        input.policyDeniedCheckpointIds,
+        input.targetBoundaryOrdinal,
+      ),
+      requestedEvidenceContainsSensitiveText: prepared.requestedEvidenceContainsSensitiveText,
+    });
+    return processed.kind === 'counted_failure'
+      ? {
+          ...processed,
+          failedTrigger: input.trigger,
+          failedOperationId: input.operationId,
+          failedExpectedCursorOrdinal: input.expectedCursorOrdinal,
+          failedThroughOrdinal: input.targetBoundaryOrdinal,
+          coverageHash,
+        }
+      : processed;
+  }
+
+  private prepareRange(input: {
+    readonly snapshot: MemoryExtractionSourceSnapshot;
+    readonly trigger: MemoryExtractionTrigger;
+    readonly expectedCursorOrdinal: number;
+    readonly targetBoundaryOrdinal: number;
+    readonly entries: readonly MemoryExtractionEventEntry[];
+    readonly compactionCheckpoints: readonly HistoryCompactCheckpoint[];
+    readonly policyDeniedCheckpointIds: ReadonlySet<string>;
+    readonly prioritizeCurrentTurn: boolean;
+    readonly pendingEntries: readonly MemoryExtractionEventEntry[];
+    readonly coverageHash: string;
+  }):
+    | {
+        readonly snapshot: MemoryExtractionSourceSnapshot;
+        readonly coverage: MemoryCoveragePlan;
+        readonly firstPrompt: string;
+        readonly requestedEvidenceContainsSensitiveText: boolean;
+      }
+    | undefined {
+    const rangeSnapshot = buildMemoryRangeSnapshot({
+      snapshot: input.snapshot,
+      entries: input.entries,
+      checkpoints: input.compactionCheckpoints,
+      policyDeniedCheckpointIds: input.policyDeniedCheckpointIds,
+      afterOrdinal: input.expectedCursorOrdinal,
+      throughOrdinal: input.targetBoundaryOrdinal,
+    });
+    if (!rangeSnapshot) return undefined;
     const priorityEvidence = input.prioritizeCurrentTurn
       ? projectMemoryExtractionEvidence(
-          pendingEntries
+          input.pendingEntries
             .filter(
               ({ event }) =>
-                event.runId === input.snapshot.runId && event.turnId === input.snapshot.turnId,
+                event.runId === rangeSnapshot.runId && event.turnId === rangeSnapshot.turnId,
             )
             .map(({ event }) => event),
         )
@@ -665,25 +754,24 @@ export class MemoryExtractionEngine {
     const requestedEvidenceContainsSensitiveText =
       input.trigger === 'remember' && memoryEvidenceContainsSensitiveText(priorityEvidence);
     const coverage = planMemoryCoverage({
-      pendingEntries,
+      pendingEntries: input.pendingEntries,
       ...(input.trigger === 'remember' ? { priorityEvidence } : {}),
-      sourceEventMessagePositions: input.snapshot.sourceEventMessagePositions,
-      sourceMessages: input.snapshot.sourceMessages,
+      sourceEventMessagePositions: rangeSnapshot.sourceEventMessagePositions,
+      sourceMessages: rangeSnapshot.sourceMessages,
     });
-    if (!coverage || coverage.entries.length === 0) {
-      return { kind: 'counted_failure', failureClass: 'evidence' };
-    }
-    return this.processCoverage({
-      snapshot: input.snapshot,
+    if (!coverage || coverage.entries.length === 0) return undefined;
+    const firstPrompt = buildFirstMemoryProposalPrompt({
       trigger: input.trigger,
-      operationId: input.operationId,
-      expectedCursorOrdinal: input.expectedCursorOrdinal,
-      coverage,
-      entries: input.entries,
-      boundaryOrdinal: input.targetBoundaryOrdinal,
-      coverageHash,
-      requestedEvidenceContainsSensitiveText,
+      now: this.now(),
+      evidence: coverage.evidence,
+      sourceEventMessagePositions: rangeSnapshot.sourceEventMessagePositions,
     });
+    return {
+      snapshot: rangeSnapshot,
+      coverage,
+      firstPrompt,
+      requestedEvidenceContainsSensitiveText,
+    };
   }
 
   private async processCoverage(input: {
@@ -695,6 +783,7 @@ export class MemoryExtractionEngine {
     readonly entries: readonly MemoryExtractionEventEntry[];
     readonly boundaryOrdinal: number;
     readonly coverageHash: string;
+    readonly localizationAfterOrdinal: number;
     readonly requestedEvidenceContainsSensitiveText: boolean;
   }): Promise<CoverageProcessingResult> {
     const { snapshot, coverage } = input;
@@ -721,6 +810,7 @@ export class MemoryExtractionEngine {
       readonly entries: readonly MemoryExtractionEventEntry[];
       readonly boundaryOrdinal: number;
       readonly coverageHash: string;
+      readonly localizationAfterOrdinal: number;
       readonly requestedEvidenceContainsSensitiveText: boolean;
     },
     budget: MemoryModelCallBudget,
@@ -730,6 +820,7 @@ export class MemoryExtractionEngine {
     let incidentalItems: readonly MemoryProposalItem[] = [];
     let requestedStatus: 'resolved' | 'not_applicable' | 'unresolved' = 'not_applicable';
     let requestedAdmissionEvidence = coverage.evidence;
+    let localizedInterpretationContext: string | undefined;
 
     if (coverage.evidence.length > 0 || trigger === 'remember') {
       const firstCall = await this.callModel(
@@ -748,9 +839,10 @@ export class MemoryExtractionEngine {
       if (!first) return { kind: 'counted_failure', failureClass: 'schema' };
       if (
         trigger !== 'remember' &&
-        (first.status !== 'complete' ||
-          first.requestedStatus !== 'not_applicable' ||
-          first.requestedItems.length > 0)
+        (first.requestedItems.length > 0 ||
+          (first.status === 'complete'
+            ? first.requestedStatus !== 'not_applicable'
+            : first.requestedStatus !== 'unresolved'))
       ) {
         return { kind: 'counted_failure', failureClass: 'schema' };
       }
@@ -759,15 +851,20 @@ export class MemoryExtractionEngine {
       requestedStatus = first.requestedStatus;
 
       if (first.status === 'search_required') {
-        if (trigger !== 'remember' || !(await this.allowed(snapshot.sessionId))) {
+        if (!(await this.allowed(snapshot.sessionId))) {
           return { kind: 'blocked' };
         }
         const localizedEntries = searchSameSessionMemoryHistory(
           input.entries,
           input.boundaryOrdinal,
           first.search,
+          input.localizationAfterOrdinal,
         );
         if (localizedEntries.length === 0) {
+          return { kind: 'counted_failure', failureClass: 'localization' };
+        }
+        localizedInterpretationContext = renderMemoryLocalizationContext(localizedEntries);
+        if (!localizedInterpretationContext) {
           return { kind: 'counted_failure', failureClass: 'localization' };
         }
         const localizedVisibleEvidence = bindProviderVisibleEvidence(
@@ -786,19 +883,26 @@ export class MemoryExtractionEngine {
         if (!localizedEvidence) {
           return { kind: 'counted_failure', failureClass: 'evidence' };
         }
-        if (memoryEvidenceContainsSensitiveText(localizedEvidence)) {
+        if (trigger === 'remember' && memoryEvidenceContainsSensitiveText(localizedEvidence)) {
           return this.commitSensitiveNoOp(input);
         }
         if (budget.remaining <= 0) {
           return { kind: 'counted_failure', failureClass: 'localization' };
         }
+        const localizedPrompt = fittingLocalizedMemoryPrompt({
+          snapshot,
+          trigger,
+          now: this.now(),
+          evidence: trigger === 'remember' ? localizedEvidence : coverage.evidence,
+          interpretationContext: localizedInterpretationContext,
+        });
+        if (!localizedPrompt) {
+          return { kind: 'counted_failure', failureClass: 'localization' };
+        }
+        localizedInterpretationContext = localizedPrompt.interpretationContext;
         const localizedCall = await this.callModel(
           snapshot,
-          buildLocalizedMemoryProposalPrompt({
-            now: this.now(),
-            evidence: localizedEvidence,
-            sourceEventMessagePositions: snapshot.sourceEventMessagePositions,
-          }),
+          localizedPrompt.prompt,
           'localized',
           budget,
         );
@@ -808,9 +912,25 @@ export class MemoryExtractionEngine {
         if (localized.status === 'cannot_resolve') {
           return { kind: 'counted_failure', failureClass: 'localization' };
         }
-        requestedItems = localized.requestedItems;
-        requestedStatus = localized.status;
-        requestedAdmissionEvidence = localizedEvidence;
+        if ('coverageStatus' in localized) {
+          if (localized.status !== 'complete') {
+            return { kind: 'counted_failure', failureClass: 'schema' };
+          }
+          if (
+            trigger !== 'remember' &&
+            (localized.requestedStatus !== 'not_applicable' || localized.requestedItems.length > 0)
+          ) {
+            return { kind: 'counted_failure', failureClass: 'schema' };
+          }
+          requestedItems = localized.requestedItems;
+          incidentalItems = [...incidentalItems, ...localized.incidentalItems];
+          requestedStatus = localized.requestedStatus;
+        } else {
+          // Backward-compatible parser branch for in-flight PR 2-A responses.
+          requestedItems = localized.requestedItems;
+          requestedStatus = localized.status;
+        }
+        if (trigger === 'remember') requestedAdmissionEvidence = localizedEvidence;
       } else if (first.status === 'cannot_resolve') {
         return { kind: 'counted_failure', failureClass: 'localization' };
       }
@@ -889,6 +1009,9 @@ export class MemoryExtractionEngine {
               observedAt: minuteTimestamp(Math.max(...source.events.map((event) => event.ts))),
             };
           }),
+          ...(localizedInterpretationContext
+            ? { interpretationContext: localizedInterpretationContext }
+            : {}),
         })),
       });
       let byId:
@@ -1031,6 +1154,10 @@ export class MemoryExtractionEngine {
     if (budget.remaining <= 0) {
       return { kind: 'counted_failure', failureClass: 'provider' };
     }
+    if (!memoryRequestFits(snapshot, prompt, stage)) {
+      budget.remaining = 0;
+      return { kind: 'counted_failure', failureClass: 'provider' };
+    }
     if (!(await this.allowed(snapshot.sessionId))) return { kind: 'blocked' };
     budget.remaining -= 1;
     const result = await this.ports.generate({
@@ -1109,6 +1236,11 @@ export class MemoryExtractionEngine {
       (candidate) => candidate.checkpointId === snapshot.compactionCheckpointId,
     );
     if (!checkpoint || !compactionCheckpointMatchesSnapshot([checkpoint], snapshot)) return;
+    await this.ports.recordCompactionPolicyDenial({
+      sessionId: snapshot.sessionId,
+      compactionCheckpointId: checkpoint.checkpointId,
+      deniedAt: this.now(),
+    });
     await this.settlePolicyDeniedCheckpoint(snapshot, checkpoint, entries);
   }
 
@@ -1162,10 +1294,11 @@ function memoryExtractionOperationId(snapshot: MemoryExtractionSourceSnapshot): 
     .update(
       JSON.stringify({
         sessionId: snapshot.sessionId,
-        runId: snapshot.runId,
-        turnId: snapshot.turnId,
         trigger: snapshot.trigger,
         stableBoundary,
+        ...(snapshot.trigger === 'compaction'
+          ? {}
+          : { runId: snapshot.runId, turnId: snapshot.turnId }),
       }),
     )
     .digest('hex')}`;
@@ -1175,6 +1308,157 @@ function memoryCoverageHash(entries: readonly MemoryExtractionEventEntry[]): str
   return createHash('sha256')
     .update(JSON.stringify(entries.map(({ ordinal, event }) => [ordinal, event.id])))
     .digest('hex');
+}
+
+function memorySegmentOperationId(
+  operationId: string,
+  afterOrdinal: number,
+  throughOrdinal: number,
+  portableCompactionPrefix: boolean,
+): string {
+  const prefix = portableCompactionPrefix ? 'memory_compaction_segment' : 'memory_segment';
+  return `${prefix}_${createHash('sha256')
+    .update(JSON.stringify({ operationId, afterOrdinal, throughOrdinal }))
+    .digest('hex')}`;
+}
+
+function memoryRangeSplitCandidates(
+  entries: readonly MemoryExtractionEventEntry[],
+  maximumSplitIndex = entries.length - 1,
+): readonly {
+  readonly first: readonly MemoryExtractionEventEntry[];
+  readonly second: readonly MemoryExtractionEventEntry[];
+}[] {
+  if (entries.length < 2) return [];
+  const weights = entries.map(memoryRangeEventWeight);
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  let prefix = 0;
+  const candidates = entries
+    .slice(1)
+    .map((entry, offset) => {
+      const index = offset + 1;
+      prefix += weights[offset]!;
+      return {
+        index,
+        turnBoundary: entries[index - 1]!.event.turnId !== entry.event.turnId,
+        distance: Math.abs(prefix - total / 2),
+      };
+    })
+    .filter(({ index }) => index <= maximumSplitIndex);
+  return candidates
+    .sort(
+      (left, right) =>
+        Number(right.turnBoundary) - Number(left.turnBoundary) ||
+        left.distance - right.distance ||
+        left.index - right.index,
+    )
+    .map(({ index }) => ({ first: entries.slice(0, index), second: entries.slice(index) }));
+}
+
+function preparedMemoryRangeFits(
+  prepared:
+    | {
+        readonly snapshot: MemoryExtractionSourceSnapshot;
+        readonly coverage: MemoryCoveragePlan;
+        readonly firstPrompt: string;
+      }
+    | undefined,
+  trigger: MemoryExtractionTrigger,
+): boolean {
+  if (!prepared) return false;
+  return (
+    (prepared.coverage.evidence.length === 0 && trigger !== 'remember') ||
+    memoryRequestFits(prepared.snapshot, prepared.firstPrompt, 'proposal')
+  );
+}
+
+function memoryRangeEventWeight({ event }: MemoryExtractionEventEntry): number {
+  if (
+    !event.partial &&
+    event.content?.kind === 'text' &&
+    ((event.role === 'user' && event.author === 'user') ||
+      (event.role === 'model' && event.author === 'agent'))
+  ) {
+    // Text appears once in the interpretation messages and, for user text, once
+    // more in the bounded evidence index when it cannot be referenced by position.
+    return Math.max(1, event.content.text.length * (event.role === 'user' ? 2 : 1));
+  }
+  return 1;
+}
+
+function memoryRequestFits(
+  snapshot: MemoryExtractionSourceSnapshot,
+  prompt: string,
+  stage: 'proposal' | 'localized' | 'canonicalize',
+): boolean {
+  const contextWindow = snapshot.sourceContextWindowTokens;
+  if (contextWindow === undefined) return true;
+  const outputReserve = memoryExtractionMaxOutputTokens(snapshot);
+  const inputBudget = Math.max(1, contextWindow - outputReserve);
+  const payloadChars =
+    prompt.length +
+    (stage === 'canonicalize'
+      ? 0
+      : (snapshot.sourceSystemPrompt?.length ?? 0) +
+        safeJsonLength(snapshot.sourceMessages) +
+        safeJsonLength(snapshot.sourceTools) +
+        safeJsonLength(snapshot.sourceActiveTools) +
+        safeJsonLength(snapshot.sourceProviderOptions));
+  return Math.ceil(payloadChars / 4) <= inputBudget;
+}
+
+function fittingLocalizedMemoryPrompt(input: {
+  readonly snapshot: MemoryExtractionSourceSnapshot;
+  readonly trigger: MemoryExtractionTrigger;
+  readonly now: number;
+  readonly evidence: readonly MemoryCoveragePlan['evidence'][number][];
+  readonly interpretationContext: string;
+}): { readonly prompt: string; readonly interpretationContext: string } | undefined {
+  const build = (interpretationContext: string): string =>
+    buildLocalizedMemoryProposalPrompt({
+      trigger: input.trigger,
+      now: input.now,
+      evidence: input.evidence,
+      interpretationContext,
+      sourceEventMessagePositions: input.snapshot.sourceEventMessagePositions,
+    });
+  const full = build(input.interpretationContext);
+  if (memoryRequestFits(input.snapshot, full, 'localized')) {
+    return { prompt: full, interpretationContext: input.interpretationContext };
+  }
+  const codePoints = Array.from(input.interpretationContext);
+  let low = 1;
+  let high = codePoints.length;
+  let best: { readonly prompt: string; readonly interpretationContext: string } | undefined;
+  while (low <= high) {
+    const size = Math.floor((low + high) / 2);
+    const context = centeredContextSlice(codePoints, size);
+    const prompt = build(context);
+    if (memoryRequestFits(input.snapshot, prompt, 'localized')) {
+      best = { prompt, interpretationContext: context };
+      low = size + 1;
+    } else {
+      high = size - 1;
+    }
+  }
+  return best;
+}
+
+function centeredContextSlice(codePoints: readonly string[], maximum: number): string {
+  if (codePoints.length <= maximum) return codePoints.join('');
+  const head = Math.ceil(maximum / 2);
+  const tail = Math.floor(maximum / 2);
+  return `${codePoints.slice(0, head).join('')}\n[localized context truncated]\n${
+    tail > 0 ? codePoints.slice(-tail).join('') : ''
+  }`;
+}
+
+function safeJsonLength(value: unknown): number {
+  try {
+    return JSON.stringify(value)?.length ?? 0;
+  } catch {
+    return Number.MAX_SAFE_INTEGER;
+  }
 }
 
 function memoryEvidenceContainsSensitiveText(
@@ -1273,23 +1557,15 @@ function earliestUnprocessedCompactionCheckpoint(
 function rebuildCompactionSnapshot(
   current: MemoryExtractionSourceSnapshot,
   checkpoint: HistoryCompactCheckpoint | undefined,
-  entries: readonly MemoryExtractionEventEntry[],
 ): MemoryExtractionSourceSnapshot | undefined {
   const boundary = checkpoint?.memoryExtractionBoundary;
   if (!checkpoint || !boundary || boundary.disposition === 'policy_denied') return undefined;
-  const sourceContext = buildMemoryCompactionSourceContext(
-    entries.map(({ event }) => event),
-    boundary.runtimeEventId,
-  );
-  if (!sourceContext) return undefined;
   return {
     trigger: 'compaction',
     sourceHeader: current.sourceHeader,
     ...(current.sourceSystemPrompt ? { sourceSystemPrompt: current.sourceSystemPrompt } : {}),
-    sourceMessages: sourceContext.messages,
-    ...(sourceContext.eventMessagePositions
-      ? { sourceEventMessagePositions: sourceContext.eventMessagePositions }
-      : {}),
+    sourceMessages: [],
+    rebuildSourceContextFromCompactionCheckpoint: true,
     sourceTools: current.sourceTools,
     sourceActiveTools: current.sourceActiveTools,
     ...(current.sourceProviderOptions
@@ -1298,6 +1574,9 @@ function rebuildCompactionSnapshot(
     ...(current.sourceMaxOutputTokens !== undefined
       ? { sourceMaxOutputTokens: current.sourceMaxOutputTokens }
       : {}),
+    ...(current.sourceContextWindowTokens !== undefined
+      ? { sourceContextWindowTokens: current.sourceContextWindowTokens }
+      : {}),
     sessionId: current.sessionId,
     runId: current.runId,
     turnId: current.turnId,
@@ -1305,6 +1584,189 @@ function rebuildCompactionSnapshot(
     compactionCheckpointId: checkpoint.checkpointId,
     compactionBoundaryEventId: boundary.runtimeEventId,
   };
+}
+
+function rebuildExplicitPendingSnapshot(
+  current: MemoryExtractionSourceSnapshot,
+  pending: PendingMemoryExtractionFailure,
+  boundary: MemoryExtractionEventEntry | undefined,
+  entries: readonly MemoryExtractionEventEntry[],
+): MemoryExtractionSourceSnapshot | undefined {
+  if (!boundary || pending.firstTrigger === 'compaction') return undefined;
+  const portableCompactionSegment = pending.firstOperationId.startsWith(
+    'memory_compaction_segment_',
+  );
+  const shared = {
+    sourceHeader: current.sourceHeader,
+    ...(!portableCompactionSegment && current.sourceSystemPrompt
+      ? { sourceSystemPrompt: current.sourceSystemPrompt }
+      : {}),
+    sourceMessages: [],
+    sourceTools: portableCompactionSegment ? {} : current.sourceTools,
+    sourceActiveTools: portableCompactionSegment ? [] : current.sourceActiveTools,
+    ...(!portableCompactionSegment && current.sourceProviderOptions
+      ? { sourceProviderOptions: current.sourceProviderOptions }
+      : {}),
+    ...(current.sourceMaxOutputTokens !== undefined
+      ? { sourceMaxOutputTokens: current.sourceMaxOutputTokens }
+      : {}),
+    ...(current.sourceContextWindowTokens !== undefined
+      ? { sourceContextWindowTokens: current.sourceContextWindowTokens }
+      : {}),
+    sessionId: current.sessionId,
+    runId: boundary.event.runId,
+    turnId: boundary.event.turnId,
+    workspaceKey: current.workspaceKey,
+  };
+  if (pending.firstTrigger === 'remember') {
+    const call = entries.find(
+      ({ ordinal, event }) =>
+        ordinal > boundary.ordinal &&
+        event.runId === boundary.event.runId &&
+        event.turnId === boundary.event.turnId &&
+        event.content?.kind === 'function_call' &&
+        event.content.name === MEMORY_REMEMBER_TOOL_NAME,
+    );
+    return call?.event.content?.kind === 'function_call'
+      ? { ...shared, trigger: 'remember', toolCallId: call.event.content.id }
+      : undefined;
+  }
+  return { ...shared, trigger: 'extract', terminalEventId: boundary.event.id };
+}
+
+function buildMemoryRangeSnapshot(input: {
+  readonly snapshot: MemoryExtractionSourceSnapshot;
+  readonly entries: readonly MemoryExtractionEventEntry[];
+  readonly checkpoints: readonly HistoryCompactCheckpoint[];
+  readonly policyDeniedCheckpointIds: ReadonlySet<string>;
+  readonly afterOrdinal: number;
+  readonly throughOrdinal: number;
+}): MemoryExtractionSourceSnapshot | undefined {
+  const afterEvent = input.entries.find(({ ordinal }) => ordinal === input.afterOrdinal)?.event;
+  const throughEvent = input.entries.find(({ ordinal }) => ordinal === input.throughOrdinal)?.event;
+  if (!throughEvent) return undefined;
+  const sourceCheckpoint = input.snapshot.compactionCheckpointId
+    ? input.checkpoints.find(
+        (checkpoint) => checkpoint.checkpointId === input.snapshot.compactionCheckpointId,
+      )
+    : latestCheckpointAtOrBefore(input.checkpoints, input.entries, input.throughOrdinal);
+  const previousCheckpointCandidate =
+    input.snapshot.trigger === 'compaction'
+      ? sourceCheckpoint?.previousCheckpointId
+        ? input.checkpoints.find(
+            (checkpoint) => checkpoint.checkpointId === sourceCheckpoint.previousCheckpointId,
+          )
+        : undefined
+      : sourceCheckpoint;
+  if (
+    input.snapshot.trigger === 'compaction' &&
+    sourceCheckpoint?.previousCheckpointId &&
+    !previousCheckpointCandidate
+  ) {
+    return undefined;
+  }
+  const previousCheckpoint =
+    previousCheckpointCandidate &&
+    checkpointSummaryIsPolicySafe(
+      previousCheckpointCandidate,
+      input.checkpoints,
+      input.policyDeniedCheckpointIds,
+    )
+      ? previousCheckpointCandidate
+      : undefined;
+  const sourceContext = buildMemoryCompactionSourceContext(
+    input.entries.map(({ event }) => event),
+    throughEvent.id,
+    {
+      ...(afterEvent ? { afterEventId: afterEvent.id } : {}),
+      ...(previousCheckpoint ? { previousCheckpoint } : {}),
+    },
+  );
+  if (!sourceContext) return undefined;
+  return {
+    ...input.snapshot,
+    ...(input.snapshot.trigger === 'compaction'
+      ? { sourceSystemPrompt: undefined, sourceProviderOptions: undefined }
+      : {}),
+    sourceMessages: sourceContext.messages,
+    // Automatic extraction is an isolated portable stage. Carrying the Agent's
+    // System Prompt or tool catalog adds no interpretation value and can consume
+    // the auxiliary context window before any conversation text is considered.
+    sourceTools: input.snapshot.trigger === 'compaction' ? {} : input.snapshot.sourceTools,
+    sourceActiveTools:
+      input.snapshot.trigger === 'compaction'
+        ? []
+        : input.snapshot.sourceActiveTools.filter(
+            (name) => input.snapshot.sourceTools[name]?.kind !== 'provider',
+          ),
+    ...(sourceContext.eventMessagePositions
+      ? { sourceEventMessagePositions: sourceContext.eventMessagePositions }
+      : { sourceEventMessagePositions: undefined }),
+    ...(input.snapshot.trigger === 'compaction'
+      ? { rebuildSourceContextFromCompactionCheckpoint: true as const }
+      : {}),
+  };
+}
+
+function isPolicyDeniedCheckpoint(
+  checkpoint: HistoryCompactCheckpoint,
+  policyDeniedCheckpointIds: ReadonlySet<string>,
+): boolean {
+  return (
+    checkpoint.memoryExtractionBoundary?.disposition === 'policy_denied' ||
+    policyDeniedCheckpointIds.has(checkpoint.checkpointId)
+  );
+}
+
+function latestPolicyDeniedBoundaryOrdinal(
+  checkpoints: readonly HistoryCompactCheckpoint[],
+  entries: readonly MemoryExtractionEventEntry[],
+  policyDeniedCheckpointIds: ReadonlySet<string>,
+  throughOrdinal: number,
+): number {
+  const ordinals = new Map(entries.map(({ ordinal, event }) => [event.id, ordinal]));
+  return checkpoints.reduce((latest, checkpoint) => {
+    if (!isPolicyDeniedCheckpoint(checkpoint, policyDeniedCheckpointIds)) return latest;
+    const boundaryId = checkpoint.memoryExtractionBoundary?.runtimeEventId;
+    const ordinal = boundaryId ? ordinals.get(boundaryId) : undefined;
+    return ordinal !== undefined && ordinal <= throughOrdinal ? Math.max(latest, ordinal) : latest;
+  }, 0);
+}
+
+function checkpointSummaryIsPolicySafe(
+  checkpoint: HistoryCompactCheckpoint,
+  checkpoints: readonly HistoryCompactCheckpoint[],
+  policyDeniedCheckpointIds: ReadonlySet<string>,
+): boolean {
+  const byId = new Map(checkpoints.map((candidate) => [candidate.checkpointId, candidate]));
+  const seen = new Set<string>();
+  let current: HistoryCompactCheckpoint | undefined = checkpoint;
+  while (current) {
+    if (seen.has(current.checkpointId)) return false;
+    seen.add(current.checkpointId);
+    if (isPolicyDeniedCheckpoint(current, policyDeniedCheckpointIds)) return false;
+    if (!current.previousCheckpointId) return true;
+    current = byId.get(current.previousCheckpointId);
+    if (!current) return false;
+  }
+  return true;
+}
+
+function latestCheckpointAtOrBefore(
+  checkpoints: readonly HistoryCompactCheckpoint[],
+  entries: readonly MemoryExtractionEventEntry[],
+  throughOrdinal: number,
+): HistoryCompactCheckpoint | undefined {
+  const ordinals = new Map(entries.map(({ ordinal, event }) => [event.id, ordinal]));
+  return checkpoints
+    .flatMap((checkpoint) => {
+      const ordinal = ordinals.get(checkpoint.coverage.through.runtimeEventId);
+      return ordinal !== undefined && ordinal <= throughOrdinal ? [{ checkpoint, ordinal }] : [];
+    })
+    .sort(
+      (left, right) =>
+        right.ordinal - left.ordinal || right.checkpoint.createdAt - left.checkpoint.createdAt,
+    )[0]?.checkpoint;
 }
 
 function validCompactionBootstrapOrdinal(

@@ -1618,6 +1618,7 @@ export type {
 export { modelUsesAnthropicMessages } from './model-runtime.js';
 export {
   MemoryExtractionEngine,
+  memoryExtractionMaxOutputTokens,
   type MemoryExtractionEnginePorts,
   type MemoryExtractionGate,
   type MemoryExtractionSourceCapabilities,

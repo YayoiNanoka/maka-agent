@@ -22,6 +22,8 @@ type MemoryExtractionStore = Pick<
   | 'readExtractionCursor'
   | 'readPendingExtractionFailure'
   | 'readExtractionReceipt'
+  | 'recordCompactionPolicyDenial'
+  | 'readCompactionPolicyDenials'
   | 'settleExtractionFailure'
 >;
 
@@ -59,6 +61,10 @@ export class HostMemoryExtractionCoordinator {
       initializeCursor: (sessionId, processedOrdinal) =>
         this.input.store.initializeExtractionCursor(sessionId, processedOrdinal),
       readPendingFailure: (sessionId) => this.input.store.readPendingExtractionFailure(sessionId),
+      recordCompactionPolicyDenial: (denial) =>
+        this.input.store.recordCompactionPolicyDenial(denial),
+      readCompactionPolicyDenials: (sessionId) =>
+        this.input.store.readCompactionPolicyDenials(sessionId),
       readLatestCompactionCheckpoint: (sessionId) =>
         this.input.historyCompaction.readLatestCheckpoint(sessionId),
       readCompactionCheckpoints: (sessionId) =>
@@ -72,9 +78,12 @@ export class HostMemoryExtractionCoordinator {
     });
   }
 
-  sourceCapabilities(): MemoryExtractionSourceCapabilities {
+  sourceCapabilities(
+    automaticGate: MemoryExtractionGate = { allowed: false, reason: 'unavailable' },
+  ): MemoryExtractionSourceCapabilities {
     return Object.freeze({
       gate: () => this.readGate(),
+      automaticGate: () => automaticGate,
       remember: (snapshot: MemoryExtractionSourceSnapshot) => this.remember(snapshot),
       extract: (snapshot: MemoryExtractionSourceSnapshot) => this.extract(snapshot),
     });

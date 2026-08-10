@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 4;
+export const SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION = 5;
 
 const SQLITE_INITIALIZATION_BUSY_TIMEOUT_MS = 5_000;
 const SQLITE_INITIALIZATION_RETRY_DELAY_MS = 10;
@@ -191,6 +191,17 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
     DROP TABLE memory_extraction_failures_v3;
   `,
   ],
+  [
+    5,
+    `
+    CREATE TABLE memory_compaction_policy_denials (
+      session_id TEXT NOT NULL CHECK (length(session_id) > 0),
+      compaction_checkpoint_id TEXT NOT NULL CHECK (length(compaction_checkpoint_id) > 0),
+      denied_at INTEGER NOT NULL CHECK (denied_at >= 0),
+      PRIMARY KEY(session_id, compaction_checkpoint_id)
+    ) WITHOUT ROWID;
+  `,
+  ],
 ]);
 
 interface MinimumTableShape {
@@ -262,7 +273,7 @@ const VERSION_1_MINIMUM_SCHEMA_SHAPE: MinimumSchemaShape = {
   ],
 };
 
-const MINIMUM_SCHEMA_SHAPES: ReadonlyMap<number, MinimumSchemaShape> = new Map([
+const MINIMUM_SCHEMA_SHAPES = new Map<number, MinimumSchemaShape>([
   [1, VERSION_1_MINIMUM_SCHEMA_SHAPE],
   [
     2,
@@ -361,6 +372,18 @@ const MINIMUM_SCHEMA_SHAPES: ReadonlyMap<number, MinimumSchemaShape> = new Map([
     },
   ],
 ]);
+
+const version4MinimumShape = MINIMUM_SCHEMA_SHAPES.get(4)!;
+MINIMUM_SCHEMA_SHAPES.set(5, {
+  tables: [
+    ...version4MinimumShape.tables,
+    {
+      name: 'memory_compaction_policy_denials',
+      requiredColumns: ['session_id', 'compaction_checkpoint_id', 'denied_at'],
+    },
+  ],
+  indexes: version4MinimumShape.indexes,
+});
 
 for (let version = 1; version <= SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION; version += 1) {
   if (!MIGRATIONS.has(version)) {

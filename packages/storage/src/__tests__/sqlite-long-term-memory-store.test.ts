@@ -98,7 +98,7 @@ describe('SqliteMemoryItemStore', () => {
     });
   });
 
-  test('preserves a pending failure while migrating schema v3 to v4', async () => {
+  test('preserves a pending failure while migrating schema v3 to the current version', async () => {
     await withTempRoot(async (root) => {
       const databasePath = join(root, 'v3-pending.sqlite');
       const initialized = new SqliteMemoryItemStore(databasePath);
@@ -107,6 +107,7 @@ describe('SqliteMemoryItemStore', () => {
       const Database = loadDatabaseSync();
       const database = new Database(databasePath);
       database.exec(`
+        DROP TABLE memory_compaction_policy_denials;
         DROP TABLE memory_extraction_failures;
         CREATE TABLE memory_extraction_failures (
           session_id TEXT PRIMARY KEY CHECK (length(session_id) > 0),
@@ -134,7 +135,7 @@ describe('SqliteMemoryItemStore', () => {
       database.close();
 
       const migrated = new SqliteMemoryItemStore(databasePath);
-      assert.equal(migrated.schemaVersion(), 4);
+      assert.equal(migrated.schemaVersion(), SQLITE_LONG_TERM_MEMORY_SCHEMA_VERSION);
       assert.deepEqual(await migrated.readPendingExtractionFailure('session-v3'), {
         sessionId: 'session-v3',
         fromOrdinal: 2,
@@ -146,6 +147,31 @@ describe('SqliteMemoryItemStore', () => {
         failedAt: 900,
       });
       migrated.close();
+    });
+  });
+
+  test('persists Compaction policy denial independently from Cursor and pending failure', async () => {
+    await withStore(async ({ store }) => {
+      const first = await store.recordCompactionPolicyDenial({
+        sessionId: 'session-denial',
+        compactionCheckpointId: 'checkpoint-denial',
+        deniedAt: 500,
+      });
+      const replay = await store.recordCompactionPolicyDenial({
+        sessionId: 'session-denial',
+        compactionCheckpointId: 'checkpoint-denial',
+        deniedAt: 900,
+      });
+
+      assert.deepEqual(first, {
+        sessionId: 'session-denial',
+        compactionCheckpointId: 'checkpoint-denial',
+        deniedAt: 500,
+      });
+      assert.deepEqual(replay, first);
+      assert.deepEqual(await store.readCompactionPolicyDenials('session-denial'), [first]);
+      assert.equal(await store.readExtractionCursor('session-denial'), undefined);
+      assert.equal(await store.readPendingExtractionFailure('session-denial'), undefined);
     });
   });
 

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 
+import { buildHistoryCompactCheckpoint } from '../history-compact-checkpoint.js';
 import {
   bindProviderVisibleEvidence,
   projectMemoryExtractionEvidence,
@@ -44,14 +45,13 @@ describe('bounded Memory Extraction', () => {
     assert.ok(source);
     const serialized = JSON.stringify(source.messages);
     assert.match(serialized, /Durable user preference/);
-    assert.match(serialized, /README\.md/);
-    assert.match(serialized, /tool context/);
+    assert.doesNotMatch(serialized, /README\.md|tool context/);
     assert.doesNotMatch(serialized, /private reasoning|Must stay outside/);
     assert.deepEqual(source.eventMessagePositions?.['user-before'], [0]);
     assert.equal(source.eventMessagePositions?.['user-after'], undefined);
   });
 
-  test('excludes attachment refs while retaining quoted text in Compaction context', () => {
+  test('excludes attachments, quotes, and Tool context from Compaction interpretation text', () => {
     const source = buildMemoryCompactionSourceContext(
       [
         event('user-attachment', 'user', {
@@ -95,15 +95,14 @@ describe('bounded Memory Extraction', () => {
 
     assert.ok(source);
     const serialized = JSON.stringify(source.messages);
-    assert.match(serialized, /Remember the visible sentence|quoted durable detail/);
-    assert.match(serialized, /attachment result omitted/);
+    assert.match(serialized, /Remember the visible sentence/);
     assert.doesNotMatch(
       serialized,
-      /<attachment>|private-chart|secret-result|image\/png|session_file/,
+      /quoted durable detail|<attachment>|private-chart|secret-result|image\/png|session_file|session-resource/,
     );
   });
 
-  test('groups parallel tool calls and same-step text into one Provider-valid assistant message', () => {
+  test('keeps Assistant text while excluding parallel Tool and provider-native semantics', () => {
     const stepText = {
       ...event('assistant-step', 'model', { kind: 'text', text: 'Checking both sources.' }),
       refs: { storedMessageId: 'step-1' },
@@ -166,16 +165,45 @@ describe('bounded Memory Extraction', () => {
     assert.ok(Array.isArray(assistant.content));
     assert.deepEqual(
       assistant.content.map((part) => part.type),
-      ['text', 'text', 'text', 'text', 'text'],
+      ['text'],
     );
-    assert.deepEqual(source.eventMessagePositions?.['call-a'], [0]);
-    assert.deepEqual(source.eventMessagePositions?.['result-a'], [0]);
+    assert.equal(source.eventMessagePositions?.['call-a'], undefined);
+    assert.equal(source.eventMessagePositions?.['result-a'], undefined);
     const serialized = JSON.stringify(source.messages);
-    assert.match(serialized, /<tool_call name=|<tool_result name=/);
+    assert.match(serialized, /Checking both sources/);
     assert.doesNotMatch(
       serialized,
-      /"type":"tool-call"|"type":"tool-result"|secret-provider-metadata|signed-thinking|private step reasoning/,
+      /tool_call|tool_result|a\.md|b\.md|secret-provider-metadata|signed-thinking|private step reasoning/,
     );
+  });
+
+  test('rebuilds only the post-Cursor Event slice behind the previous Compaction summary', () => {
+    const compacted = event('compacted-user', 'user', {
+      kind: 'text',
+      text: 'Raw text already represented by the old summary.',
+    });
+    const previousCheckpoint = buildHistoryCompactCheckpoint({
+      sessionId: 'session-1',
+      coveredRuntimeEvents: [compacted],
+      summary: 'The old summary remains interpretation context.',
+    });
+    const source = buildMemoryCompactionSourceContext(
+      [
+        compacted,
+        event('cursor-event', 'model', { kind: 'text', text: 'Already processed response.' }),
+        event('new-user', 'user', { kind: 'text', text: 'Only this new user text is pending.' }),
+      ],
+      'new-user',
+      { afterEventId: 'cursor-event', previousCheckpoint },
+    );
+
+    assert.ok(source);
+    const serialized = JSON.stringify(source.messages);
+    assert.match(serialized, /old summary remains interpretation context/);
+    assert.match(serialized, /Only this new user text is pending/);
+    assert.doesNotMatch(serialized, /Raw text already represented|Already processed response/);
+    assert.deepEqual(source.eventMessagePositions?.['new-user'], [1]);
+    assert.equal(source.eventMessagePositions?.['cursor-event'], undefined);
   });
 
   test('projects only user text, excluding Assistant, Thinking, and every Tool event', () => {
