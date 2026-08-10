@@ -105,6 +105,7 @@ import type {
   RootExecutionDescriptor,
   RuntimeEvent,
   RuntimeEventStore,
+  RunCompositionSnapshot,
   RuntimeContinuationAuthorityStore,
   ToolBoundaryProtocol,
   SubagentWorkspaceBinding,
@@ -743,6 +744,8 @@ export interface BackendFactoryContext {
    * the metering source of truth (#1679).
    */
   recordModelCallAttempt?: (attempt: ModelCallAttempt) => Promise<void>;
+  /** Immutable Run policy snapshot; provider dispatch waits for this durable commit. */
+  recordRunComposition?: (runId: string, snapshot: RunCompositionSnapshot) => Promise<void>;
   loadHistoryCompactCheckpoint?: () => Promise<HistoryCompactCheckpoint | undefined>;
   recordHistoryCompactCheckpoint?: (
     checkpoint: HistoryCompactCheckpoint,
@@ -2514,11 +2517,15 @@ export class SessionManager {
     const definition = resolvedPreset
       ? requireBuiltinAgentDefinitionByProfile(resolvedPreset.profile)
       : requireBuiltinAgentDefinition(input.agentId!);
+    const availableChildTools = await this.childToolsForSession(input.source.sessionId);
     assertAgentDefinitionRunnable({
       definition,
-      tools: await this.childToolsForSession(input.source.sessionId),
+      tools: availableChildTools,
       worktreeChildExecutorAvailable: await this.isWorktreeChildExecutorAvailable(parentHeader),
     });
+    const resolvedToolNames = buildToolsForAgentDefinition(availableChildTools, definition).map(
+      (tool) => tool.name,
+    );
     const childPermissionMode =
       parentHeader.permissionMode === 'bypass' ? 'bypass' : definition.permissionMode;
 
@@ -2543,7 +2550,7 @@ export class SessionManager {
         profile: definition.profile,
         workspace: definition.contract.workspace,
         permissionMode: childPermissionMode,
-        toolNames: [...definition.tools],
+        toolNames: resolvedToolNames,
         categoryPolicy: {},
         systemPrompt: definition.systemPrompt,
         ...(resolvedPreset
@@ -2618,7 +2625,7 @@ export class SessionManager {
           profile: definition.profile,
           ...(resolvedPreset ? { presetId: resolvedPreset.id } : {}),
           systemPrompt: definition.systemPrompt,
-          toolNames: [...definition.tools],
+          toolNames: resolvedToolNames,
           categoryPolicy: {},
         },
         subagentSpawn: {
@@ -3105,6 +3112,9 @@ export class SessionManager {
       tools: availableChildTools,
       worktreeChildExecutorAvailable: await this.isWorktreeChildExecutorAvailable(parentHeader),
     });
+    const resolvedToolNames = buildToolsForAgentDefinition(availableChildTools, definition).map(
+      (tool) => tool.name,
+    );
 
     const proposedTurnId = input.turnId ?? this.deps.newId();
     const proposedRunId = input.runId ?? this.deps.newId();
@@ -3146,7 +3156,7 @@ export class SessionManager {
           profile: definition.profile,
           ...(input.resolvedPreset ? { presetId: input.resolvedPreset.id } : {}),
           systemPrompt: definition.systemPrompt,
-          toolNames: [...definition.tools],
+          toolNames: resolvedToolNames,
           categoryPolicy: {},
         },
         subagentSpawn: {

@@ -1519,6 +1519,7 @@ export class AiSdkCompaction {
     turnTailPrompt: string | undefined;
     memoryCompactionDecision?: () => AutomaticMemoryCompactionDecision;
     onMemoryCompaction?: (input: AutomaticMemoryCompactionDispatch) => void;
+    phase?: 'pre_turn' | 'mid_turn';
     abortSignal?: AbortSignal;
   }): Promise<MidTurnCompactionOutcome> {
     const {
@@ -1614,6 +1615,7 @@ export class AiSdkCompaction {
     const memoryDecision = input.memoryCompactionDecision?.();
     const plan = await planMidTurnCapacityCompaction({
       sessionId: this.sessionId,
+      phase: input.phase ?? 'mid_turn',
       orderedEvents,
       headAnchor: { runtimeEventId: state.headAnchor.id, turnId },
       estimatedNextRequestTokens: input.estimatedNextRequestTokens,
@@ -1755,6 +1757,7 @@ export class AiSdkCompaction {
       }
     }
     state.previousCheckpoint = plan.checkpoint;
+    state.projectionCheckpoint = plan.checkpoint;
     return {
       decision: 'compacted',
       checkpoint: plan.checkpoint,
@@ -1781,6 +1784,7 @@ export class AiSdkCompaction {
     retryAlreadyUsed: boolean;
     midTurnState: MidTurnCapacityCompactState | undefined;
     turnId: string;
+    stepNumber: number;
     currentMessages: readonly ModelMessage[];
     providerTools: readonly MakaTool[];
     activeTools: readonly string[];
@@ -1813,8 +1817,10 @@ export class AiSdkCompaction {
         input.activeTools,
         input.systemPromptChars,
       );
+    const phase = input.stepNumber === 0 ? 'pre_turn' : 'mid_turn';
     const outcome = await this.computeMidTurnCompactionReplacement({
       turnId: input.turnId,
+      phase,
       origin: input.origin,
       state,
       queue: input.queue,
@@ -1847,7 +1853,7 @@ export class AiSdkCompaction {
           stage: 'activeStep',
           sourceKind: 'runtimeEvents',
           decision: 'failedOpen',
-          phase: 'mid_turn',
+          phase,
           boundaryKind: 'historyCompact',
           reason: 'overflow',
           ...(outcome.decision === 'fail'
@@ -2221,6 +2227,8 @@ export class MidTurnCapacityCompactState {
   lastRequestInputTokens: number | undefined;
   /** Latest durable checkpoint (loaded or written) for roll-forward summaries. */
   previousCheckpoint: HistoryCompactCheckpoint | undefined;
+  /** Checkpoint accepted during this send; pins every later durable projection. */
+  projectionCheckpoint: HistoryCompactCheckpoint | undefined;
   /** Set when the turn must end with a context_budget_exhausted outcome. */
   exhaustedDetail: ContextBudgetExhaustedDetail | undefined;
   /**
@@ -2312,7 +2320,7 @@ type MidTurnCompactionOutcome =
     };
 
 /**
- * The `decision: 'replaced'` diagnostic patch for a durable mid_turn fold,
+ * The `decision: 'replaced'` diagnostic patch for a durable active-send fold,
  * shared by the proactive (`reason: 'context_limit'`) and reactive
  * (`reason: 'overflow'`) triggers so both report the fold identically.
  */
@@ -2342,7 +2350,7 @@ function buildMidTurnReplacedDiagnosticPatch(input: {
       stage: 'activeStep',
       sourceKind: 'runtimeEvents',
       decision: 'replaced',
-      phase: 'mid_turn',
+      phase: checkpoint.phase ?? 'pre_turn',
       boundaryKind: 'historyCompact',
       boundaryIds: [checkpoint.checkpointId],
       coverage: { bodySha256: [checkpoint.coverage.sourceDigest] },

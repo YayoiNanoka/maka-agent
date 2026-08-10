@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { arch as osArch, release as osRelease } from 'node:os';
 import {
-  assertInteractiveRootOwner,
-  authenticateInteractiveRootOwner,
-  type InteractiveRootOwner,
+  assertStateRootOwner,
+  authenticateStateRootOwner,
+  type StateRootOwner,
+  type StorageRootKind,
 } from '@maka/storage/root-authority';
+import { bindStateRootComposition } from '@maka/storage/state-root-composition';
 import { removeHostRegistration, writeHostRegistration } from '../control/registration.js';
 import {
   decodeClientFrame,
@@ -34,17 +36,28 @@ import {
   type OperationResidency,
   type OperationHandlerMap,
 } from './operation-dispatcher.js';
+import {
+  issueAccessCredential,
+  revokeAccessCredential,
+  type RuntimeHostAccessAuthority,
+} from './access-authority.js';
 import type { SessionContinuityService } from './session-continuity-service.js';
 import type { ClientCapabilityService } from './client-capability-service.js';
 import type { HostConfigurationChangeService } from './configuration-change-service.js';
+import type { HostProjectCatalogChangeService } from './project-catalog-change-service.js';
 import { runtimeHostLogBuffer } from '../process-diagnostics.js';
 import type { HostSessionCatalogChangeService } from './session-catalog-change-service.js';
+import {
+  type HostCompositionDescriptor,
+  type RuntimeHostCompositionSource,
+} from './host-composition.js';
 import {
   startLocalRuntimeHostListenerSet,
   type RuntimeHostListenerConnection,
   type RuntimeHostListenerSet,
   type RuntimeHostListenerSetFactory,
 } from './listener-set.js';
+import { HostResidencyRegistry } from './host-residency-registry.js';
 
 const DEFAULT_IDLE_GRACE_MS = 30_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000;
@@ -67,10 +80,10 @@ export class RuntimeHostProcessTerminationRequiredError extends Error {
   }
 }
 
-export interface RuntimeHostCompositionContext {
-  owner: InteractiveRootOwner;
+export interface RuntimeHostCompositionContext<K extends StorageRootKind = 'interactive'> {
+  owner: StateRootOwner<K>;
   hostEpoch: string;
-  acquireResidency(): RuntimeHostResidency;
+  acquireResidency(label: string): RuntimeHostResidency;
   /** Irreversible fail-stop latch; normal residency still uses acquireResidency(). */
   retainUntilProcessExit(): void;
   requestDrain(): void;
@@ -78,9 +91,11 @@ export interface RuntimeHostCompositionContext {
 
 export interface RuntimeHostComposition {
   readonly handlers: DomainOperationHandlerMap;
+  readonly moduleIds?: readonly string[];
   readonly continuity?: SessionContinuityService;
   readonly clientCapabilities?: ClientCapabilityService;
   readonly configurationChanges?: HostConfigurationChangeService;
+  readonly projectCatalogChanges?: HostProjectCatalogChangeService;
   readonly sessionCatalogChanges?: HostSessionCatalogChangeService;
   releaseConnection?(connectionId: string): void;
   beginDrain(): void;
@@ -88,25 +103,29 @@ export interface RuntimeHostComposition {
   close(): Promise<void>;
 }
 
-export type RuntimeHostCompositionFactory = (
-  context: RuntimeHostCompositionContext,
+export type RuntimeHostCompositionFactory<K extends StorageRootKind = 'interactive'> = (
+  context: RuntimeHostCompositionContext<K>,
 ) => Promise<RuntimeHostComposition>;
 
-interface RuntimeHostKernelCommonOptions {
-  owner: InteractiveRootOwner;
+interface RuntimeHostKernelCommonOptions<K extends StorageRootKind> {
+  owner: StateRootOwner<K>;
   handshakeTimeoutMs?: number;
   shutdownGraceMs?: number;
-  compositionFactory?: RuntimeHostCompositionFactory;
+  composition: RuntimeHostCompositionSource<K>;
   listenerSetFactory?: RuntimeHostListenerSetFactory;
+  accessAuthority?: RuntimeHostAccessAuthority;
 }
 
 export type RuntimeHostLifecycleMode = 'ephemeral' | 'service';
 
-export type RuntimeHostKernelOptions = RuntimeHostKernelCommonOptions &
-  (
-    | { lifecycleMode?: 'ephemeral'; idleGraceMs?: number }
-    | { lifecycleMode: 'service'; idleGraceMs?: never }
-  );
+export type RuntimeHostKernelOptions<K extends StorageRootKind = 'interactive'> =
+  RuntimeHostKernelCommonOptions<K> &
+    (
+      | { lifecycleMode?: 'ephemeral'; idleGraceMs?: number }
+      | { lifecycleMode: 'service'; idleGraceMs?: never }
+    );
+
+type RuntimeHostKernelInternalOptions = RuntimeHostKernelOptions<StorageRootKind>;
 
 type RuntimeHostLifecycle =
   | { readonly kind: 'ephemeral'; readonly idleGraceMs: number }
@@ -115,13 +134,17 @@ type RuntimeHostLifecycle =
 export class RuntimeHostKernel {
   readonly hostEpoch = randomUUID();
   readonly closed: Promise<void>;
-  readonly #options: RuntimeHostKernelOptions;
+  readonly #options: RuntimeHostKernelInternalOptions;
   readonly #createdAt = new Date().toISOString();
   readonly #handshakingTransports = new Set<RuntimeHostMessageTransport>();
   readonly #acceptedTransports = new Set<RuntimeHostMessageTransport>();
   readonly #connectionSessions = new Set<RuntimeHostConnectionSession>();
+  readonly #transportAuthorities = new Map<
+    RuntimeHostMessageTransport,
+    RuntimeHostListenerConnection['authority']
+  >();
   readonly #operationDrainWaiters = new Set<() => void>();
-  readonly #residencyDrainWaiters = new Set<() => void>();
+  readonly #residencies = new HostResidencyRegistry();
   readonly #lifecycle: RuntimeHostLifecycle;
   readonly #handshakeTimeoutMs: number;
   readonly #shutdownGraceMs: number;
@@ -129,7 +152,6 @@ export class RuntimeHostKernel {
   #state: HostLifecycleState = 'starting';
   #activeOperations = 0;
   #activeCommandOperations = 0;
-  #activeResidencies = 0;
   #retainedUntilProcessExit = false;
   #composition: RuntimeHostComposition | undefined;
   #compositionDrainBegun = false;
@@ -142,8 +164,9 @@ export class RuntimeHostKernel {
   #terminationRequired: RuntimeHostProcessTerminationRequiredError | undefined;
   #resolveClosed!: () => void;
   #rejectClosed!: (error: unknown) => void;
+  readonly #unsubscribeAccessRevocations: (() => void) | undefined;
 
-  private constructor(options: RuntimeHostKernelOptions) {
+  private constructor(options: RuntimeHostKernelInternalOptions) {
     this.#lifecycle = normalizeLifecycle(options);
     assertDuration(
       options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS,
@@ -154,6 +177,9 @@ export class RuntimeHostKernel {
     this.#handshakeTimeoutMs = options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
     this.#shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.#options = options;
+    this.#unsubscribeAccessRevocations = options.accessAuthority?.subscribeRevocations(
+      (credentialId) => this.#revokeCredentialConnections(credentialId),
+    );
     this.#operationHandlers = this.#createOperationHandlers(
       createUnavailableDomainOperationHandlers(),
     );
@@ -163,11 +189,13 @@ export class RuntimeHostKernel {
     });
   }
 
-  static async start(options: RuntimeHostKernelOptions): Promise<RuntimeHostKernel> {
-    const owner = authenticateInteractiveRootOwner(options.owner);
+  static async start<K extends StorageRootKind>(
+    options: RuntimeHostKernelOptions<K>,
+  ): Promise<RuntimeHostKernel> {
+    const owner = authenticateStateRootOwner(options.owner, options.owner.capability.kind);
     let host: RuntimeHostKernel | undefined;
     try {
-      host = new RuntimeHostKernel({ ...options, owner });
+      host = new RuntimeHostKernel(eraseRootKind(options, owner));
       await host.#start();
       return host;
     } catch (error) {
@@ -202,6 +230,14 @@ export class RuntimeHostKernel {
     return this.#acceptedTransports.size;
   }
 
+  get websocketEndpoints(): readonly string[] {
+    return this.#listeners?.websocketEndpoints ?? [];
+  }
+
+  get compositionDescriptor(): HostCompositionDescriptor {
+    return this.#options.composition.descriptor;
+  }
+
   close(): Promise<void> {
     this.#requestDrain();
     return this.closed;
@@ -218,40 +254,39 @@ export class RuntimeHostKernel {
   }
 
   async #start(): Promise<void> {
-    await assertInteractiveRootOwner(this.#options.owner);
+    await assertStateRootOwner(this.#options.owner, this.#options.owner.capability.kind);
+    await bindStateRootComposition(this.#options.owner.lease, this.compositionDescriptor.id);
     this.#listeners = await (this.#options.listenerSetFactory ?? startLocalRuntimeHostListenerSet)({
       rootId: this.#options.owner.capability.rootId,
       hostEpoch: this.hostEpoch,
       accept: (connection) => this.#accept(connection),
+      isReady: () => this.#state === 'ready' && !this.#shutdownRequested,
     });
     await this.#publishRegistration();
-    const compositionFactory = this.#options.compositionFactory;
-    if (compositionFactory) {
-      this.#state = 'recovering';
-      await this.#publishRegistration();
-      let settleCompositionStartup!: () => void;
-      this.#compositionStartup = new Promise((resolve) => {
-        settleCompositionStartup = resolve;
-      });
-      const compositionStartup = (async () => {
-        try {
-          this.#composition = await compositionFactory({
-            owner: this.#options.owner,
-            hostEpoch: this.hostEpoch,
-            acquireResidency: () => this.#acquireResidency(),
-            retainUntilProcessExit: () => this.#retainUntilProcessExit(),
-            requestDrain: () => this.#requestDrain(),
-          });
-          for (const session of this.#connectionSessions) session.attachGlobalChanges();
-          if (this.#shutdownRequested) this.#beginCompositionDrain();
-          this.#operationHandlers = this.#createOperationHandlers(this.#composition.handlers);
-          await this.#composition.recover();
-        } finally {
-          settleCompositionStartup();
-        }
-      })();
-      await Promise.race([compositionStartup, this.closed]);
-    }
+    this.#state = 'recovering';
+    await this.#publishRegistration();
+    let settleCompositionStartup!: () => void;
+    this.#compositionStartup = new Promise((resolve) => {
+      settleCompositionStartup = resolve;
+    });
+    const compositionStartup = (async () => {
+      try {
+        this.#composition = await this.#options.composition.create({
+          owner: this.#options.owner,
+          hostEpoch: this.hostEpoch,
+          acquireResidency: (label) => this.#acquireResidency(label),
+          retainUntilProcessExit: () => this.#retainUntilProcessExit(),
+          requestDrain: () => this.#requestDrain(),
+        });
+        for (const session of this.#connectionSessions) session.attachGlobalChanges();
+        if (this.#shutdownRequested) this.#beginCompositionDrain();
+        this.#operationHandlers = this.#createOperationHandlers(this.#composition.handlers);
+        await this.#composition.recover();
+      } finally {
+        settleCompositionStartup();
+      }
+    })();
+    await Promise.race([compositionStartup, this.closed]);
     if (this.#shutdownRequested) {
       this.#commitRequestedShutdownIfQuiescent();
       return;
@@ -263,9 +298,11 @@ export class RuntimeHostKernel {
 
   #accept(connection: RuntimeHostListenerConnection): void {
     const { transport } = connection;
+    this.#transportAuthorities.set(transport, connection.authority);
     this.#handshakingTransports.add(transport);
     void this.#serveConnection(connection).finally(() => {
       this.#handshakingTransports.delete(transport);
+      this.#transportAuthorities.delete(transport);
     });
   }
 
@@ -303,6 +340,7 @@ export class RuntimeHostKernel {
         resolveContinuity: () => this.#composition?.continuity,
         resolveClientCapabilities: () => this.#composition?.clientCapabilities,
         resolveConfigurationChanges: () => this.#composition?.configurationChanges,
+        resolveProjectCatalogChanges: () => this.#composition?.projectCatalogChanges,
         resolveSessionCatalogChanges: () => this.#composition?.sessionCatalogChanges,
         beginOperation: (request) => this.#beginOperation(request),
         onTeardown: releaseTransport,
@@ -330,7 +368,12 @@ export class RuntimeHostKernel {
   ): Promise<HostHandshakeResult> {
     const admittedState = await this.#readAdmissionState();
     if (!admittedState) {
-      return { kind: 'draining', hostEpoch: this.hostEpoch };
+      return {
+        kind: 'draining',
+        hostEpoch: this.hostEpoch,
+        compositionId: this.compositionDescriptor.id,
+        compositionRevision: this.compositionDescriptor.revision,
+      };
     }
     const selectedProtocol = negotiateProtocol(
       { min: hello.protocolMin, max: hello.protocolMax },
@@ -338,7 +381,8 @@ export class RuntimeHostKernel {
     );
     if (
       selectedProtocol === undefined ||
-      hello.compatibilityEpoch !== RUNTIME_HOST_COMPATIBILITY_EPOCH
+      hello.compatibilityEpoch !== RUNTIME_HOST_COMPATIBILITY_EPOCH ||
+      hello.compositionId !== this.compositionDescriptor.id
     ) {
       return {
         kind: 'incompatible',
@@ -346,6 +390,8 @@ export class RuntimeHostKernel {
         protocolMin: HOST_PROTOCOL.min,
         protocolMax: HOST_PROTOCOL.max,
         compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,
+        compositionId: this.compositionDescriptor.id,
+        compositionRevision: this.compositionDescriptor.revision,
         state: admittedState,
         replacement:
           this.#lifecycle.kind === 'ephemeral' && this.#isTrueIdle()
@@ -358,10 +404,13 @@ export class RuntimeHostKernel {
     this.#cancelIdle();
     return {
       kind: 'accepted',
+      rootId: this.#options.owner.capability.rootId,
       hostEpoch: this.hostEpoch,
       connectionId: randomUUID(),
       selectedProtocol,
       compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,
+      compositionId: this.compositionDescriptor.id,
+      compositionRevision: this.compositionDescriptor.revision,
       state: admittedState,
     };
   }
@@ -371,6 +420,12 @@ export class RuntimeHostKernel {
       throw new Error('Runtime Host connection residency underflow');
     }
     this.#settleLifecycleAfterWork();
+  }
+
+  #revokeCredentialConnections(credentialId: string): void {
+    for (const [transport, authority] of this.#transportAuthorities) {
+      if (authority.credentialId === credentialId) transport.abort();
+    }
   }
 
   async #beginOperation(
@@ -403,7 +458,7 @@ export class RuntimeHostKernel {
     return {
       acquireResidency: () => {
         if (sealed || finished) throw new Error('Runtime Host operation lease has ended');
-        return this.#acquireResidency();
+        return this.#acquireResidency(`operation.${frame.operation}`);
       },
       seal,
       finish: () => {
@@ -418,7 +473,7 @@ export class RuntimeHostKernel {
   async #hasLiveOwnerOrDrain(): Promise<boolean> {
     if (this.#isDraining()) return false;
     try {
-      await assertInteractiveRootOwner(this.#options.owner);
+      await assertStateRootOwner(this.#options.owner, this.#options.owner.capability.kind);
     } catch {
       void this.#commitShutdown().catch(() => undefined);
       return false;
@@ -447,20 +502,12 @@ export class RuntimeHostKernel {
     this.#settleLifecycleAfterWork();
   }
 
-  #acquireResidency(): RuntimeHostResidency {
-    this.#activeResidencies += 1;
+  #acquireResidency(label: string): RuntimeHostResidency {
+    const residency = this.#residencies.acquire(label);
     this.#cancelIdle();
-    let active = true;
     return {
       release: () => {
-        if (!active) return;
-        active = false;
-        if (this.#activeResidencies === 0) throw new Error('Runtime Host residency underflow');
-        this.#activeResidencies -= 1;
-        if (this.#activeResidencies === 0) {
-          for (const resolve of this.#residencyDrainWaiters) resolve();
-          this.#residencyDrainWaiters.clear();
-        }
+        residency.release();
         this.#settleLifecycleAfterWork();
       },
     };
@@ -469,7 +516,7 @@ export class RuntimeHostKernel {
   #retainUntilProcessExit(): void {
     if (this.#retainedUntilProcessExit) return;
     this.#retainedUntilProcessExit = true;
-    this.#activeResidencies += 1;
+    this.#residencies.acquire('process-retention');
     this.#cancelIdle();
   }
 
@@ -484,6 +531,8 @@ export class RuntimeHostKernel {
           ok: true,
           result: {
             ...this.#statusSnapshot(),
+            compositionModules: this.#composition?.moduleIds ?? [],
+            residencies: this.#residencies.snapshot(),
             protocolVersion: RUNTIME_HOST_PROTOCOL_VERSION,
             compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,
             pid: process.pid,
@@ -495,6 +544,10 @@ export class RuntimeHostKernel {
             logs: runtimeHostLogBuffer.snapshot(),
           },
         }),
+        'access.credential.issue': async (input) =>
+          issueAccessCredential(this.#options.accessAuthority, input),
+        'access.credential.revoke': async (input) =>
+          revokeAccessCredential(this.#options.accessAuthority, input),
       },
       domainHandlers,
     );
@@ -503,10 +556,12 @@ export class RuntimeHostKernel {
   #statusSnapshot(): HostStatusResult {
     return {
       hostEpoch: this.hostEpoch,
+      compositionId: this.compositionDescriptor.id,
+      compositionRevision: this.compositionDescriptor.revision,
       state: this.#state,
       connections: this.#acceptedTransports.size,
       activeOperations: this.#activeOperations,
-      activeResidencies: this.#activeResidencies,
+      activeResidencies: this.#residencies.activeCount,
     };
   }
 
@@ -522,8 +577,7 @@ export class RuntimeHostKernel {
   }
 
   #waitForResidencies(): Promise<void> {
-    if (this.#activeResidencies === 0) return Promise.resolve();
-    return new Promise((resolve) => this.#residencyDrainWaiters.add(resolve));
+    return this.#residencies.waitForEmpty();
   }
 
   #scheduleIdleIfNeeded(): void {
@@ -542,7 +596,7 @@ export class RuntimeHostKernel {
       this.#state === 'ready' &&
       this.#acceptedTransports.size === 0 &&
       this.#activeOperations === 0 &&
-      this.#activeResidencies === 0
+      this.#residencies.activeCount === 0
     );
   }
 
@@ -612,6 +666,7 @@ export class RuntimeHostKernel {
 
   async #closeResources(): Promise<void> {
     const errors: unknown[] = [];
+    this.#unsubscribeAccessRevocations?.();
     // Stop new admissions before any asynchronous shutdown bookkeeping. The
     // shutdown deadline may expire while publishing the draining registration;
     // leaving the listener open in that case strands an unreachable, ref'ed
@@ -662,6 +717,7 @@ export class RuntimeHostKernel {
 
   async #abortStartup(): Promise<void> {
     this.#state = 'draining';
+    this.#unsubscribeAccessRevocations?.();
     for (const transport of this.#handshakingTransports) transport.abort();
     for (const transport of this.#acceptedTransports) transport.abort();
     await this.#listeners?.closeAdmission().catch(() => undefined);
@@ -683,6 +739,8 @@ export class RuntimeHostKernel {
       protocolMin: HOST_PROTOCOL.min,
       protocolMax: HOST_PROTOCOL.max,
       compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,
+      compositionId: this.compositionDescriptor.id,
+      compositionRevision: this.compositionDescriptor.revision,
       state: this.#state,
       pid: process.pid,
       createdAt: this.#createdAt,
@@ -725,7 +783,9 @@ function assertDuration(value: number, label: string, minimum: 0 | 1): void {
   }
 }
 
-function normalizeLifecycle(options: RuntimeHostKernelOptions): RuntimeHostLifecycle {
+function normalizeLifecycle<K extends StorageRootKind>(
+  options: RuntimeHostKernelOptions<K>,
+): RuntimeHostLifecycle {
   const lifecycleMode: unknown = options.lifecycleMode;
   if (lifecycleMode === 'service') {
     if (Object.hasOwn(options, 'idleGraceMs')) {
@@ -739,4 +799,19 @@ function normalizeLifecycle(options: RuntimeHostKernelOptions): RuntimeHostLifec
   const idleGraceMs = options.idleGraceMs ?? DEFAULT_IDLE_GRACE_MS;
   assertDuration(idleGraceMs, 'idleGraceMs', 0);
   return { kind: 'ephemeral', idleGraceMs };
+}
+
+function eraseRootKind<K extends StorageRootKind>(
+  options: RuntimeHostKernelOptions<K>,
+  owner: StateRootOwner<K>,
+): RuntimeHostKernelInternalOptions {
+  return {
+    ...options,
+    owner,
+    composition: {
+      descriptor: options.composition.descriptor,
+      create: (context: RuntimeHostCompositionContext<StorageRootKind>) =>
+        options.composition.create({ ...context, owner }),
+    },
+  };
 }

@@ -20,7 +20,12 @@ test('drains clean half-open input before reporting typed read EOF', async () =>
       (error: unknown) => error instanceof RuntimeHostTransportError && error.code === 'read_eof',
     );
 
-    const reply = encodeProtocolMessage({ kind: 'draining', hostEpoch: 'host-1' });
+    const reply = encodeProtocolMessage({
+      kind: 'draining',
+      hostEpoch: 'host-1',
+      compositionId: 'maka.interactive',
+      compositionRevision: '1',
+    });
     const received = readSocket(peer, reply.byteLength + 1);
     await transport.write(reply);
     assert.deepEqual(await received, Buffer.concat([reply, Buffer.from('\n')]));
@@ -30,6 +35,22 @@ test('drains clean half-open input before reporting typed read EOF', async () =>
     transport.abort(failure);
     await transport.closed;
     await assert.rejects(transport.read(0), (error: unknown) => error === failure);
+  });
+});
+
+test('normalizes a native socket failure as a typed transport interruption', async () => {
+  await withSocketPair(async (transport) => {
+    const failure = Object.assign(new Error('connection reset'), { code: 'ECONNRESET' });
+    const pending = transport.read(1_000);
+    transport.socket.destroy(failure);
+    await assert.rejects(
+      pending,
+      (error: unknown) =>
+        error instanceof RuntimeHostTransportError &&
+        error.code === 'closed' &&
+        error.cause === failure,
+    );
+    await transport.closed;
   });
 });
 
@@ -96,6 +117,7 @@ test('decodes split UTF-8 and coalesced Local IPC frames', async () => {
       protocolMin: RUNTIME_HOST_PROTOCOL_VERSION,
       protocolMax: RUNTIME_HOST_PROTOCOL_VERSION,
       compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,
+      compositionId: 'maka.interactive',
     };
     const status = { requestId: 'status-1', operation: 'host.status', input: {} } as const;
     const wire = Buffer.concat([

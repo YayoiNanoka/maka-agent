@@ -1,8 +1,16 @@
-import { HOST_OPERATION_SPECS, type OperationKey } from '../protocol/index.js';
+import {
+  HOST_OPERATION_SPECS,
+  operationUsesHostPaths,
+  type AccessCredentialPrincipalKind,
+  type ClientCapabilityClientFrame,
+  type OperationKey,
+  type RequestFrame,
+} from '../protocol/index.js';
 
 export interface RuntimeHostConnectionAuthority {
-  readonly principalKind: 'local_owner' | 'access_credential';
+  readonly principalKind: 'local_owner' | AccessCredentialPrincipalKind;
   readonly principalId: string;
+  readonly credentialId?: string;
   readonly operationGrants: 'all' | readonly OperationKey[];
   readonly canPublishClientCapabilities: boolean;
   readonly canUseHostPaths: boolean;
@@ -22,6 +30,12 @@ export function createRuntimeHostConnectionAuthority(
   if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(input.principalId)) {
     throw new Error('Runtime Host connection principal is invalid');
   }
+  if (
+    input.principalKind !== 'local_owner' &&
+    !/^[A-Za-z0-9_.:-]{1,128}$/.test(input.credentialId ?? '')
+  ) {
+    throw new Error('Runtime Host access credential identity is invalid');
+  }
   const operationGrants =
     input.operationGrants === 'all'
       ? 'all'
@@ -34,4 +48,42 @@ export function createRuntimeHostConnectionAuthority(
           }),
         );
   return Object.freeze({ ...input, operationGrants });
+}
+
+export function authorizeRuntimeHostOperation(
+  authority: RuntimeHostConnectionAuthority,
+  frame: RequestFrame,
+): boolean {
+  if (
+    (frame.operation === 'access.credential.issue' ||
+      frame.operation === 'access.credential.revoke') &&
+    authority.principalKind !== 'local_owner'
+  ) {
+    return false;
+  }
+  if (authority.operationGrants !== 'all' && !authority.operationGrants.includes(frame.operation)) {
+    return false;
+  }
+  if (
+    (frame.operation === 'client.capability.replace' ||
+      frame.operation === 'client.capability.unregister') &&
+    !authority.canPublishClientCapabilities
+  ) {
+    return false;
+  }
+  return authority.canUseHostPaths || !operationUsesHostPaths(frame);
+}
+
+export function hasRuntimeHostOperationGrant(
+  authority: RuntimeHostConnectionAuthority,
+  operation: OperationKey,
+): boolean {
+  return authority.operationGrants === 'all' || authority.operationGrants.includes(operation);
+}
+
+export function authorizeClientCapabilityFrame(
+  authority: RuntimeHostConnectionAuthority,
+  _frame: ClientCapabilityClientFrame,
+): boolean {
+  return authority.canPublishClientCapabilities;
 }
