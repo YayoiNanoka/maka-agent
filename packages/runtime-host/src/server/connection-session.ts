@@ -36,6 +36,10 @@ import type {
   HostProjectCatalogChangeService,
   ProjectCatalogChangeConnection,
 } from './project-catalog-change-service.js';
+import type {
+  HostScheduledTaskChangeService,
+  ScheduledTaskChangeConnection,
+} from './scheduled-task-change-service.js';
 import type { RuntimeHostConnectionAuthority } from './connection-authority.js';
 import {
   authorizeClientCapabilityFrame,
@@ -63,6 +67,7 @@ export interface RuntimeHostConnectionSessionOptions {
   resolveConfigurationChanges?(): HostConfigurationChangeService | undefined;
   resolveProjectCatalogChanges?(): HostProjectCatalogChangeService | undefined;
   resolveSessionCatalogChanges?(): HostSessionCatalogChangeService | undefined;
+  resolveScheduledTaskChanges?(): HostScheduledTaskChangeService | undefined;
   beginOperation(frame: RequestFrame): Promise<ConnectionOperationLease | HostOperationErrorCode>;
   onTeardown(): void;
 }
@@ -71,6 +76,7 @@ export class RuntimeHostConnectionSession {
   readonly #options: RuntimeHostConnectionSessionOptions;
   readonly #writer: BoundedSerialOutboundWriter;
   readonly #requests = new Map<string, Promise<void>>();
+  #transcriptPageTail: Promise<void> = Promise.resolve();
   #inFlightStatusRequests = 0;
   #continuityService: SessionContinuityService | undefined;
   #continuity: SessionContinuityConnection | undefined;
@@ -80,6 +86,7 @@ export class RuntimeHostConnectionSession {
   #configurationChanges: ConfigurationChangeConnection | undefined;
   #projectCatalogChanges: ProjectCatalogChangeConnection | undefined;
   #sessionCatalogChanges: SessionCatalogChangeConnection | undefined;
+  #scheduledTaskChanges: ScheduledTaskChangeConnection | undefined;
   #inputClosed = false;
   #closed = false;
 
@@ -117,6 +124,7 @@ export class RuntimeHostConnectionSession {
     this.#detachConfigurationChanges();
     this.#detachProjectCatalogChanges();
     this.#detachSessionCatalogChanges();
+    this.#detachScheduledTaskChanges();
     const outcome = await Promise.race([
       Promise.allSettled([...this.#requests.values()]).then(() => 'drained' as const),
       this.#options.transport.closed.then(() => 'closed' as const),
@@ -167,7 +175,11 @@ export class RuntimeHostConnectionSession {
 
   #dispatch(frame: RequestFrame): void {
     if (frame.operation === 'host.status') this.#inFlightStatusRequests += 1;
-    const task = this.#handleRequest(frame)
+    const handling =
+      frame.operation === 'session.transcript.page'
+        ? this.#transcriptPageTail.then(() => this.#handleRequest(frame))
+        : this.#handleRequest(frame);
+    const task = handling
       .catch(() => this.#teardown())
       .finally(() => {
         if (this.#requests.get(frame.requestId) === task) {
@@ -176,9 +188,13 @@ export class RuntimeHostConnectionSession {
         }
       });
     this.#requests.set(frame.requestId, task);
+    if (frame.operation === 'session.transcript.page') {
+      this.#transcriptPageTail = task.catch(() => undefined);
+    }
   }
 
   async #handleRequest(frame: RequestFrame): Promise<void> {
+    if (this.#closed) return;
     if (!authorizeRuntimeHostOperation(this.#options.connection.authority, frame)) {
       if (this.#closed) return;
       await this.#writer.enqueue(
@@ -205,7 +221,7 @@ export class RuntimeHostConnectionSession {
       const continuity =
         frame.operation === 'subscription.open' ||
         frame.operation === 'subscription.close' ||
-        frame.operation === 'session.transcript.query'
+        frame.operation === 'session.transcript.page'
           ? this.#ensureContinuity()
           : undefined;
       const response = await dispatchOperation(frame, this.#options.resolveHandlers(), {
@@ -320,6 +336,7 @@ export class RuntimeHostConnectionSession {
     this.#attachConfigurationChanges();
     this.#attachProjectCatalogChanges();
     this.#attachSessionCatalogChanges();
+    this.#attachScheduledTaskChanges();
   }
 
   #detachConfigurationChanges(): void {
@@ -329,7 +346,6 @@ export class RuntimeHostConnectionSession {
 
   #attachProjectCatalogChanges(): void {
     if (
-      !this.#options.connection.authority.canUseHostPaths ||
       !hasRuntimeHostOperationGrant(this.#options.connection.authority, 'project.catalog.query')
     ) {
       return;
@@ -376,6 +392,28 @@ export class RuntimeHostConnectionSession {
     this.#sessionCatalogChanges = undefined;
   }
 
+  #attachScheduledTaskChanges(): void {
+    if (!hasRuntimeHostOperationGrant(this.#options.connection.authority, 'scheduled-task.query')) {
+      return;
+    }
+    const service = this.#options.resolveScheduledTaskChanges?.();
+    if (!service || this.#scheduledTaskChanges) return;
+    this.#scheduledTaskChanges = service.attachConnection(this.#options.connection.connectionId, {
+      send: (frame) => {
+        try {
+          return this.#writer.enqueue(frame).flushed;
+        } catch (error) {
+          return Promise.reject(error);
+        }
+      },
+    });
+  }
+
+  #detachScheduledTaskChanges(): void {
+    this.#scheduledTaskChanges?.close();
+    this.#scheduledTaskChanges = undefined;
+  }
+
   #teardown(): void {
     if (this.#closed) return;
     this.#closed = true;
@@ -385,6 +423,7 @@ export class RuntimeHostConnectionSession {
     this.#detachConfigurationChanges();
     this.#detachProjectCatalogChanges();
     this.#detachSessionCatalogChanges();
+    this.#detachScheduledTaskChanges();
     this.#writer.close();
     this.#options.transport.abort();
     this.#options.onTeardown();

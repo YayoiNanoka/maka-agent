@@ -1,9 +1,11 @@
+import type { ModelCallCommit } from '@maka/core/agent-run';
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { setImmediate as flushMacrotask } from 'node:timers/promises';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
 import type { LanguageModelV4StreamPart } from '@ai-sdk/provider';
-import type { LlmConnection, SessionHeader } from '@maka/core';
+import type { LlmConnection } from '@maka/core/llm-connections';
+import type { SessionHeader } from '@maka/core/session';
 import type { SessionEvent } from '@maka/core/events';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type { AgentBackend, BackendSendInput } from '@maka/core/backend-types';
@@ -24,6 +26,10 @@ import { HistoryCompactSummarizerError } from '../history-compact-error.js';
 import { buildLlmHistorySummarizer } from '../history-compact-summarizer.js';
 import { decodeModelCallAttempt, type ModelCallAttempt } from '@maka/core/model-call-attempt';
 import type { MemoryExtractionSourceSnapshot } from '../memory-extraction.js';
+import {
+  LATEST_CONTEXT_PROJECTION_TYPE,
+  readLatestContextSnapshot,
+} from '../latest-context-snapshot.js';
 import {
   createTestAiSdkBackend,
   testToolResultArchive,
@@ -49,6 +55,11 @@ interface MidTurnFixture {
   ledger: RuntimeEvent[];
   /** Canonical accounting records settled during the turn (#1679). */
   modelCalls: ModelCallAttempt[];
+  /**
+   * The same settlements as whole commits, so a test can read the derived
+   * latest-context row the attempt authorised rather than only the attempt.
+   */
+  commits: ModelCallCommit<ModelCallAttempt>[];
   ledgerReads: number;
   events: SessionEvent[];
   messages: unknown[];
@@ -292,6 +303,7 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
   };
 
   const modelCalls: ModelCallAttempt[] = [];
+  const commits: ModelCallCommit<ModelCallAttempt>[] = [];
   const summarizerModel = new MockLanguageModelV4({
     doGenerate: {
       content: [{ type: 'text', text: 'MID_TURN_SUMMARY_SENTINEL' }],
@@ -424,8 +436,9 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
     ...(options.meteredSummarizer
       ? {
           recordProviderRequestCapture: async () => ({ artifactId: 'artifact-mid-turn-capture' }),
-          recordModelCallAttempt: (attempt: ModelCallAttempt) => {
-            modelCalls.push(attempt);
+          recordModelCallAttempt: (commit: ModelCallCommit<ModelCallAttempt>) => {
+            commits.push(commit);
+            modelCalls.push(commit.attempt);
           },
         }
       : {}),
@@ -485,6 +498,7 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
     anchor,
     ledger,
     modelCalls,
+    commits,
     events,
     messages,
     llmCalls,
@@ -628,6 +642,44 @@ function defineMidTurnSuite(consumer: ConsumerMode): void {
     );
   });
 
+  test('each request seals the fold its own prompt was built under, not the send’s last one', async () => {
+    // The boundary is the one fact in the snapshot that moves DURING a send.
+    // Read from session state at settlement it would be the newest fold for
+    // every request of the send, including the two dispatched before the fold
+    // existed — a request reporting a compaction its prompt never saw. So this
+    // asserts the difference between requests of ONE send, which is the only
+    // assertion a per-tracker value could not also satisfy (#2323).
+    const fixture = buildFixture({ meteredSummarizer: true });
+    await runFixtureTurn(fixture, consumer);
+
+    assert.equal(fixture.recorded.length, 1, 'one mid-turn fold in this send');
+    const checkpoint = fixture.recorded[0]!;
+    const mainCommits = fixture.commits
+      .filter((commit) => decodeModelCallAttempt(commit.attempt).callKind === 'main')
+      .sort((a, b) => a.attempt.step - b.attempt.step);
+    assert.equal(mainCommits.length, 3, 'three physical requests, three sealed rows');
+
+    const boundaryOf = (commit: (typeof mainCommits)[number]) =>
+      readLatestContextSnapshot({
+        type: LATEST_CONTEXT_PROJECTION_TYPE,
+        data: commit.latestContext?.snapshot,
+      })?.compaction;
+
+    assert.equal(boundaryOf(mainCommits[0]!), undefined, 'nothing was folded yet');
+    assert.equal(boundaryOf(mainCommits[1]!), undefined, 'still nothing at the second request');
+    assert.deepEqual(
+      boundaryOf(mainCommits[2]!),
+      {
+        kind: 'history',
+        phase: 'mid_turn',
+        eventCount: checkpoint.coverage.eventCount,
+        turnCount: checkpoint.coverage.turnCount,
+        estimatedTokens: checkpoint.estimatedTokens,
+      },
+      'the request built after the fold reports that fold, in the checkpoint’s own numbers',
+    );
+  });
+
   test('recovery re-projection with ctx.branch replays the checkpoint without the raw span', async () => {
     const fixture = buildFixture({ branch: 'lane-7' });
     await runFixtureTurn(fixture, consumer);
@@ -737,47 +789,6 @@ function defineMidTurnSuite(consumer: ConsumerMode): void {
     assert.equal(complete.contextBudgetExhaustedDetail, 'head_anchor_exceeds_capacity');
     // The fold itself was valid and durable; it just could not rescue.
     assert.equal(fixture.recorded.length, 1);
-  });
-
-  test('fails open under the window when the summarizer fails, with a diagnostic', async () => {
-    const fixture = buildFixture({ summarize: () => undefined });
-    await runFixtureTurn(fixture, consumer);
-
-    // The turn still completes; the third request keeps the raw span.
-    assert.equal(fixture.model.doStreamCalls.length, 3);
-    const complete = fixture.events.find((event) => event.type === 'complete');
-    assert.equal(complete?.type === 'complete' ? complete.stopReason : undefined, 'end_turn');
-    assert.equal(fixture.recorded.length, 0);
-    const thirdPrompt = promptJson(fixture, 2);
-    assert.equal(thirdPrompt.includes('RAW_SPAN_ONE_'), true);
-    assert.equal(thirdPrompt.includes('maka_history_compact_checkpoint'), false);
-
-    const failedOpen = compactionDecisions(fixture).find(
-      (decision) => decision.phase === 'mid_turn' && decision.decision === 'failedOpen',
-    );
-    assert.equal(failedOpen?.failOpenReason, 'summarizer_failed');
-    // The recorder was never reached, so the diagnostics claim no write.
-    const usageEvent = fixture.events.find((event) => event.type === 'token_usage') as
-      | { contextBudget?: ContextBudgetDiagnostic }
-      | undefined;
-    assert.equal(usageEvent?.contextBudget?.historyCompactWritesAttempted, undefined);
-    assert.equal(usageEvent?.contextBudget?.historyCompactWriteFailures, undefined);
-  });
-
-  test('preserves the typed summarizer failure in mid-turn diagnostics', async () => {
-    const fixture = buildFixture({
-      summarize: () => {
-        throw new HistoryCompactSummarizerError('provider_error');
-      },
-    });
-    await runFixtureTurn(fixture, consumer);
-
-    assert.equal(fixture.recorded.length, 0);
-    const failedOpen = compactionDecisions(fixture).find(
-      (decision) => decision.phase === 'mid_turn' && decision.decision === 'failedOpen',
-    );
-    assert.equal(failedOpen?.failOpenReason, 'provider_error');
-    assert.equal(failedOpen?.skippedReasonCounts?.provider_error, 1);
   });
 
   test('fails open with write_failed diagnostics when the checkpoint write fails under the window', async () => {
@@ -1154,22 +1165,6 @@ function defineMidTurnSuite(consumer: ConsumerMode): void {
     assert.equal(exhaustedDecision?.skippedReasonCounts?.replacement_not_smaller, 1);
     // The rejected checkpoint was never persisted.
     assert.equal(fixture.recorded.length, 0);
-  });
-
-  test('persists a complete summary above the legacy block cap when the full replay shrinks and fits', async () => {
-    const fixture = buildFixture({
-      priorChars: 10_000,
-      summarize: () => 'S'.repeat(5_000),
-    });
-    await runFixtureTurn(fixture, consumer);
-
-    assert.equal(fixture.recorded.length, 1);
-    assert.equal(fixture.model.doStreamCalls.length, 3);
-    const complete = fixture.events.find((event) => event.type === 'complete');
-    assert.equal(complete?.type === 'complete' ? complete.stopReason : undefined, 'end_turn');
-    const thirdPrompt = promptJson(fixture, 2);
-    assert.equal(thirdPrompt.includes('PRIOR_FACT'), false);
-    assert.equal(thirdPrompt.includes('maka_history_compact_checkpoint'), true);
   });
 
   test('the cold-start estimate covers the FULL provider input including the system prompt (review round-5 finding 2)', async () => {

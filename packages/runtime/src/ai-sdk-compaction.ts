@@ -1030,6 +1030,14 @@ export class AiSdkCompaction {
         turnId,
         charsPerToken: this.input.contextBudget?.charsPerToken,
         eligibleToolCallIds,
+        completedToolCalls: options.completedSteps.flatMap((step, stepNumber) =>
+          (step.toolCalls ?? []).map((call) => ({
+            toolCallId: call.toolCallId,
+            toolName: call.toolName,
+            input: call.input,
+            stepNumber,
+          })),
+        ),
         archivedPlaceholders,
         archiveToolResult: async (candidate) => {
           return await Promise.resolve(
@@ -2193,6 +2201,8 @@ export function hasActiveToolResultPruneDiagnosticPatch(
 ): boolean {
   return (
     (patch.activePrunedToolResults ?? 0) > 0 ||
+    (patch.activeSupersededToolResults ?? 0) > 0 ||
+    (patch.activeDuplicateToolResults ?? 0) > 0 ||
     (patch.activeArchiveFailures ?? 0) > 0 ||
     (patch.activeEstimatedTokensSaved ?? 0) > 0
   );

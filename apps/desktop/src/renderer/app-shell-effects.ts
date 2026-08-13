@@ -1,22 +1,14 @@
 import { useEffect, useEffectEvent, useLayoutEffect } from 'react';
 import { useHotkeys } from '@astryxdesign/core/hooks';
-import type {
-  ConnectionEvent,
-  PlanReminder,
-  SessionChangedEvent,
-  SessionEvent,
-  SessionEventStreamSnapshot,
-  SessionSummary,
-  StoredMessage,
-  ThemePalette,
-  ThemePreference,
-  UiLocale,
-} from '@maka/core';
-import {
-  generalizedErrorMessageChinese,
-  sessionExpectsEventStream,
-  type ShellRunUpdate,
-} from '@maka/core';
+import type { ConnectionEvent } from '@maka/core/connections';
+import type { SessionChangedEvent, SessionSummary, StoredMessage } from '@maka/core/session';
+import type { SessionEvent } from '@maka/core/events';
+import type { SessionEventStreamSnapshot } from '@maka/core/session-event-health';
+import type { ThemePalette, ThemePreference } from '@maka/core/settings';
+import type { UiLocale } from '@maka/core/ui-locale';
+import { generalizedErrorMessageChinese } from '@maka/core/redaction';
+import { sessionExpectsEventStream } from '@maka/core/session-event-health';
+import { type ShellRunUpdate } from '@maka/core/events';
 import type { LiveTurnProjection, NavSelection } from '@maka/ui';
 import { messageReadErrorMessage } from './app-shell-copy';
 import { getDesktopConversationCopy } from './locales/conversation-copy.js';
@@ -35,7 +27,10 @@ import {
   persistableSessionWorkbarPanels,
   type SessionWorkbarPanelsState,
 } from './session-workbar-tabs.js';
-import type { WindowCommand } from '../preload/bridge-contract.js';
+import type {
+  DesktopRuntimeHostProfileChangedEvent,
+  WindowCommand,
+} from '../preload/bridge-contract.js';
 import {
   mergeShellRunNotification,
   mergeShellRunUpdates,
@@ -213,6 +208,7 @@ export function useAppShellBootstrapSubscriptions(options: {
   /** Releases a send's pending claim once the authority names that turn. */
   confirmLiveTurn: (sessionId: string, turnId: string) => void;
   clearSessionRendererState: (sessionId: string) => void;
+  clearRuntimeHostRendererState: () => void;
   createSession: () => Promise<void> | void;
   handleConnectionEvent: (event: ConnectionEvent) => void;
   openHelp: () => void;
@@ -227,7 +223,7 @@ export function useAppShellBootstrapSubscriptions(options: {
   refreshConnections: () => Promise<void>;
   refreshMemoryActive: (failureContext?: 'load') => Promise<void>;
   refreshMessages: (sessionId: string) => Promise<boolean>;
-  refreshPlanReminders: (options?: { shouldShowError?: () => boolean }) => Promise<void>;
+  refreshScheduledTasks: (options?: { shouldShowError?: () => boolean }) => Promise<void>;
   refreshProjects: () => Promise<unknown>;
   refreshShellSettings: () => Promise<void>;
   refreshSkills: (options?: { shouldShowError?: () => boolean }) => Promise<void>;
@@ -247,11 +243,23 @@ export function useAppShellBootstrapSubscriptions(options: {
     void options.refreshSkills();
     void options.refreshManagedSkillSources();
     void options.refreshBundledSkillCatalog();
-    void options.refreshPlanReminders();
+    void options.refreshScheduledTasks();
     void options.applyE2eFixture();
   });
   const handleConnectionSubscriptionEvent = useEffectEvent((event: ConnectionEvent) => {
     options.handleConnectionEvent(event);
+  });
+  const handleRuntimeHostChange = useEffectEvent((event: DesktopRuntimeHostProfileChangedEvent) => {
+    if (event.targetChanged) options.clearRuntimeHostRendererState();
+    if (event.readiness !== 'ready') return;
+    void options.refreshProjects();
+    void options.refreshSessions();
+    void options.refreshConnections();
+    void options.refreshMemoryActive('load');
+    void options.refreshSkills();
+    void options.refreshManagedSkillSources();
+    void options.refreshBundledSkillCatalog();
+    void options.refreshScheduledTasks();
   });
   // PR-2088: the macOS application menu routes New Task / Settings / Keyboard
   // Shortcuts here through one channel. The renderer already owns these
@@ -309,20 +317,20 @@ export function useAppShellBootstrapSubscriptions(options: {
     }
     },
   );
-  const handlePlanChange = useEffectEvent(() => {
-    void options.refreshPlanReminders();
+  const handleScheduledTaskChange = useEffectEvent(() => {
+    void options.refreshScheduledTasks();
   });
-  const handlePlanDue = useEffectEvent((reminder: PlanReminder) => {
+  const handleScheduledTaskDue = useEffectEvent((task: { id: string; title: string }) => {
     const copy = getShellRemainingCopy(options.uiLocale).notifications;
-    void options.refreshPlanReminders();
+    void options.refreshScheduledTasks();
     options.toastApi.toast({
-      title: copy.planReminder,
-      description: reminder.title,
+      title: copy.scheduledTask,
+      description: task.title,
       variant: 'info',
       duration: 8000,
       action: {
         label: copy.viewScheduledTasks,
-        onClick: () => options.setNavSelection({ section: 'automations', module: 'plan-reminders' }),
+        onClick: () => options.setNavSelection({ section: 'automations', module: 'scheduled-tasks' }),
       },
     });
   });
@@ -377,22 +385,25 @@ export function useAppShellBootstrapSubscriptions(options: {
     // Non-critical: defer to next frame so the first paint isn't blocked.
     requestAnimationFrame(runDeferredStartupRefreshes);
     const unsubscribeConnections = window.maka.connections.subscribeEvents(handleConnectionSubscriptionEvent);
+    const unsubscribeRuntimeHostChanges =
+      window.maka.runtimeHostProfiles.subscribeChanges(handleRuntimeHostChange);
     const unsubscribeSettingsExternal = window.maka.settings.subscribeExternalChanged(() => {
       void options.refreshShellSettings();
       void options.refreshConnections();
     });
     const unsubscribeSessionChanges = window.maka.sessions.subscribeChanges(handleSessionChange);
-    const unsubscribePlanChanges = window.maka.plans.subscribeChanges(handlePlanChange);
-    const unsubscribePlanDue = window.maka.plans.subscribeDue(handlePlanDue);
+    const unsubscribeScheduledTaskChanges = window.maka.scheduledTasks.subscribeChanges(handleScheduledTaskChange);
+    const unsubscribeScheduledTaskDue = window.maka.scheduledTasks.subscribeDue(handleScheduledTaskDue);
     const unsubscribeWindowCommand = window.maka.appWindow.subscribeCommand(handleWindowCommand);
     markRendererMounted();
     return () => {
       cleanupPendingRefs();
       unsubscribeConnections();
+      unsubscribeRuntimeHostChanges();
       unsubscribeSettingsExternal();
       unsubscribeSessionChanges();
-      unsubscribePlanChanges();
-      unsubscribePlanDue();
+      unsubscribeScheduledTaskChanges();
+      unsubscribeScheduledTaskDue();
       unsubscribeWindowCommand();
     };
   }, []);
@@ -404,6 +415,7 @@ export function useActiveSessionEvents(options: {
   activeIdRef: RefBox<string | undefined>;
   handleEvent: (sessionId: string, event: SessionEvent) => void;
   markSessionReadLocally: (sessionId: string, readMessages: readonly StoredMessage[]) => void;
+  onEventSeeded?: (sessionId: string) => void;
   setMessageLoadErrorBySession: (updater: (current: Record<string, string>) => Record<string, string>) => void;
   setMessageLoadPending: (pending: boolean) => void;
   setMessages: (messages: StoredMessage[]) => void;
@@ -443,6 +455,9 @@ export function useActiveSessionEvents(options: {
       };
     });
     options.handleEvent(sessionId, event);
+  });
+  const markEventSeeded = useEffectEvent((sessionId: string) => {
+    options.onEventSeeded?.(sessionId);
   });
   const markSessionEventStreamClosed = useEffectEvent((sessionId: string) => {
     options.setSessionEventHealthBySession((current) => {
@@ -485,9 +500,13 @@ export function useActiveSessionEvents(options: {
       .catch((error) => {
         applyReadError(activeId, error, () => disposed);
       });
-    const unsubscribe = window.maka.sessions.subscribeEvents(activeId, (event) => {
-      handleSessionEvent(activeId, event);
-    });
+    const unsubscribe = window.maka.sessions.subscribeEvents(
+      activeId,
+      (event) => {
+        handleSessionEvent(activeId, event);
+      },
+      () => markEventSeeded(activeId),
+    );
     return () => {
       disposed = true;
       unsubscribe();

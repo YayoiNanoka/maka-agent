@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   createRuntimeHostReconnectingConnection,
+  remoteRuntimeHostUnavailableError,
   RuntimeHostOperationError,
   RuntimeHostPermanentReconnectError,
   RuntimeHostRequestInterruptedError,
@@ -130,7 +131,13 @@ test('a Session observation reopens safely after its first connection starts dra
     connect: async () => replacement.connection,
   });
 
-  assert.equal(await connection.openSessionSubscription({ sessionId: 'session-1' }), subscription);
+  assert.equal(
+    await connection.openSessionSubscription({
+      sessionId: 'session-1',
+      transcript: { kind: 'none' },
+    }),
+    subscription,
+  );
   assert.equal(first.openedSubscriptions, 1);
   assert.equal(replacement.openedSubscriptions, 1);
   await connection.close();
@@ -156,6 +163,34 @@ test('a reconnecting Client rejects a different Host composition permanently', a
 
   assert.ok(fatalError instanceof RuntimeHostPermanentReconnectError);
   assert.match(fatalError.message, /composition changed/u);
+  await connection.close();
+});
+
+test('a reconnecting Client stops after its remote credential is rejected', async () => {
+  const first = connectionHarness('first', () => undefined);
+  let attempts = 0;
+  let fatalError: Error | undefined;
+  const connection = await createRuntimeHostReconnectingConnection({
+    initialConnection: first.connection,
+    connect: async () => {
+      attempts += 1;
+      throw remoteRuntimeHostUnavailableError(
+        'Runtime Host profile office',
+        'authentication_failed',
+      );
+    },
+    backoff: { minMs: 0, maxMs: 0 },
+    onFatalError: (error) => {
+      fatalError = error;
+    },
+  });
+
+  first.disconnect();
+  await connection.closed;
+
+  assert.equal(attempts, 1);
+  assert.ok(fatalError instanceof RuntimeHostPermanentReconnectError);
+  assert.match(fatalError.message, /rejected its access credential/u);
   await connection.close();
 });
 
@@ -196,6 +231,32 @@ test('reconnect lifecycle close waits for a resource returned after cancellation
   assert.equal(closeSettled, true);
 });
 
+test('reconnect lifecycle quiescence suppresses replacement until it is resumed', async () => {
+  const first = connectionHarness('first', () => undefined);
+  const replacement = connectionHarness('replacement', () => undefined);
+  const connected = deferred();
+  let connectCalls = 0;
+  const lifecycle = await startRuntimeHostReconnectLifecycle({
+    initial: first.connection,
+    connect: async () => {
+      connectCalls += 1;
+      connected.resolve();
+      return replacement.connection;
+    },
+  });
+
+  const quiescence = lifecycle.quiesce();
+  assert.equal(quiescence.current, first.connection);
+  first.disconnect();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(connectCalls, 0);
+
+  quiescence.resume();
+  await connected.promise;
+  assert.equal(connectCalls, 1);
+  await lifecycle.close();
+});
+
 function connectionHarness(
   id: string,
   request: (operation: DirectRequestOperationKey, input: unknown) => unknown,
@@ -232,6 +293,7 @@ function connectionHarness(
     subscribeConfigurationChanges: () => () => {},
     subscribeProjectCatalogChanges: () => () => {},
     subscribeSessionCatalogChanges: () => () => {},
+    subscribeScheduledTaskChanges: () => () => {},
     close: async () => resolveClosed(),
   } as unknown as RuntimeHostConnection;
   return {

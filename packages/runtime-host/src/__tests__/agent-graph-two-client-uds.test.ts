@@ -7,10 +7,12 @@ import { test } from 'node:test';
 import {
   agentGraphIdForRootSession,
   type AgentGraphClientChangedListener,
-  type AgentGraphClientSnapshot,
   type AgentGraphCoordinator,
+} from '@maka/runtime/stream-graph-coordinator';
+import {
+  type AgentGraphClientSnapshot,
   type AgentGraphOperatorInspection,
-} from '@maka/runtime';
+} from '@maka/runtime/stream-graph-read-model';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import {
   connectRuntimeHost,
@@ -96,7 +98,10 @@ test('two Clients query and control one Agent graph through Session invalidation
   try {
     desktop = await connect(root, 'desktop');
     tui = await connect(root, 'tui');
-    subscription = await desktop.openSessionSubscription({ sessionId: ROOT_SESSION_ID });
+    subscription = await desktop.openSessionSubscription({
+      sessionId: ROOT_SESSION_ID,
+      transcript: { kind: 'none' },
+    });
 
     const [desktopSnapshot, tuiSnapshot] = await Promise.all([
       desktop.request('agent.graph.query', { rootSessionId: ROOT_SESSION_ID }),

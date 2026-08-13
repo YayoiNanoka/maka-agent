@@ -1,6 +1,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_SESSION_METADATA_SCHEMA_VERSION = 22;
+export const SQLITE_SESSION_METADATA_SCHEMA_VERSION = 23;
+export const SQLITE_SESSION_MESSAGE_CHUNK_BYTES = 64 * 1024;
+export const SQLITE_SESSION_MESSAGE_CHUNK_MARKER = '{"$maka":"session-message-chunks-v1"}';
 
 export const SQLITE_AGENT_GRAPH_CONTROL_TABLES = [
   'agent_graph_intent_claims',
@@ -848,6 +850,34 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
           messages.session_id = session_metadata.session_id
           AND messages.message_type = 'user'
       );
+  `,
+  ],
+  [
+    23,
+    `
+    CREATE TABLE session_message_payloads (
+      session_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence >= 0),
+      record_bytes INTEGER NOT NULL CHECK (record_bytes > ${SQLITE_SESSION_MESSAGE_CHUNK_BYTES}),
+      sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+      PRIMARY KEY(session_id, sequence),
+      FOREIGN KEY(session_id, sequence)
+        REFERENCES session_messages(session_id, sequence)
+        ON DELETE CASCADE
+    ) WITHOUT ROWID;
+
+    CREATE TABLE session_message_chunks (
+      session_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence >= 0),
+      chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+      data BLOB NOT NULL CHECK (length(data) BETWEEN 1 AND ${SQLITE_SESSION_MESSAGE_CHUNK_BYTES}),
+      sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+      PRIMARY KEY(session_id, sequence, chunk_index),
+      FOREIGN KEY(session_id, sequence)
+        REFERENCES session_message_payloads(session_id, sequence)
+        ON DELETE CASCADE
+    ) WITHOUT ROWID;
+
   `,
   ],
 ]);

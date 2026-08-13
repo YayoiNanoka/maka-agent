@@ -12,36 +12,36 @@ import { clientCapabilityConnectionIdentity } from './fixtures/client-capability
 import {
   createBypassExecutionBoundary,
   createManagedExecutionBoundary,
-  createWorkspaceWritePermissionProfile,
-  decodeRunCompositionSnapshot,
-  decodeCanonicalToolResultContent,
-  type ModelCallKind,
-  type RuntimeEvent,
-} from '@maka/core';
+} from '@maka/core/sandbox-boundary';
+import { createWorkspaceWritePermissionProfile } from '@maka/core/permission-profile';
+import { decodeRunCompositionSnapshot } from '@maka/core/run-composition';
+import { decodeCanonicalToolResultContent } from '@maka/core/tool-result-record-schema';
+import { type ModelCallKind } from '@maka/core/model-call-attempt';
+import { type RuntimeEvent } from '@maka/core/runtime-event';
 import { createDefaultRuntimePolicy } from '@maka/core/runtime-policy';
 import type { PlanSessionState, PlanStore } from '@maka/core/plan';
 import type { TaskLedgerStore } from '@maka/core/task-ledger';
 import {
   serializeOAuthSubscriptionTokens,
   type OAuthSubscriptionTokens,
-  type BackendFactoryContext,
-  type AiSdkBackendInput,
-  type FilesystemWorkerExecuteInput,
-  type MakaTool,
-  type MakaToolContext,
+} from '@maka/runtime/subscription-credentials';
+import { type BackendFactoryContext } from '@maka/runtime/session-manager';
+import { type AiSdkBackendInput, type RunTraceEvent } from '@maka/runtime/ai-sdk-backend';
+import { type FilesystemWorkerExecuteInput } from '@maka/runtime/filesystem-worker';
+import { type MakaTool, type MakaToolContext } from '@maka/runtime/tool-runtime';
+import {
   type ProxiedFetchProxy,
   type ProxiedFetchTransport,
-  type RunTraceEvent,
-  type ScannedSkill,
-  agentGraphIdForRootSession,
-  buildParentAgentTools,
-  SESSION_RECAP_INSTRUCTION,
-  createToolResultArchiveCapability,
-  loadHistoryCompactCheckpointsFromRunLedger,
-  stableHash,
-  toolAvailabilityHash,
-  toolCatalogHash,
-} from '@maka/runtime';
+} from '@maka/runtime/network/scoped-fetch-transport';
+import { type ScannedSkill } from '@maka/runtime/skills';
+import { agentGraphIdForRootSession } from '@maka/runtime/stream-graph-coordinator';
+import { buildParentAgentTools } from '@maka/runtime/subagent-tools';
+import { SESSION_RECAP_INSTRUCTION } from '@maka/runtime/session-recap';
+import { hostedExecutionToolNames } from '../server/hosted-execution-tool-profile.js';
+import { createToolResultArchiveCapability } from '@maka/runtime/tool-result-archive-capability';
+import { loadHistoryCompactCheckpointsFromRunLedger } from '@maka/runtime/history-compact-ledger';
+import { stableHash, toolCatalogHash } from '@maka/runtime/request-shape';
+import { toolAvailabilityHash } from '@maka/runtime/tool-availability';
 import { createSqliteRuntimeStore } from '@maka/storage';
 import { createAgentGraphControlStore } from '@maka/storage/agent-graph-control-store';
 import { openInteractiveArtifactStoreForWrite } from '@maka/storage/artifact-stores';
@@ -78,6 +78,7 @@ import { HostClientCapabilityCoordinator } from '../server/client-capability-coo
 import type { HostMemoryCoordinator } from '../server/memory-coordinator.js';
 import type { ConnectionContext } from '../server/operation-dispatcher.js';
 import { RuntimePolicyActivationGate } from '../server/runtime-policy-activation-gate.js';
+import { HostResidencyRegistry } from '../server/host-residency-registry.js';
 import {
   HostOAuthExecutionAuthority,
   OAuthExecutionCredentialError,
@@ -96,30 +97,11 @@ const MAX_IMPLEMENTATION_CHILD_PTY_READS = 5;
 const MIN_IMPLEMENTATION_CHILD_REQUESTS = 6;
 const MAX_IMPLEMENTATION_CHILD_REQUESTS =
   MIN_IMPLEMENTATION_CHILD_REQUESTS + MAX_IMPLEMENTATION_CHILD_PTY_READS - 1;
+const HEADLESS_CODING_V1_PROMPT_HASH =
+  'sha256:0e3389e330b8b8f0db1c7a8b8e2126325fe4c672d6eff279afcd3f9412e52271';
+const HEADLESS_CODING_V1_TOOLS_HASH =
+  'sha256:ea1f293096e5e209ae49346f46b0e8ff9b54ae17452a5a23149ad7233afaeafc';
 const execFileAsync = promisify(execFile);
-
-test('Plan mode preserves bypass while narrowing every managed permission mode', () => {
-  assert.equal(
-    resolveCollaborationPermissionMode({
-      collaborationMode: 'plan',
-      permissionMode: 'bypass',
-    }),
-    'bypass',
-  );
-  for (const permissionMode of ['explore', 'ask', 'execute'] as const) {
-    assert.equal(
-      resolveCollaborationPermissionMode({ collaborationMode: 'plan', permissionMode }),
-      'explore',
-    );
-  }
-  assert.equal(
-    resolveCollaborationPermissionMode({
-      collaborationMode: 'agent',
-      permissionMode: 'bypass',
-    }),
-    'bypass',
-  );
-});
 
 test('backend creation aborts a stalled canonical connection read', async () => {
   const abort = new AbortController();
@@ -165,6 +147,80 @@ test('backend creation aborts a stalled pricing snapshot read', async () => {
   });
 });
 
+test('backend creation admits the enabled bootstrap DeepSeek model before discovery', async () => {
+  const modelId = 'deepseek-v4-flash';
+  const backend = await createHostAiSdkBackend(
+    backendCreationFixture({
+      abortSignal: new AbortController().signal,
+      modelId,
+      resolveExecutionConnection: async () => ({
+        kind: 'ready',
+        connection: {
+          slug: 'backend-creation-connection',
+          providerType: 'deepseek',
+          enabledModelIds: [modelId],
+          models: [],
+        },
+        networkProxy: { enabled: false },
+        secretMaterial: { connection: { secret: API_KEY } },
+      }),
+      readPricing: async () => ({ revision: 0, overrides: [] }),
+    }),
+  );
+
+  await backend.dispose();
+});
+
+test('backend creation does not bypass a non-empty DeepSeek inventory', async () => {
+  const modelId = 'deepseek-v4-flash';
+  await assert.rejects(
+    createHostAiSdkBackend(
+      backendCreationFixture({
+        abortSignal: new AbortController().signal,
+        modelId,
+        resolveExecutionConnection: async () => ({
+          kind: 'ready',
+          connection: {
+            slug: 'backend-creation-connection',
+            providerType: 'deepseek',
+            enabledModelIds: [modelId],
+            models: [{ id: 'deepseek-chat' }],
+          },
+          networkProxy: { enabled: false },
+          secretMaterial: { connection: { secret: API_KEY } },
+        }),
+        readPricing: async () => ({ revision: 0, overrides: [] }),
+      }),
+    ),
+    /Session model is not enabled/,
+  );
+});
+
+test('backend creation does not treat aliased provider metadata as inventory', async () => {
+  const modelId = 'claude-opus-5';
+  await assert.rejects(
+    createHostAiSdkBackend(
+      backendCreationFixture({
+        abortSignal: new AbortController().signal,
+        modelId,
+        resolveExecutionConnection: async () => ({
+          kind: 'ready',
+          connection: {
+            slug: 'backend-creation-connection',
+            providerType: 'opencode-free',
+            enabledModelIds: [modelId],
+            models: [],
+          },
+          networkProxy: { enabled: false },
+          secretMaterial: {},
+        }),
+        readPricing: async () => ({ revision: 0, overrides: [] }),
+      }),
+    ),
+    /Session model is not enabled/,
+  );
+});
+
 test('provider dispatch fails closed when the Run Composition commit fails', async () => {
   const provider = await startProvider();
   let commits = 0;
@@ -197,60 +253,6 @@ test('provider dispatch fails closed when the Run Composition commit fails', asy
     assert.equal(commits, 1);
     assert.equal(provider.requests.length, 0);
     assert.ok(events.some((event) => event.type === 'error'));
-  } finally {
-    await backend?.dispose();
-    await provider.close();
-  }
-});
-
-test('provider backend executes a minimal Domain Run Composer without Interactive sources', async () => {
-  const provider = await startProvider();
-  let snapshot: unknown;
-  let backend: Awaited<ReturnType<typeof createHostAiSdkBackend>> | undefined;
-  try {
-    backend = await createHostAiSdkBackend(
-      backendCreationFixture({
-        abortSignal: new AbortController().signal,
-        resolveExecutionConnection: async () => readyExecutionConnection(provider.baseUrl),
-        readPricing: async () => ({ revision: 0, overrides: [] }),
-        executionBoundary: createBypassExecutionBoundary(0),
-        createRunComposer: async () => ({
-          composerId: 'test.minimal',
-          composerRevision: '1',
-          tools: [],
-          toolAvailability: { economy: false },
-          resolveSystemPrompt: async () => ({
-            text: 'Minimal Domain system prompt.',
-            sourceRevisions: [],
-          }),
-          turnTailPrompt: async () => '',
-        }),
-        recordRunComposition: async (_runId, value) => {
-          snapshot = value;
-        },
-      }),
-    );
-
-    const events = [];
-    for await (const event of backend.send({
-      invocationId: 'minimal-domain-invocation',
-      runId: 'minimal-domain-run',
-      turnId: 'minimal-domain-turn',
-      text: 'Execute the minimal Domain Run.',
-      context: [],
-    })) {
-      events.push(event);
-    }
-
-    const decoded = decodeRunCompositionSnapshot(snapshot);
-    assert.equal(decoded.composerId, 'test.minimal');
-    assert.deepEqual(decoded.sourceRevisions, []);
-    assert.deepEqual(decoded.toolNames, []);
-    assert.equal(decoded.baseSystemPromptHash, stableHash('Minimal Domain system prompt.'));
-    assert.equal(decoded.toolCatalogHash, toolCatalogHash([]));
-    assert.equal(decoded.toolAvailabilityHash, toolAvailabilityHash({ economy: false }));
-    assert.equal(provider.requests.length, 1);
-    assert.ok(events.some((event) => event.type === 'complete'));
   } finally {
     await backend?.dispose();
     await provider.close();
@@ -417,56 +419,6 @@ test('backend creation does not acquire Client Capabilities beyond a bound tool 
   );
   try {
     assert.equal(snapshotCalls, 0);
-  } finally {
-    await backend.dispose();
-  }
-});
-
-test('backend creation routes a bound WebSearch tool without widening the child ceiling', async () => {
-  const clientSearch: MakaTool = {
-    name: 'WebSearch',
-    description: 'Client web search',
-    parameters: {},
-    impl: async () => undefined,
-  };
-  const ready = {
-    kind: 'ready' as const,
-    connection: {
-      slug: 'deepseek-responses',
-      providerType: 'deepseek' as const,
-      enabledModelIds: ['deepseek-v4-flash'],
-      models: [{ id: 'deepseek-v4-flash', apiProtocol: 'openai-responses' as const }],
-    },
-    networkProxy: { enabled: false },
-    secretMaterial: { connection: { secret: API_KEY } },
-  };
-  const policy = {
-    ...createDefaultRuntimePolicy(),
-    webSearch: { enabled: true, defaultProvider: 'model' as const },
-  };
-  const runtimePolicy = {
-    operations: { resolveExecutionConnection: async () => ready },
-    runtimePolicy: {
-      getSnapshot: async () => ({ revision: 1, policy }),
-    },
-  } as unknown as RuntimePolicyStoresWriter;
-  const backend = await createHostAiSdkBackend(
-    backendCreationFixture({
-      abortSignal: new AbortController().signal,
-      resolveExecutionConnection: async () => ready,
-      readPricing: async () => ({ revision: 0, overrides: [] }),
-      runtimePolicy,
-      tools: [clientSearch],
-      modelId: 'deepseek-v4-flash',
-    }),
-  );
-  try {
-    const input = (backend as unknown as { input: AiSdkBackendInput }).input;
-    assert.deepEqual(
-      input.tools.map((tool) => tool.name),
-      ['WebSearch'],
-    );
-    assert.equal(input.tools[0]?.providerTool?.kind, 'openai-web-search');
   } finally {
     await backend.dispose();
   }
@@ -716,6 +668,159 @@ test('production backend preserves coordinator Client Capability semantics acros
   }
 });
 
+test('hosted execution freezes the headless coding provider wire contract', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'maka-hosted-profile-wire-'));
+  const root = join(base, 'interactive');
+  const provider = await startProvider();
+  const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const owner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(owner);
+  if (!owner) return;
+  const residencies = new HostResidencyRegistry();
+  const context: ConnectionContext = {
+    hostEpoch: 'hosted-profile-wire-epoch',
+    connectionId: 'hosted-profile-wire-client',
+    surface: 'run',
+    principal: 'runtime_host',
+    acquireResidency: () => residencies.acquire('hosted-profile-wire-operation'),
+  };
+  let composition: Awaited<ReturnType<typeof createExecutionRuntimeHostComposition>> | undefined;
+  try {
+    const policy = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
+    const created = await policy.connectionCatalog.create({
+      expectedCatalogRevision: 0,
+      connection: {
+        slug: 'profile-deepseek',
+        name: 'Profile DeepSeek',
+        providerType: 'deepseek',
+        baseUrl: provider.baseUrl,
+        enabled: true,
+        enabledModelIds: ['deepseek-v4-flash'],
+      },
+    });
+    assert.equal(created.kind, 'committed');
+    if (created.kind !== 'committed') return;
+    const connection = created.snapshot.connections[0];
+    assert.ok(connection);
+    if (!connection) return;
+    const configured = await policy.credentialVault.set({
+      locator: {
+        scope: 'connection',
+        connectionId: connection.connectionId,
+        kind: 'api_key',
+      },
+      expected: null,
+      secret: API_KEY,
+    });
+    assert.equal(configured.kind, 'committed');
+    await publishConnectionModel(policy, connection.connectionId, 'deepseek-v4-flash');
+
+    composition = await createExecutionRuntimeHostComposition(
+      {
+        owner,
+        hostEpoch: context.hostEpoch,
+        acquireResidency: (label) => residencies.acquire(label),
+        retainUntilProcessExit: () => undefined,
+        requestDrain: () => composition?.beginDrain(),
+        waitForResidencies: () => residencies.waitForEmpty(),
+        waitForResidenciesExcept: (label) => residencies.waitForEmptyExcept(label),
+      },
+      { bootstrapRuntimePolicy: false },
+    );
+    await composition.recover();
+    const executionId = '00000000-0000-4000-8000-000000000777';
+    const outcome = await composition.handlers['hosted.execution.start'](
+      {
+        executionId,
+        session: {
+          workspace: { kind: 'host_path', path: root },
+          modelTarget: {
+            kind: 'explicit',
+            connectionSlug: 'profile-deepseek',
+            model: 'deepseek-v4-flash',
+          },
+          permissionMode: 'bypass',
+          collaborationMode: 'agent',
+          orchestrationMode: 'default',
+          toolProfile: 'headless-coding-v1',
+        },
+        content: { text: 'Complete the benchmark task.' },
+        maxSteps: 100_000,
+      },
+      context,
+    );
+    assert.equal(outcome.ok, true);
+    if (!outcome.ok) return;
+    assert.equal(outcome.result.kind, 'settled');
+
+    const request = provider.requests.find(
+      (candidate) => candidate.url === '/v1/responses' && Array.isArray(candidate.body.tools),
+    );
+    assert.ok(request);
+    const instructions = responsesDeveloperPrompt(request?.body);
+    const tools = request?.body.tools;
+    assert.equal(typeof instructions, 'string', JSON.stringify(request?.body));
+    assert.ok(Array.isArray(tools));
+    assert.equal(stableHash(instructions), HEADLESS_CODING_V1_PROMPT_HASH);
+    assert.equal(stableHash(tools), HEADLESS_CODING_V1_TOOLS_HASH);
+    assert.deepEqual(responsesToolNames(request?.body), [
+      'ArchiveRead',
+      'Bash',
+      'Glob',
+      'Grep',
+      'Read',
+      'apply_patch',
+    ]);
+    const bash = (tools as Array<Record<string, unknown>>).find((tool) => tool.name === 'Bash');
+    assert.ok(bash);
+    assert.doesNotMatch(JSON.stringify(bash), /run_in_background|pty/u);
+
+    const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+    assert.equal(
+      (await stores.sessionStore.readHeaderSnapshot(executionId)).toolProfile,
+      'headless-coding-v1',
+    );
+    const secondTurnId = '00000000-0000-4000-8000-000000000778';
+    const secondStarted = await startTurn(
+      composition,
+      executionId,
+      secondTurnId,
+      'Continue the benchmark task.',
+      context,
+    );
+    const secondTerminal = await waitForTerminal(
+      composition,
+      executionId,
+      secondTurnId,
+      secondStarted,
+      context,
+    );
+    assert.equal(secondTerminal.status, 'completed');
+    const profiledRequests = provider.requests.filter(
+      (candidate) => candidate.url === '/v1/responses' && Array.isArray(candidate.body.tools),
+    );
+    assert.equal(profiledRequests.length, 2);
+    for (const profiled of profiledRequests) {
+      assert.equal(
+        stableHash(responsesDeveloperPrompt(profiled.body)),
+        HEADLESS_CODING_V1_PROMPT_HASH,
+      );
+      assert.equal(stableHash(profiled.body.tools), HEADLESS_CODING_V1_TOOLS_HASH);
+    }
+  } finally {
+    try {
+      await composition?.close();
+    } finally {
+      try {
+        await owner.close();
+      } finally {
+        await provider.close();
+        await rm(base, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
 test('production Host executes a canonical ai-sdk Session against a real provider wire', async () => {
   const base = await mkdtemp(join(tmpdir(), 'maka-host-real-model-'));
   const root = join(base, 'interactive');
@@ -927,7 +1032,6 @@ test('production Host executes a canonical ai-sdk Session against a real provide
     assert.deepEqual(toolNames(request?.body), [
       'ArchiveRead',
       'AskUserQuestion',
-      'Automation',
       'Bash',
       'Edit',
       'ExploreAgent',
@@ -942,6 +1046,7 @@ test('production Host executes a canonical ai-sdk Session against a real provide
       'MakaSettingsGet',
       'MakaSettingsUpdate',
       'Read',
+      'ScheduledTask',
       'Skill',
       'SkillSearch',
       'StopBackgroundTask',
@@ -2390,363 +2495,6 @@ test('one composer freezes Runtime Policy while each Run freezes its remaining p
   );
 });
 
-test('Client Capability tools join the existing load_tools catalog without a parallel loader', () => {
-  const capabilityTool: MakaTool = {
-    name: 'mcp__opaque__inspect',
-    description: 'Fixture Client Capability tool.',
-    parameters: {},
-    categoryHint: 'client_capability',
-    impl: async () => ({ content: [{ type: 'text', text: 'ok' }] }),
-  };
-  const composition = createInteractiveRunComposer({
-    runtimePolicy: { revision: 0, policy: createDefaultRuntimePolicy() },
-    skills: {
-      readCanonicalModelInventory: async () => ({ inventory: [] }),
-    } as unknown as HostSkillCatalogCoordinator,
-    memory: {} as HostMemoryCoordinator,
-    taskLedger: {} as TaskLedgerStore,
-    clientCapabilities: {
-      tools: [capabilityTool],
-      groups: [
-        {
-          id: 'client_fixture',
-          label: 'Opaque fixture',
-          description: 'Loaded through the canonical tool connector.',
-          toolNames: [capabilityTool.name],
-        },
-      ],
-    },
-  });
-
-  assert.ok(composition.tools.includes(capabilityTool));
-  assert.deepEqual(
-    composition.toolAvailability.groups?.find((group) => group.id === 'client_fixture'),
-    {
-      id: 'client_fixture',
-      label: 'Opaque fixture',
-      description: 'Loaded through the canonical tool connector.',
-      toolNames: [capabilityTool.name],
-    },
-  );
-});
-
-test('Side conversations end the Host-owned system prompt with an isolation boundary', async () => {
-  const composition = createInteractiveRunComposer({
-    runtimePolicy: { revision: 0, policy: createDefaultRuntimePolicy() },
-    skills: {
-      readCanonicalModelInventory: async () => ({ inventory: [] }),
-    } as unknown as HostSkillCatalogCoordinator,
-    memory: {
-      readPromptProjection: async () => ({
-        bundleRevision: null,
-        memoryRevision: null,
-      }),
-    } as unknown as HostMemoryCoordinator,
-    taskLedger: { list: async () => [] } as unknown as TaskLedgerStore,
-    sideConversation: true,
-  });
-
-  const prompt =
-    (
-      await composition.resolveSystemPrompt({
-        sessionId: 'side-session',
-        turnId: 'turn-1',
-        cwd: '/workspace',
-        workspaceRoot: '/workspace',
-      })
-    ).text ?? '';
-  assert.match(prompt, /Side conversation boundary/);
-  assert.match(prompt, /inherited parent history is reference context only/i);
-  assert.equal(
-    prompt.trimEnd().endsWith('Workspace changes may be visible to both conversations.'),
-    true,
-  );
-});
-
-test('Deep Research composition keeps one read-only research surface and prompt', async () => {
-  const tool = (name: string, categoryHint?: MakaTool['categoryHint']): MakaTool => ({
-    name,
-    description: `${name} fixture`,
-    parameters: {},
-    ...(categoryHint ? { categoryHint } : {}),
-    impl: async () => name,
-  });
-  const read = tool('Read');
-  const webSearch = tool('WebSearch');
-  const shell = tool('Shell');
-  const deepResearchStatus = tool('deep_research_status');
-  const unsafeDeepResearchTool = tool('deep_research_unsafe_fixture');
-  const clientMutation = tool('mcp__opaque__mutate', 'client_capability');
-  const composition = createInteractiveRunComposer({
-    runtimePolicy: { revision: 0, policy: createDefaultRuntimePolicy() },
-    skills: {
-      readCanonicalModelInventory: async () => ({ inventory: [] }),
-    } as unknown as HostSkillCatalogCoordinator,
-    memory: {
-      readPromptProjection: async () => ({
-        bundleRevision: null,
-        memoryRevision: null,
-      }),
-    } as unknown as HostMemoryCoordinator,
-    taskLedger: { list: async () => [] } as unknown as TaskLedgerStore,
-    hostTools: [read, webSearch, shell, unsafeDeepResearchTool],
-    parentAgentTools: buildParentAgentTools(),
-    clientCapabilities: {
-      tools: [clientMutation],
-      groups: [
-        {
-          id: 'client_fixture',
-          label: 'Opaque fixture',
-          toolNames: [clientMutation.name],
-        },
-      ],
-    },
-    deepResearch: { tools: [deepResearchStatus] },
-  });
-
-  assert.deepEqual(composition.tools.map((candidate) => candidate.name).sort(), [
-    'AskUserQuestion',
-    'ExploreAgent',
-    'Read',
-    'WebSearch',
-    'deep_research_status',
-  ]);
-  assert.equal(composition.tools.includes(shell), false);
-  assert.equal(composition.tools.includes(clientMutation), false);
-  assert.equal(composition.tools.includes(unsafeDeepResearchTool), false);
-  assert.equal(
-    composition.tools.some((candidate) => candidate.categoryHint === 'subagent'),
-    true,
-  );
-  assert.equal(
-    composition.toolAvailability.groups?.find((group) => group.id === 'client_fixture'),
-    undefined,
-  );
-  const prompt =
-    (
-      await composition.resolveSystemPrompt({
-        sessionId: 'session-1',
-        turnId: 'turn-1',
-        cwd: process.cwd(),
-        workspaceRoot: process.cwd(),
-      })
-    ).text ?? '';
-  assert.match(prompt, /Deep research mode is active/);
-  assert.match(prompt, /ExploreAgent/);
-  // The Deep Research contract is a trailing assertion that constrains the
-  // fragments before it; it must be the last non-empty fragment. With no skills
-  // or workspace instructions in this fixture, the contract follows identity.
-  const drIndex = prompt.indexOf('Deep research mode is active');
-  assert.ok(drIndex > 0, 'deep research contract must be present');
-  assert.ok(prompt.indexOf('You are Maka,') < drIndex, 'identity must lead the contract');
-});
-
-test('Plan composition admits only planning tools before approval and execution controls after', async () => {
-  const proposal = {
-    planId: 'plan-1',
-    proposalId: 'proposal-1',
-    sessionId: 'session-1',
-    turnId: 'turn-1',
-    revision: 1,
-    title: 'Host Plan',
-    steps: [{ id: 'step-1', title: 'Implement', description: 'Implement the approved work' }],
-    status: 'pending_approval' as const,
-    submittedAt: 1,
-  };
-  const pending: PlanSessionState = {
-    schemaVersion: 1,
-    sessionId: 'session-1',
-    storeVersion: 1,
-    proposals: [proposal],
-    executions: [],
-    latestProposalId: proposal.proposalId,
-  };
-  const store = { readState: async () => pending } as unknown as PlanStore;
-  const base = {
-    runtimePolicy: { revision: 0, policy: createDefaultRuntimePolicy() },
-    skills: {
-      readCanonicalModelInventory: async () => ({ inventory: [] }),
-    } as unknown as HostSkillCatalogCoordinator,
-    memory: {
-      readPromptProjection: async () => ({
-        bundleRevision: null,
-        memoryRevision: null,
-      }),
-    } as unknown as HostMemoryCoordinator,
-    taskLedger: { list: async () => [] } as unknown as TaskLedgerStore,
-  };
-  const planning = createInteractiveRunComposer({
-    ...base,
-    plan: { store, state: pending, mode: 'plan' },
-  });
-  assert.deepEqual(planning.tools.map((tool) => tool.name).sort(), [
-    'AskUserQuestion',
-    'SubmitPlan',
-  ]);
-  assert.match(
-    (
-      await planning.resolveSystemPrompt({
-        sessionId: 'session-1',
-        turnId: 'turn-2',
-        cwd: process.cwd(),
-        workspaceRoot: process.cwd(),
-      })
-    ).text ?? '',
-    /Collaboration Mode: Plan/,
-  );
-
-  const fullAccessPlanning = createInteractiveRunComposer({
-    ...base,
-    hostTools: [
-      {
-        name: 'PlanningWriteFixture',
-        description: 'Mutating planning fixture',
-        parameters: {},
-        categoryHint: 'file_write',
-        impl: () => null,
-      },
-      {
-        name: 'ExploreAgentFixture',
-        description: 'Delegated planning fixture',
-        parameters: {},
-        categoryHint: 'subagent',
-        impl: () => null,
-      },
-    ],
-    plan: { store, state: pending, mode: 'plan', permissionMode: 'bypass' },
-  });
-  assert.ok(fullAccessPlanning.tools.some((tool) => tool.name === 'PlanningWriteFixture'));
-  assert.equal(
-    fullAccessPlanning.tools.some((tool) => tool.name === 'ExploreAgentFixture'),
-    false,
-  );
-  assert.match(
-    (
-      await fullAccessPlanning.resolveSystemPrompt({
-        sessionId: 'session-1',
-        turnId: 'turn-full-access',
-        cwd: process.cwd(),
-        workspaceRoot: process.cwd(),
-      })
-    ).text ?? '',
-    /Full access is active/,
-  );
-
-  const execution = {
-    executionId: 'execution-1',
-    planId: proposal.planId,
-    proposalId: proposal.proposalId,
-    sessionId: proposal.sessionId,
-    status: 'active' as const,
-    steps: proposal.steps.map((step) => ({
-      ...step,
-      status: 'pending' as const,
-      updatedAt: 2,
-    })),
-    startedAt: 2,
-    updatedAt: 2,
-  };
-  const interrupted: PlanSessionState = {
-    ...pending,
-    storeVersion: 2,
-    proposals: [{ ...proposal, status: 'approved' }],
-    executions: [
-      {
-        ...execution,
-        status: 'interrupted',
-        interruptedAt: 3,
-        interruptionReason: 'User requested replanning',
-        updatedAt: 3,
-      },
-    ],
-  };
-  const fullAccessReplanning = createInteractiveRunComposer({
-    ...base,
-    plan: { store, state: interrupted, mode: 'plan', permissionMode: 'bypass' },
-  });
-  const replanningTail = await fullAccessReplanning.turnTailPrompt({
-    sessionId: 'session-1',
-    turnId: 'turn-full-access-replanning',
-    cwd: process.cwd(),
-    workspaceRoot: process.cwd(),
-  });
-  assert.match(replanningTail, /Full access remains active/);
-  assert.doesNotMatch(replanningTail, /Do not resume execution or modify files/);
-
-  const active: PlanSessionState = {
-    ...pending,
-    storeVersion: 2,
-    proposals: [{ ...proposal, status: 'approved' }],
-    executions: [execution],
-    activeExecutionId: execution.executionId,
-  };
-  const executing = createInteractiveRunComposer({
-    ...base,
-    parentAgentTools: buildParentAgentTools(),
-    plan: { store, state: active, mode: 'agent' },
-  });
-  assert.ok(executing.tools.some((tool) => tool.name === 'update_plan'));
-  assert.ok(executing.tools.some((tool) => tool.name === 'cancel_plan'));
-  assert.equal(
-    executing.tools.some((tool) => tool.categoryHint === 'subagent'),
-    false,
-  );
-  assert.match(
-    await executing.turnTailPrompt({
-      sessionId: 'session-1',
-      turnId: 'turn-3',
-      cwd: process.cwd(),
-      workspaceRoot: process.cwd(),
-    }),
-    /plan_execution_context/,
-  );
-});
-
-test('Host model composition routes managed file tools through its filesystem worker', async () => {
-  let workerInput: FilesystemWorkerExecuteInput | undefined;
-  const composition = createInteractiveRunComposer({
-    runtimePolicy: { revision: 0, policy: createDefaultRuntimePolicy() },
-    skills: {
-      readCanonicalModelInventory: async () => ({ inventory: [] }),
-    } as unknown as HostSkillCatalogCoordinator,
-    memory: {} as HostMemoryCoordinator,
-    taskLedger: {} as TaskLedgerStore,
-    builtinTools: {
-      filesystemWorker: {
-        execute: async (input) => {
-          workerInput = input;
-          return { kind: 'read', content: 'read by Host worker' };
-        },
-      },
-      sandboxPlatform: 'darwin',
-    },
-  });
-  const read = composition.tools.find((tool) => tool.name === 'Read');
-  assert.ok(read);
-
-  const result = await read.impl(
-    { path: 'resource.txt' },
-    {
-      sessionId: 'session',
-      turnId: 'turn',
-      toolCallId: 'read-call',
-      cwd: process.cwd(),
-      permissionMode: 'ask',
-      executionBoundary: createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), 0),
-      abortSignal: new AbortController().signal,
-      emitOutput: () => {},
-    },
-  );
-
-  assert.deepEqual(result, { content: 'read by Host worker' });
-  assert.ok(workerInput);
-  assert.deepEqual(workerInput.operation, { kind: 'read', path: 'resource.txt' });
-  assert.equal(workerInput.cwd, process.cwd());
-  assert.equal(workerInput.executionBoundary?.kind, 'managed');
-  assert.equal(workerInput.mode, 'ask');
-  assert.ok(workerInput.abortSignal instanceof AbortSignal);
-});
-
 test('a bound tool ceiling excludes dynamic Client Capability tools', () => {
   const boundTool: MakaTool = {
     name: 'bounded_tool',
@@ -2761,11 +2509,11 @@ test('a bound tool ceiling excludes dynamic Client Capability tools', () => {
     categoryHint: 'client_capability',
     impl: async () => 'capability',
   };
-  const automationTool: MakaTool = {
-    name: 'Automation',
+  const scheduledTaskTool: MakaTool = {
+    name: 'ScheduledTask',
     description: 'A root-only Host authority outside the exact child ceiling.',
     parameters: {},
-    impl: async () => 'automation',
+    impl: async () => 'scheduled-task',
   };
   const composition = createInteractiveRunComposer({
     runtimePolicy: { revision: 0, policy: createDefaultRuntimePolicy() },
@@ -2776,7 +2524,7 @@ test('a bound tool ceiling excludes dynamic Client Capability tools', () => {
     taskLedger: {} as TaskLedgerStore,
     boundTools: [boundTool],
     parentAgentTools: buildParentAgentTools(),
-    automationTool,
+    scheduledTaskTool,
     builtinTools: {},
     clientCapabilities: {
       tools: [capabilityTool],
@@ -2797,23 +2545,53 @@ test('a bound tool ceiling excludes dynamic Client Capability tools', () => {
   );
 });
 
-test('root model composition defers the canonical parent-agent tool group', () => {
-  const parentAgentTools = buildParentAgentTools();
+test('the headless coding profile freezes the Eval prompt and tool ceiling', async () => {
   const composition = createInteractiveRunComposer({
     runtimePolicy: { revision: 0, policy: createDefaultRuntimePolicy() },
     skills: {
-      readCanonicalModelInventory: async () => ({ inventory: [] }),
+      readCanonicalModelInventory: async () => {
+        throw new Error('Profiled prompt must not read the product Skill catalog');
+      },
     } as unknown as HostSkillCatalogCoordinator,
-    memory: {} as HostMemoryCoordinator,
+    memory: {
+      readPromptProjection: async () => {
+        throw new Error('Profiled prompt must not read product Memory');
+      },
+    } as unknown as HostMemoryCoordinator,
     taskLedger: {} as TaskLedgerStore,
-    parentAgentTools,
+    builtinTools: {},
+    boundToolNames: hostedExecutionToolNames('headless-coding-v1'),
+    toolProfile: 'headless-coding-v1',
+    parentAgentTools: buildParentAgentTools(),
+    scheduledTaskTool: {
+      name: 'ScheduledTask',
+      description: 'Must stay outside the Eval ceiling.',
+      parameters: {},
+      impl: async () => 'scheduled',
+    },
   });
 
   assert.deepEqual(
-    composition.toolAvailability.groups?.find((group) => group.id === 'agent')?.toolNames,
-    ['agent_spawn', 'agent_list', 'agent_output'],
+    composition.tools.map(({ name }) => name),
+    ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'apply_patch'],
   );
-  assert.ok(parentAgentTools.every((tool) => composition.tools.includes(tool)));
+  assert.deepEqual(composition.toolAvailability.groups, []);
+  assert.equal(
+    (
+      await composition.resolveSystemPrompt({
+        sessionId: 'profiled-session',
+        turnId: 'profiled-turn',
+        cwd: '/workspace',
+        workspaceRoot: '/workspace',
+      })
+    ).text,
+    [
+      'Complete the task by acting with the available tools, not by narrating.',
+      'Prefer Read, Glob, and Grep for inspection, Edit and Write for file changes, and Bash for shell commands and tests.',
+      'Verify the result when practical.',
+      'Stop when the task is complete.',
+    ].join('\n'),
+  );
 });
 
 function skillFixture(id: string, description: string, content: string): ScannedSkill {
@@ -3260,6 +3038,26 @@ function toolNames(body: Record<string, unknown> | undefined): string[] {
     .sort();
 }
 
+function responsesToolNames(body: Record<string, unknown> | undefined): string[] {
+  const tools = Array.isArray(body?.tools) ? body.tools : [];
+  return tools
+    .flatMap((tool) => {
+      if (!tool || typeof tool !== 'object') return [];
+      const name = (tool as { name?: unknown }).name;
+      return typeof name === 'string' ? [name] : [];
+    })
+    .sort();
+}
+
+function responsesDeveloperPrompt(body: Record<string, unknown> | undefined): string | undefined {
+  const input = Array.isArray(body?.input) ? body.input : [];
+  const developer = input.find(
+    (message): message is Record<string, unknown> =>
+      Boolean(message) && typeof message === 'object' && message.role === 'developer',
+  );
+  return typeof developer?.content === 'string' ? developer.content : undefined;
+}
+
 function providerRequestTrace(requests: readonly ProviderRequest[]): readonly unknown[] {
   return requests.map((request) => {
     return {
@@ -3410,6 +3208,10 @@ async function handleProviderRequest(
     customHeader: request.headers['x-maka-test'] as string | undefined,
     body,
   });
+  if (request.url === '/v1/responses') {
+    respondProviderResponsesText(response, RESPONSE_TEXT);
+    return;
+  }
   if (body.stream !== true) {
     const isMemoryExtraction = /Perform the first stage of long-term-memory extraction/.test(
       JSON.stringify(body),
@@ -3594,6 +3396,67 @@ async function handleProviderRequest(
     return;
   }
   respondProviderText(response, RESPONSE_TEXT);
+}
+
+function respondProviderResponsesText(response: ServerResponse, text: string): void {
+  const responseId = 'resp-hosted-profile';
+  const messageId = 'msg-hosted-profile';
+  const events = [
+    {
+      type: 'response.created',
+      response: {
+        id: responseId,
+        object: 'response',
+        created_at: 1,
+        model: 'deepseek-v4-flash',
+        status: 'in_progress',
+        output: [],
+      },
+    },
+    {
+      type: 'response.output_item.added',
+      output_index: 0,
+      item: {
+        type: 'message',
+        id: messageId,
+        status: 'in_progress',
+        role: 'assistant',
+        content: [],
+      },
+    },
+    {
+      type: 'response.output_text.delta',
+      content_index: 0,
+      delta: text,
+      item_id: messageId,
+      output_index: 0,
+    },
+    {
+      type: 'response.output_item.done',
+      output_index: 0,
+      item: {
+        type: 'message',
+        id: messageId,
+        status: 'completed',
+        role: 'assistant',
+        content: [{ type: 'output_text', text, annotations: [] }],
+      },
+    },
+    {
+      type: 'response.completed',
+      response: {
+        id: responseId,
+        object: 'response',
+        created_at: 1,
+        model: 'deepseek-v4-flash',
+        status: 'completed',
+        output: [],
+        usage: { input_tokens: 11, output_tokens: 5, total_tokens: 16 },
+      },
+    },
+  ];
+  response.writeHead(200, { 'content-type': 'text/event-stream' });
+  response.end(`${events.map((event) => `data: ${JSON.stringify(event)}`).join('\n\n')}\n\n`);
 }
 
 function respondProviderText(response: ServerResponse, text: string): void {

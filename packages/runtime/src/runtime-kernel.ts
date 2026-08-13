@@ -1,14 +1,11 @@
+import type { AgentRunHeader, AgentRunStore } from '@maka/core/agent-run';
+import type { ContinuationClaimV1, ImmutableRuntimePrefixV1 } from '@maka/core/runtime-boundary';
+import type { RuntimeEvent, ToolBoundaryProtocol } from '@maka/core/runtime-event';
 import type {
-  AgentRunHeader,
-  AgentRunStore,
-  ContinuationClaimV1,
-  ImmutableRuntimePrefixV1,
-  RuntimeEvent,
   RuntimeContinuationAuthorityStore,
   RuntimeEventStore,
-  ToolBoundaryProtocol,
-} from '@maka/core';
-import { isSessionInlineRun } from '@maka/core';
+} from '@maka/core/runtime-event-store';
+import { isSessionInlineRun } from '@maka/core/agent-run';
 import type {
   ActiveInteractionRequestEvent,
   CompleteEvent,
@@ -2823,9 +2820,9 @@ export class RuntimeKernel implements RuntimeKernelLike {
             },
             // Resolved by runId rather than turnId: the canonical record names
             // the run it belongs to, so it needs no turn-to-run indirection.
-            recordModelCallAttempt: (attempt) => {
-              const run = resolveActive()?.activeRuns.get(attempt.runId);
-              return run?.recordModelCallAttempt(attempt) ?? Promise.resolve();
+            recordModelCallAttempt: (commit) => {
+              const run = resolveActive()?.activeRuns.get(commit.attempt.runId);
+              return run?.recordModelCallAttempt(commit) ?? Promise.resolve();
             },
             recordRunComposition: (runId, snapshot) => {
               const run = resolveActive()?.activeRuns.get(runId);

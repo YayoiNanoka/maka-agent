@@ -60,7 +60,7 @@ import type {
   SandboxBoundaryRequest,
   SandboxBoundarySettlement,
   SettleSandboxBoundaryRequest,
-} from '@maka/core';
+} from '@maka/core/sandbox-boundary';
 import type { CollaborationMode } from '@maka/core/collaboration';
 import type { OrchestrationMode } from '@maka/core/orchestration';
 import {
@@ -72,47 +72,53 @@ import {
   type PlanSessionState,
   type PlanStore,
 } from '@maka/core/plan';
+import { DEFAULT_SESSION_NAME } from '@maka/core/session-name';
+import { DEEP_RESEARCH_SESSION_LABEL, isDeepResearchSession } from '@maka/core/explore-agent';
+import { SIDE_CONVERSATION_SESSION_LABEL } from '@maka/core/side-conversation';
 import {
-  DEFAULT_SESSION_NAME,
-  DEEP_RESEARCH_SESSION_LABEL,
-  SIDE_CONVERSATION_SESSION_LABEL,
   SUBAGENT_SESSION_RUNTIME_SCHEMA_VERSION,
   SUBAGENT_SESSION_SPAWN_SCHEMA_VERSION,
   childSessionsForParent,
-  decodeAgentGraphIntentClaim,
-  executionBoundaryContains,
-  failureClassFromCompleteStopReason,
   deriveTurnRecords,
-  isActiveShellRunStatus,
-  isDeepResearchSession,
-  isSessionInlineRun,
-  isTerminalRuntimeEvent,
   subagentSessionRuntimeSummary,
-} from '@maka/core';
+} from '@maka/core/session';
+import { decodeAgentGraphIntentClaim } from '@maka/core/agent-graph-control';
+import { executionBoundaryContains } from '@maka/core/sandbox-boundary';
+import { failureClassFromCompleteStopReason } from '@maka/core/events';
+import { isActiveShellRunStatus } from '@maka/core/shell-run';
+import { isSessionInlineRun } from '@maka/core/agent-run';
+import { isTerminalRuntimeEvent } from '@maka/core/runtime-event';
 import type {
   AgentGraphIntentClaim,
   AgentGraphIntentClaimStore,
+} from '@maka/core/agent-graph-control';
+import type {
   AgentGraphOperatorProvisionRequest,
   AgentGraphOperatorProvisionResult,
   AgentGraphProvisionedEdge,
-  AgentGraphScheduleUpdateSource,
+} from '@maka/core/agent-graph-topology';
+import type { AgentGraphScheduleUpdateSource } from '@maka/core/agent-graph-schedule';
+import type {
   AgentRunEvent,
   AgentRunHeader,
   AgentRunStore,
-  ArtifactRecord,
-  ContinuationClaimV1,
-  ContinuationClaimStateV1,
   RootExecutionDescriptor,
-  RuntimeEvent,
+} from '@maka/core/agent-run';
+import type { ArtifactRecord } from '@maka/core/artifacts';
+import type { ContinuationClaimV1 } from '@maka/core/runtime-boundary';
+import type {
+  ContinuationClaimStateV1,
   RuntimeEventStore,
-  RunCompositionSnapshot,
   RuntimeContinuationAuthorityStore,
-  ToolBoundaryProtocol,
+} from '@maka/core/runtime-event-store';
+import type { RuntimeEvent, ToolBoundaryProtocol } from '@maka/core/runtime-event';
+import type { RunCompositionSnapshot } from '@maka/core/run-composition';
+import type {
   SubagentWorkspaceBinding,
   SubagentWorktreeExecutor,
-  SubagentPreset,
-} from '@maka/core';
-import { AGENT_GRAPH_OPERATOR_PROVISION_SCHEMA_VERSION } from '@maka/core';
+} from '@maka/core/subagent-workspace';
+import type { SubagentPreset } from '@maka/core/subagent-settings';
+import { AGENT_GRAPH_OPERATOR_PROVISION_SCHEMA_VERSION } from '@maka/core/agent-graph-topology';
 import {
   classifyRuntimeEventTerminalFact,
   type RuntimeEventTerminalFact,
@@ -149,6 +155,7 @@ import type {
   ProviderRequestCaptureLedgerRecord,
 } from './provider-request-telemetry.js';
 import { readLatestContextDiagnostics, type ContextDiagnostics } from './context-diagnostics.js';
+import type { ModelCallCommit } from '@maka/core/agent-run';
 import type { ShellRunProcessManager } from './shell-run-manager.js';
 import type { ActiveFullCompactBlock } from './active-full-compact.js';
 import type { SemanticCompactBlock } from './semantic-compact.js';
@@ -246,7 +253,7 @@ function runtimeCommitSinkFromEventStore(
 }
 
 export interface StopSessionInput {
-  source?: 'stop_button' | 'benchmark_deadline' | 'graph_supervisor';
+  source?: 'stop_button' | 'graph_supervisor';
   mode?: BackendStopMode;
 }
 
@@ -712,8 +719,7 @@ export interface BackendFactoryContext {
    * sessions populate this; an ordinary main-session activation leaves it
    * undefined. A
    * main-session factory that needs a system prompt must source it from
-   * its own closure (the desktop path and the headless benchmark path
-   * both do this) — do NOT route a main-session prompt through this
+   * its own closure — do NOT route a main-session prompt through this
    * field, it is semantically the child instruction, not the session
    * system prompt.
    */
@@ -743,7 +749,7 @@ export interface BackendFactoryContext {
    * physical provider call. Distinct from the diagnostic row above: this one is
    * the metering source of truth (#1679).
    */
-  recordModelCallAttempt?: (attempt: ModelCallAttempt) => Promise<void>;
+  recordModelCallAttempt?: (commit: ModelCallCommit<ModelCallAttempt>) => Promise<void>;
   /** Immutable Run policy snapshot; provider dispatch waits for this durable commit. */
   recordRunComposition?: (runId: string, snapshot: RunCompositionSnapshot) => Promise<void>;
   loadHistoryCompactCheckpoint?: () => Promise<HistoryCompactCheckpoint | undefined>;
@@ -4713,7 +4719,7 @@ export class SessionManager {
       RootExecutionDescriptor,
       | { kind: 'regenerate' }
       | { kind: 'context_compact' }
-      | { kind: 'automation' }
+      | { kind: 'scheduled_task' }
       | { kind: 'safe_boundary_continuation' }
     >;
   }): Promise<void> {
@@ -6140,10 +6146,7 @@ function assertClaimOwnsHostedLinkedChildAdmission(
     sessionId: string;
     turnId: string;
     runId: string;
-    execution: Exclude<
-      RootExecutionDescriptor,
-      { kind: 'external_message' } | { kind: 'automation' }
-    >;
+    execution: Exclude<RootExecutionDescriptor, { kind: 'external_message' }>;
   },
   claim: ContinuationClaimV1,
 ): void {

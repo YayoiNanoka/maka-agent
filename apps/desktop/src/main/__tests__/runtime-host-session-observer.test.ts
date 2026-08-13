@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
-import type { SessionEvent, StoredMessage } from "@maka/core";
+import type { SessionEvent } from '@maka/core/events';
+import type { StoredMessage } from '@maka/core/session';
 import type {
   SessionContinuitySnapshot,
   SubscriptionFrame,
@@ -21,6 +22,7 @@ test("joins an active Turn without losing or replaying assistant text", async ()
   let closeCount = 0;
   const handle: DesktopRuntimeHostSession = {
     snapshot: continuitySnapshot(),
+    activeAssistantStreams: [activeText('message-1')],
     transcript: transcript.promise,
     events,
     async close() {
@@ -112,6 +114,7 @@ test("restores renderer observation after the Host connection is replaced", asyn
     client: {
       openSession: async () => ({
         snapshot: continuitySnapshot(),
+        activeAssistantStreams: [],
         transcript: Promise.resolve([]),
         events: firstEvents,
         async close() {
@@ -125,6 +128,7 @@ test("restores renderer observation after the Host connection is replaced", asyn
     client: {
       openSession: async () => ({
         snapshot: continuitySnapshot(),
+        activeAssistantStreams: [activeText('message-1')],
         transcript: Promise.resolve([
           {
             type: "assistant",
@@ -191,6 +195,212 @@ test("restores renderer observation after the Host connection is replaced", asyn
   await secondObserver.close();
 });
 
+test("rebinds a restored renderer observation to the current target scope", async () => {
+  const observations = new RuntimeHostSessionObservationRegistry();
+  const sent: unknown[][] = [];
+  const renderer: RuntimeHostSessionObserverTarget = {
+    id: 11,
+    send: (...args: unknown[]) => sent.push(args),
+    once() {},
+    off() {},
+  };
+  let firstTarget: RuntimeHostSessionObserverTarget | undefined;
+  let secondTarget: RuntimeHostSessionObserverTarget | undefined;
+  const firstSource = {
+    async observe(
+      _sessionId: string,
+      _observerId: string,
+      target: RuntimeHostSessionObserverTarget,
+    ) {
+      firstTarget = target;
+    },
+    async unobserve() {},
+  };
+  const secondSource = {
+    async observe(
+      _sessionId: string,
+      _observerId: string,
+      target: RuntimeHostSessionObserverTarget,
+    ) {
+      secondTarget = target;
+    },
+    async unobserve() {},
+  };
+  const bind = (targetEpoch: string) => (target: RuntimeHostSessionObserverTarget) => ({
+    ...target,
+    send: (channel: string, payload: unknown) =>
+      (target.send as (channel: string, ...args: unknown[]) => void)(
+        channel,
+        { targetEpoch },
+        payload,
+      ),
+  });
+
+  await observations.attach(firstSource, bind('target-a'));
+  await observations.observe('session-1', 'observer-1', renderer);
+  observations.detach(firstSource);
+  await observations.attach(secondSource, bind('target-b'));
+
+  const firstEvent: SessionEvent = {
+    type: 'abort',
+    id: 'event-a',
+    turnId: 'turn-1',
+    ts: 1,
+    reason: 'user_stop',
+  };
+  const secondEvent: SessionEvent = {
+    type: 'complete',
+    id: 'event-b',
+    turnId: 'turn-2',
+    ts: 2,
+    stopReason: 'end_turn',
+  };
+  firstTarget?.send('sessions:event:observer-1', firstEvent);
+  secondTarget?.send('sessions:event:observer-1', secondEvent);
+  assert.deepEqual(sent, [
+    ['sessions:event:observer-1', { targetEpoch: 'target-a' }, firstEvent],
+    ['sessions:event:observer-1', { targetEpoch: 'target-b' }, secondEvent],
+  ]);
+  await observations.close();
+});
+
+test("does not report an observation ready before its source has seeded", async () => {
+  const observations = new RuntimeHostSessionObservationRegistry();
+  const staleSeeded = deferred<void>();
+  const staleSource = {
+    async observe() {
+      await staleSeeded.promise;
+    },
+    async unobserve() {},
+  };
+  let ready = false;
+
+  const observing = observations.observe(
+    "session-1",
+    "observer-1",
+    eventTarget(12),
+  ).then(() => {
+    ready = true;
+  });
+  await Promise.resolve();
+  assert.equal(ready, false);
+
+  const staleAttach = observations.attach(staleSource);
+  await Promise.resolve();
+  assert.equal(ready, false);
+
+  observations.detach(staleSource);
+  staleSeeded.resolve();
+  await staleAttach;
+  assert.equal(ready, false);
+
+  const seeded = deferred<void>();
+  const source = {
+    async observe() {
+      await seeded.promise;
+    },
+    async unobserve() {},
+  };
+  const attaching = observations.attach(source);
+  await Promise.resolve();
+  assert.equal(ready, false);
+
+  seeded.resolve();
+  await Promise.all([observing, attaching]);
+  assert.equal(ready, true);
+  await observations.close();
+});
+
+test("rejects a pending observation when its first seed fails", async () => {
+  const observations = new RuntimeHostSessionObservationRegistry();
+  const observing = observations.observe(
+    "session-1",
+    "observer-1",
+    eventTarget(12),
+  );
+
+  assert.deepEqual(await observations.attach({
+    async observe() {
+      throw new Error("seed failed");
+    },
+    async unobserve() {},
+  }), []);
+  await assert.rejects(observing, /ended before it became ready/);
+  await observations.close();
+});
+
+test("keeps an active observation across a failed Host replacement", async () => {
+  const observations = new RuntimeHostSessionObservationRegistry();
+  const target = eventTarget(12);
+  const firstSource = {
+    async observe() {},
+    async unobserve() {},
+  };
+  let recovered = 0;
+  const recoveredSource = {
+    async observe() {
+      recovered++;
+    },
+    async unobserve() {},
+  };
+  const failingSource = {
+    async observe() {
+      throw new Error("replacement seed failed");
+    },
+    async unobserve() {},
+  };
+
+  await observations.attach(firstSource);
+  await observations.observe("session-1", "observer-1", target);
+  observations.detach(firstSource);
+  assert.deepEqual(await observations.attach(failingSource), []);
+  observations.detach(failingSource);
+
+  assert.deepEqual(await observations.attach(recoveredSource), ["session-1"]);
+  assert.equal(recovered, 1);
+  await observations.close();
+});
+
+test("ignores a stale seed failure after its replacement succeeds", async () => {
+  const observations = new RuntimeHostSessionObservationRegistry();
+  let rejectStale!: (error: Error) => void;
+  const replacementSeed = deferred<void>();
+  const staleSeed = new Promise<void>((_resolve, reject) => {
+    rejectStale = reject;
+  });
+  const staleSource = {
+    observe: () => staleSeed,
+    async unobserve() {},
+  };
+  const replacementSource = {
+    observe: () => replacementSeed.promise,
+    async unobserve() {},
+  };
+  let ready = false;
+
+  await observations.attach(staleSource);
+  const observing = observations.observe(
+    "session-1",
+    "observer-1",
+    eventTarget(12),
+  ).then(() => {
+    ready = true;
+  });
+  observations.detach(staleSource);
+  const attaching = observations.attach(replacementSource);
+
+  rejectStale(new Error("stale seed failed"));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(ready, false);
+
+  replacementSeed.resolve(undefined);
+  assert.deepEqual(await attaching, ["session-1"]);
+  await observing;
+  assert.equal(ready, true);
+  await observations.close();
+});
+
 test("does not publish a terminal error while an owner-managed connection is replaced", async () => {
   let rejectFrame!: (error: Error) => void;
   let closeCount = 0;
@@ -206,6 +416,7 @@ test("does not publish a terminal error while an owner-managed connection is rep
     client: {
       openSession: async () => ({
         snapshot: continuitySnapshot(),
+        activeAssistantStreams: [],
         transcript: Promise.resolve([]),
         events,
         async close() {
@@ -233,6 +444,7 @@ test("keeps a native Turn watched without a renderer and releases it at terminal
     client: {
       openSession: async () => ({
         snapshot: continuitySnapshot(),
+        activeAssistantStreams: [],
         transcript: Promise.resolve([]),
         events,
         async close() {
@@ -277,6 +489,7 @@ test("does not let an older terminal projection finish a newer watched Turn", as
     client: {
       openSession: async () => ({
         snapshot: continuitySnapshot(),
+        activeAssistantStreams: [],
         transcript: transcript.promise,
         events,
         async close() {
@@ -365,6 +578,7 @@ test("invalidates the transcript when another client starts a Turn", async () =>
             terminalEventId: "terminal-1",
           },
         }),
+        activeAssistantStreams: [],
         transcript: Promise.resolve([]),
         events,
         async close() {
@@ -431,6 +645,7 @@ test("abandons a watched Turn when the Session is removed", async () => {
     client: {
       openSession: async () => ({
         snapshot: continuitySnapshot(),
+        activeAssistantStreams: [],
         transcript: Promise.resolve([]),
         events,
         async close() {
@@ -471,6 +686,8 @@ test("reopens an evicted active subscription without a renderer resubscribe", as
         const events = openCount === 1 ? firstEvents : secondEvents;
         return {
           snapshot: continuitySnapshot(),
+          activeAssistantStreams:
+            openCount === 1 ? [] : [activeText('message-1')],
           transcript: Promise.resolve(
             openCount === 1
               ? []
@@ -549,6 +766,7 @@ test("retries an initial subscription closed before commit and resyncs once", as
         const first = openCount === 1;
         return {
           snapshot: continuitySnapshot(),
+          activeAssistantStreams: [],
           transcript: first ? firstTranscript.promise : secondTranscript.promise,
           events: first ? firstEvents : secondEvents,
           async close() {
@@ -610,6 +828,7 @@ test("finishes a watched predecessor after initial catch-up recovery", async () 
         if (openCount === 1) {
           return {
             snapshot: continuitySnapshot(),
+            activeAssistantStreams: [],
             transcript: firstTranscript.promise,
             events: firstEvents,
             async close() {
@@ -627,6 +846,7 @@ test("finishes a watched predecessor after initial catch-up recovery", async () 
               status: "running",
             },
           }),
+          activeAssistantStreams: [],
           transcript: Promise.resolve([
             {
               type: "turn_state" as const,
@@ -680,6 +900,7 @@ test("keeps a joining observer pending across repeated catch-up eviction", async
         if (openCount === 1) {
           return {
             snapshot: continuitySnapshot(),
+            activeAssistantStreams: [],
             transcript: Promise.resolve([]),
             events: firstEvents,
             async close() {
@@ -690,6 +911,7 @@ test("keeps a joining observer pending across repeated catch-up eviction", async
         if (openCount === 2) {
           return {
             snapshot: continuitySnapshot(),
+            activeAssistantStreams: [],
             transcript: deferred<StoredMessage[]>().promise,
             events: replacementEvents,
             async close() {
@@ -699,6 +921,7 @@ test("keeps a joining observer pending across repeated catch-up eviction", async
         }
         return {
           snapshot: continuitySnapshot(),
+          activeAssistantStreams: [activeText('message-1')],
           transcript: finalTranscript.promise,
           events: finalEvents,
           async close() {
@@ -788,6 +1011,7 @@ test("reconciles terminal, Goal, interaction, and sidecar state after subscripti
             snapshot: continuitySnapshot({
               interactions: { pending: [firstInteraction] },
             }),
+            activeAssistantStreams: [],
             transcript: Promise.resolve([]),
             events: firstEvents,
             async close() {
@@ -807,6 +1031,7 @@ test("reconciles terminal, Goal, interaction, and sidecar state after subscripti
             },
             interactions: { pending: [secondInteraction] },
           }),
+          activeAssistantStreams: [activeText('message-2', 'turn-2')],
           transcript: Promise.resolve([
             {
               type: "assistant" as const,
@@ -906,6 +1131,7 @@ test("shares one Host subscription and one delivery per renderer target", async 
         openCount += 1;
         return {
           snapshot: continuitySnapshot(),
+          activeAssistantStreams: [],
           transcript: Promise.resolve([]),
           events,
           async close() {
@@ -941,6 +1167,7 @@ test("releases the renderer destroyed listener when its last observer leaves", a
     client: {
       openSession: async () => ({
         snapshot: continuitySnapshot(),
+        activeAssistantStreams: [],
         transcript: Promise.resolve([]),
         events,
         async close() {
@@ -975,6 +1202,7 @@ test("closes a Host handle that arrives after the observer is closed", async () 
   await observer.close();
   opened.resolve({
     snapshot: continuitySnapshot(),
+    activeAssistantStreams: [],
     transcript: Promise.resolve([]),
     events: new AsyncFrameQueue(),
     async close() {
@@ -998,6 +1226,7 @@ test("drains live frames while refreshing the canonical transcript", async () =>
         if (openCount === 1) {
           return {
             snapshot: continuitySnapshot(),
+            activeAssistantStreams: [],
             transcript: Promise.resolve([]),
             events: initialEvents,
             async close() {
@@ -1007,6 +1236,7 @@ test("drains live frames while refreshing the canonical transcript", async () =>
         }
         return {
           snapshot: continuitySnapshot(),
+          activeAssistantStreams: [],
           transcript: refreshTranscript.promise,
           events: refreshEvents,
           async close() {
@@ -1059,6 +1289,7 @@ test("rehydrates pending interactions and publishes answer acknowledgements", as
     client: {
       openSession: async () => ({
         snapshot: continuitySnapshot({ interactions: { pending: [pending] } }),
+        activeAssistantStreams: [],
         transcript: Promise.resolve([]),
         events,
         async close() {
@@ -1096,6 +1327,7 @@ test("projects Host queue revisions and newly delivered steering messages", asyn
     client: {
       openSession: async () => ({
         snapshot: continuitySnapshot(),
+        activeAssistantStreams: [],
         transcript: Promise.resolve([]),
         events,
         async close() {
@@ -1174,6 +1406,7 @@ test("publishes Host sidecar and graph invalidations without inventing Session s
     client: {
       openSession: async () => ({
         snapshot: continuitySnapshot(),
+        activeAssistantStreams: [],
         transcript: Promise.resolve([]),
         events,
         async close() {
@@ -1298,6 +1531,10 @@ function continuitySnapshot(
     interactions: { pending: [] },
     ...overrides,
   };
+}
+
+function activeText(messageId: string, turnId = 'turn-1') {
+  return { kind: 'text' as const, turnId, messageId };
 }
 
 function activeGoal() {

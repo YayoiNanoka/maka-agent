@@ -52,8 +52,11 @@ import {
   type ChatInputActionOwner,
   type ComposerTextPort,
 } from './chat-input-behavior.js';
-import { SKILL_INVOCATION_TOKEN_SOURCE } from '@maka/core';
-import type { AttachmentRef, PermissionMode, ProviderType, QuoteRef, SessionSummary } from '@maka/core';
+import { SKILL_INVOCATION_TOKEN_SOURCE } from '@maka/core/skill-invocation-token';
+import type { AttachmentRef, QuoteRef } from '@maka/core/events';
+import type { PermissionMode } from '@maka/core/permission';
+import type { ProviderType } from '@maka/core/llm-connections';
+import type { SessionSummary } from '@maka/core/session';
 import {
   Button as UiButton,
   ChatComposer as AstryxChatComposer,
@@ -191,10 +194,10 @@ export const Composer = forwardRef<
     hidden?: boolean;
     /**
      * When true, a turn is in flight — live output OR the pre-first-token wait.
-     * Send becomes Stop. The ＋ menu and permission control stay reachable
-     * (#1444); the model and thinking menus stay mounted but lock with an
-     * explanatory tooltip, so the footer row never reflows mid-turn; import
-     * stays blocked mid-turn.
+     * Send becomes Stop while the draft is empty. The ＋ menu and permission
+     * control stay reachable (#1444); the model and thinking menus stay
+     * mounted but lock with an explanatory tooltip, so the footer row never
+     * reflows mid-turn; import stays blocked mid-turn.
      */
     streaming?: boolean;
     /**
@@ -213,12 +216,12 @@ export const Composer = forwardRef<
     draftKey?: string;
     /** Optional host persistence for reload-safe draft scopes. */
     draftPersistence?: ComposerDraftPersistence;
+    /**
+     * The composer's one submit. Mid-turn the host decides what handing the
+     * draft over means there — steering, a control command — because that is a
+     * reading of the same action, not a second control on this surface.
+     */
     onSend(
-      text: string,
-      metadata?: ComposerSendMetadata,
-    ): boolean | void | Promise<boolean | void>;
-    /** Submit while a turn is active; the host owns control-command versus steering semantics. */
-    onStreamingSubmit?(
       text: string,
       metadata?: ComposerSendMetadata,
     ): boolean | void | Promise<boolean | void>;
@@ -263,12 +266,12 @@ export const Composer = forwardRef<
     modelChangePending?: boolean;
     onModelChange?(input: { llmConnectionSlug: string; model: string }): void | Promise<void>;
     /** Per-model thinking-level variants for the active model; empty/undefined hides the switcher. */
-    activeThinkingLevels?: readonly import('@maka/core').ThinkingLevel[];
-    activeThinkingLevel?: import('@maka/core').ThinkingLevel;
-    onThinkingLevelChange?(level: import('@maka/core').ThinkingLevel | undefined): void | Promise<void>;
-    newChatThinkingLevels?: readonly import('@maka/core').ThinkingLevel[];
-    newChatThinkingLevel?: import('@maka/core').ThinkingLevel;
-    onNewChatThinkingLevelChange?(level: import('@maka/core').ThinkingLevel | undefined): void | Promise<void>;
+    activeThinkingLevels?: readonly import('@maka/core/model-thinking').ThinkingLevel[];
+    activeThinkingLevel?: import('@maka/core/model-thinking').ThinkingLevel;
+    onThinkingLevelChange?(level: import('@maka/core/model-thinking').ThinkingLevel | undefined): void | Promise<void>;
+    newChatThinkingLevels?: readonly import('@maka/core/model-thinking').ThinkingLevel[];
+    newChatThinkingLevel?: import('@maka/core/model-thinking').ThinkingLevel;
+    onNewChatThinkingLevelChange?(level: import('@maka/core/model-thinking').ThinkingLevel | undefined): void | Promise<void>;
     /**
      * Home / empty-state composer only (no active session yet): the model
      * the next new chat will start with, and the picker callback. When set,
@@ -1038,10 +1041,7 @@ export const Composer = forwardRef<
     setSendPending(true);
     let sent: boolean | void;
     try {
-      const submit = props.streaming && props.onStreamingSubmit
-        ? props.onStreamingSubmit
-        : props.onSend;
-      sent = await submit(
+      sent = await props.onSend(
         text,
         workspaceFileReferences.length > 0 ? { workspaceFileReferences } : undefined,
       );
@@ -1217,6 +1217,12 @@ export const Composer = forwardRef<
   // The disabled Send is explanatory only in the no-model dead-end; other
   // disabled reasons (empty draft, in-flight import) keep the neutral label.
   const sendTitle = noModelConnection && !props.disabled ? copy.noModelSendTitle : copy.sendLabel;
+  // One slot, one button, two states — Astryx's send/stop toggle. Mid-turn an
+  // empty draft has nothing to submit, so the slot is Stop; the moment there is
+  // a draft, handing it over is the only meaningful action there and the button
+  // returns to Send (the host reads that as steering). Stop is not lost in that
+  // window: Esc interrupts from the input, which is where the hands already are.
+  const stopShown = props.streaming === true && !text.trim();
   const modelChipLabel = props.modelLabel?.trim() || copy.selectModel;
   // Mid-turn the model and thinking menus stay mounted but locked, each
   // carrying the reason in its own words (model vs thinking level) — the
@@ -1766,53 +1772,30 @@ export const Composer = forwardRef<
           sendActions={(
             <div className="maka-composer-right-controls" />
           )}
-          sendButton={props.streaming && props.onStreamingSubmit ? (
-            <div className="maka-composer-running-actions">
-              <IconButton
-                variant="ghost"
-                type="button"
-                isDisabled={props.stopPending}
-                label={props.stopPending ? copy.stopping : copy.stopLabel}
-                aria-busy={props.stopPending ? 'true' : undefined}
-                data-pending={props.stopPending ? 'true' : undefined}
-                onClick={() => {
-                  if (props.stopPending) return;
-                  void props.onStop();
-                }}
-                icon={<Square size={ICON_SIZE.control} aria-hidden="true" />}
-              />
-              <IconButton
-                variant="primary"
-                type="submit"
-                isDisabled={sendDisabled}
-                label={copy.steerLabel}
-                aria-busy={sendPending ? 'true' : undefined}
-                data-pending={sendPending ? 'true' : undefined}
-                tooltip={copy.steerLabel}
-                icon={<ArrowUp size={ICON_SIZE.chrome} aria-hidden="true" />}
-              />
-            </div>
-          ) : props.streaming ? (
-            <UiButton
-              variant="primary"
+          sendButton={stopShown ? (
+            <IconButton
+              variant="secondary"
+              type="button"
               isDisabled={props.stopPending}
+              label={props.stopPending ? copy.stopping : copy.stopLabel}
+              aria-busy={props.stopPending ? 'true' : undefined}
+              data-pending={props.stopPending ? 'true' : undefined}
+              tooltip={props.stopPending ? copy.stopping : copy.stopLabel}
               onClick={() => {
                 if (props.stopPending) return;
                 void props.onStop();
               }}
-              aria-busy={props.stopPending ? 'true' : undefined}
-              data-pending={props.stopPending ? 'true' : undefined}
-              label={props.stopPending ? copy.stopping : copy.stopLabel}
+              icon={<Square size={ICON_SIZE.control} aria-hidden="true" />}
             />
           ) : (
             <IconButton
               variant="primary"
               type="submit"
               isDisabled={sendDisabled}
-              label={copy.sendLabel}
+              label={props.streaming ? copy.steerLabel : copy.sendLabel}
               aria-busy={sendPending ? 'true' : undefined}
               data-pending={sendPending ? 'true' : undefined}
-              tooltip={sendTitle}
+              tooltip={props.streaming ? copy.steerLabel : sendTitle}
               icon={<ArrowUp size={ICON_SIZE.chrome} aria-hidden="true" />}
             />
           )}

@@ -7,6 +7,7 @@ import type {
   BackendKind,
   SessionBlockedReason,
   SessionStatus,
+  SessionToolProfile,
   SubagentSessionParent,
   SubagentSessionRuntime,
   SubagentSessionSpawn,
@@ -37,6 +38,8 @@ export interface CreateSessionInput {
   model?: string;
   /** Per-model reasoning-depth variant; `undefined` = model default. */
   thinkingLevel?: ThinkingLevel;
+  /** Immutable versioned prompt/tool contract for this Session. */
+  toolProfile?: SessionToolProfile;
   permissionMode: PermissionMode;
   /** Defaults to `agent`. */
   collaborationMode?: CollaborationMode;
@@ -96,14 +99,13 @@ export interface UserMessageInput extends MessageContent {
   regeneratedFromTurnId?: string;
   branchOfTurnId?: string;
   parentSessionId?: string;
-  /** What triggered this turn, when it is not a direct user message. Lets trace
-   *  distinguish an automation-triggered run from a hand-typed one. */
+  /** What triggered this turn, when it is not a direct user message. */
   origin?: TurnOrigin;
 }
 
 /** Non-user trigger source for a turn. */
 export type TurnOrigin =
-  | { kind: 'automation'; automationId: string }
+  | { kind: 'scheduled_task'; scheduledTaskId: string }
   | { kind: 'goal'; goalId: string }
   | {
       kind: 'agent_graph';
