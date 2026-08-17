@@ -3384,6 +3384,7 @@ export class SqliteSessionMetadataStore {
     const retirementUnitId = identities[0]!.sessionId;
     return this.transaction(() => {
       const present: VersionedSessionIdentity[] = [];
+      const pendingArchive: VersionedSessionIdentity[] = [];
       for (const identity of identities) {
         const record = this.readRecordSync(identity.sessionId);
         if (!record) {
@@ -3410,6 +3411,9 @@ export class SqliteSessionMetadataStore {
             record.metadataVersion,
           );
         }
+        if (!record.header.isArchived || record.header.status !== 'archived') {
+          pendingArchive.push(identity);
+        }
       }
       const deletedAt = this.now();
       const archivePatch: Partial<SessionHeader> = {
@@ -3418,7 +3422,7 @@ export class SqliteSessionMetadataStore {
         status: 'archived',
         statusUpdatedAt: deletedAt,
       };
-      for (const { sessionId, expectedVersion } of archiveIdentities) {
+      for (const { sessionId, expectedVersion } of pendingArchive) {
         this.updateHeaderSync(sessionId, archivePatch, {
           expectedVersion,
           skipNoop: true,

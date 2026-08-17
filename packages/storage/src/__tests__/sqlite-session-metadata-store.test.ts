@@ -316,6 +316,79 @@ describe('SqliteSessionMetadataStore', () => {
     }
   });
 
+  test('does not rewrite an already archived linked Session during parent removal', async () => {
+    let now = 100;
+    const store = createSqliteSessionMetadataStore(':memory:', { now: () => now });
+    const parent = fullHeader({
+      id: 'parent-session',
+      isArchived: false,
+      archivedAt: undefined,
+      status: 'active',
+    });
+    const child = fullHeader({
+      id: 'child-session',
+      parentSessionId: undefined,
+      branchOfTurnId: undefined,
+      revisionRootSessionId: undefined,
+      revisionParentSessionId: undefined,
+      revisionOfTurnId: undefined,
+      revisionIndex: undefined,
+      revisionState: undefined,
+      isArchived: false,
+      archivedAt: undefined,
+      status: 'active',
+      blockedReason: undefined,
+      subagentParent: {
+        kind: 'subagent',
+        parentSessionId: parent.id,
+        spawnedBy: {
+          parentRunId: 'parent-run',
+          parentTurnId: 'parent-turn',
+          toolCallId: 'spawn-call',
+        },
+        lifecycle: 'foreground',
+      },
+      subagentRuntime: {
+        schemaVersion: 1,
+        definitionVersion: 1,
+        agentId: 'implementation',
+        agentName: 'Implementation',
+        profile: 'implementation',
+        systemPrompt: 'Implement the task.',
+        toolNames: ['Read', 'Write'],
+        categoryPolicy: {},
+      },
+      subagentSpawn: {
+        schemaVersion: 1,
+        requestFingerprint: 'a'.repeat(64),
+        initialTurnId: 'child-turn',
+        initialRunId: 'child-run',
+      },
+    });
+    try {
+      await store.create(parent);
+      await store.createSubagent(child);
+      await store.setLifecycleVersioned([{ sessionId: child.id, expectedVersion: 1 }], 'archived');
+      const archivedBeforeRemoval = await store.read(child.id);
+
+      now = 200;
+      assert.deepEqual(
+        await store.removeVersioned(
+          [{ sessionId: parent.id, expectedVersion: 1 }],
+          [{ sessionId: child.id, expectedVersion: archivedBeforeRemoval.metadataVersion }],
+        ),
+        [parent.id],
+      );
+
+      const archivedAfterRemoval = await store.read(child.id);
+      assert.equal(archivedAfterRemoval.metadataVersion, archivedBeforeRemoval.metadataVersion);
+      assert.equal(archivedAfterRemoval.header.archivedAt, 100);
+      assert.equal(archivedAfterRemoval.header.statusUpdatedAt, 100);
+    } finally {
+      store.close();
+    }
+  });
+
   test('coexists with the RuntimeEvent schema in one workspace database', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-session-runtime-database-'));
     const path = join(root, 'runtime.sqlite');

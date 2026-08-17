@@ -149,6 +149,79 @@ describe('Host Session retirement coordinator', () => {
     });
   });
 
+  test('guards an already archived child without retiring it again', async () => {
+    await withHarness(async (harness) => {
+      const childSessionId = await createClosedSubagent(harness, harness.rootId, 0);
+      const archived = await harness.coordinator.handlers['session.lifecycle.set'](
+        { sessionId: childSessionId, state: 'archived' },
+        CONNECTION_CONTEXT,
+      );
+      assert.equal(archived.ok, true);
+      const childBeforeRemoval = await harness.store.readHeaderRecordSnapshot(childSessionId);
+      harness.actions.disposed.length = 0;
+      harness.actions.finalizedWorkspacePatches.length = 0;
+      harness.actions.retiredCapabilities.length = 0;
+      harness.actions.retiredMessages.length = 0;
+      harness.actions.retiredGraphWakes.length = 0;
+
+      let releaseDispose!: () => void;
+      const holdDispose = new Promise<void>((resolve) => {
+        releaseDispose = resolve;
+      });
+      let markDisposeStarted!: () => void;
+      const disposeStarted = new Promise<void>((resolve) => {
+        markDisposeStarted = resolve;
+      });
+      let held = false;
+      harness.disposeBackend = async (sessionId) => {
+        if (held || sessionId !== harness.rootId) return;
+        held = true;
+        markDisposeStarted();
+        await holdDispose;
+      };
+
+      const target = await harness.store.readHeaderRecordSnapshot(harness.rootId);
+      const removal = harness.coordinator.handlers['session.remove'](
+        { sessionId: harness.rootId, expectedRevision: target.revision },
+        CONNECTION_CONTEXT,
+      );
+      await disposeStarted;
+
+      let childAdmissionEntered = false;
+      const childAdmission = harness.admission.run(childSessionId, () => {
+        childAdmissionEntered = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const enteredWhileParentRemovalWasHeld = childAdmissionEntered;
+
+      releaseDispose();
+      assert.deepEqual(await removal, {
+        ok: true,
+        result: { kind: 'removed', sessionId: harness.rootId },
+      });
+      await childAdmission;
+      assert.equal(enteredWhileParentRemovalWasHeld, false);
+      assert.equal(childAdmissionEntered, true);
+
+      const childAfterRemoval = await harness.store.readHeaderRecordSnapshot(childSessionId);
+      assert.equal(childAfterRemoval.revision, childBeforeRemoval.revision);
+      assert.equal(childAfterRemoval.header.archivedAt, childBeforeRemoval.header.archivedAt);
+      assert.equal(
+        childAfterRemoval.header.statusUpdatedAt,
+        childBeforeRemoval.header.statusUpdatedAt,
+      );
+      for (const actions of [
+        harness.actions.disposed,
+        harness.actions.finalizedWorkspacePatches,
+        harness.actions.retiredCapabilities,
+        harness.actions.retiredMessages,
+        harness.actions.retiredGraphWakes,
+      ]) {
+        assert.equal(actions.includes(childSessionId), false);
+      }
+    });
+  });
+
   test('blocks parent removal while a direct subagent Session is busy', async () => {
     await withHarness(async (harness) => {
       const childSessionId = await createClosedSubagent(harness, harness.rootId, 0);
@@ -886,6 +959,7 @@ async function withHarness(
       scheduledTasks: new Set<string>(),
     };
     const memoryExtractionLane = new MemoryExtractionSessionLane();
+    const admission = new SessionAdmissionGate();
     const harness: RetirementHarness = {
       workspaceRoot: root,
       store,
@@ -895,6 +969,7 @@ async function withHarness(
       familyIds: [rootSession.id, revision.id],
       actions,
       blockers,
+      admission,
       memoryExtractionLane,
       failRemoveCommit: false,
       failRemovalPublication: false,
@@ -938,7 +1013,7 @@ async function withHarness(
           return store.removeSessionsVersioned(sessions, archiveSessions);
         },
       },
-      admission: new SessionAdmissionGate(),
+      admission,
       memoryExtractionLane,
       root: {
         readRootState: (sessionId) =>
@@ -1071,6 +1146,7 @@ interface RetirementHarness {
     readonly graphWake: Set<string>;
     readonly scheduledTasks: Set<string>;
   };
+  readonly admission: SessionAdmissionGate;
   readonly memoryExtractionLane: MemoryExtractionSessionLane;
   coordinator: HostSessionRetirementCoordinator;
   failRemoveCommit: boolean;

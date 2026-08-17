@@ -139,6 +139,7 @@ class RetryRemovalPlanResolution extends Error {
   constructor(
     readonly removeSessionIds: readonly string[],
     readonly archiveSessionIds: readonly string[],
+    readonly archiveGuardSessionIds: readonly string[],
   ) {
     super('Session removal plan changed before retirement admission');
   }
@@ -363,18 +364,24 @@ export class HostSessionRetirementCoordinator {
   ): Promise<T> {
     let planIds = await this.#readRemovalPlanSessionIds(sessionId);
     for (let attempt = 0; attempt < FAMILY_STABILIZATION_ATTEMPTS; attempt += 1) {
-      const allSessionIds = [...planIds.removeSessionIds, ...planIds.archiveSessionIds].sort();
+      const allSessionIds = [
+        ...planIds.removeSessionIds,
+        ...planIds.archiveSessionIds,
+        ...planIds.archiveGuardSessionIds,
+      ].sort();
       try {
         return await this.#memoryExtractionLane.runMany(allSessionIds, () =>
           this.#admission.runMany(allSessionIds, async (admission) => {
             const stableIds = await this.#readRemovalPlanSessionIds(sessionId);
             if (
               !sameIds(planIds.removeSessionIds, stableIds.removeSessionIds) ||
-              !sameIds(planIds.archiveSessionIds, stableIds.archiveSessionIds)
+              !sameIds(planIds.archiveSessionIds, stableIds.archiveSessionIds) ||
+              !sameIds(planIds.archiveGuardSessionIds, stableIds.archiveGuardSessionIds)
             ) {
               throw new RetryRemovalPlanResolution(
                 stableIds.removeSessionIds,
                 stableIds.archiveSessionIds,
+                stableIds.archiveGuardSessionIds,
               );
             }
             const snapshots = await Promise.all(
@@ -394,6 +401,7 @@ export class HostSessionRetirementCoordinator {
         planIds = {
           removeSessionIds: [...error.removeSessionIds],
           archiveSessionIds: [...error.archiveSessionIds],
+          archiveGuardSessionIds: [...error.archiveGuardSessionIds],
         };
       }
     }
@@ -476,6 +484,7 @@ export class HostSessionRetirementCoordinator {
   async #readRemovalPlanSessionIds(sessionId: string): Promise<{
     removeSessionIds: readonly string[];
     archiveSessionIds: readonly string[];
+    archiveGuardSessionIds: readonly string[];
   }> {
     const removeSessionIds = await this.#readFamilySessionIds(sessionId);
     const removeIds = new Set(removeSessionIds);
@@ -496,17 +505,22 @@ export class HostSessionRetirementCoordinator {
         )
         .map(sessionRevisionFamilyId),
     );
-    const archiveSessionIds = headers
-      .filter(
-        (header) =>
-          header.conversationCopy?.state !== 'preparing' &&
-          !removeIds.has(header.id) &&
-          childFamilyIds.has(sessionRevisionFamilyId(header)),
-      )
+    const childSessionHeaders = headers.filter(
+      (header) =>
+        header.conversationCopy?.state !== 'preparing' &&
+        !removeIds.has(header.id) &&
+        childFamilyIds.has(sessionRevisionFamilyId(header)),
+    );
+    const archiveSessionIds = childSessionHeaders
+      .filter((header) => !header.isArchived || header.status !== 'archived')
+      .map((header) => header.id);
+    const archiveGuardSessionIds = childSessionHeaders
+      .filter((header) => header.isArchived && header.status === 'archived')
       .map((header) => header.id);
     return {
       removeSessionIds: [...removeIds].sort(),
       archiveSessionIds: [...new Set(archiveSessionIds)].sort(),
+      archiveGuardSessionIds: [...new Set(archiveGuardSessionIds)].sort(),
     };
   }
 
