@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import type { SessionSummary } from '@maka/core/session';
 import {
   archivedTaskRows,
+  isOrphanedSubagentTask,
   matchesArchivedTaskQuery,
 } from '../../renderer/settings/task-catalog-rows.js';
 
@@ -120,5 +121,25 @@ describe('matchesArchivedTaskQuery', () => {
     const task = summary('a', { name: 'Analyze everything', projectId: 'gone' });
     assert.equal(matchesArchivedTaskQuery(task, 'analyze', projectLabelOf), true);
     assert.equal(matchesArchivedTaskQuery(task, 'undefined', projectLabelOf), false);
+  });
+});
+
+describe('isOrphanedSubagentTask', () => {
+  it('labels only ordinary linked Sessions whose parent is missing', () => {
+    const ordinary = summary('child', linkedTo('deleted-parent'));
+    const graph = summary('operator', {
+      subagentParent: {
+        ...linkedTo('deleted-parent').subagentParent!,
+        graph: {
+          graphId: `graph_${'a'.repeat(32)}`,
+          workId: `graph_work_${'b'.repeat(32)}`,
+          operatorId: `graph_operator_${'c'.repeat(32)}`,
+        },
+      },
+    });
+
+    assert.equal(isOrphanedSubagentTask(ordinary, new Set(['child'])), true);
+    assert.equal(isOrphanedSubagentTask(ordinary, new Set(['child', 'deleted-parent'])), false);
+    assert.equal(isOrphanedSubagentTask(graph, new Set(['operator'])), false);
   });
 });

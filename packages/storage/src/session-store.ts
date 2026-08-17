@@ -351,7 +351,10 @@ export interface SessionAuthorityStore extends SessionStore {
     sessions: readonly VersionedSessionIdentity[],
     state: 'active' | 'archived',
   ): Promise<SessionHeaderSnapshot[]>;
-  removeSessionsVersioned(sessions: readonly VersionedSessionIdentity[]): Promise<string[]>;
+  removeSessionsVersioned(
+    sessions: readonly VersionedSessionIdentity[],
+    archiveSessions?: readonly VersionedSessionIdentity[],
+  ): Promise<string[]>;
   reconcileOrphanedAgentGraphRetirements(): Promise<string[]>;
   listPendingSessionRetirementCleanupIds(sessionId?: string): Promise<string[]>;
   completeSessionRetirementCleanup(sessionId: string): Promise<void>;
@@ -849,9 +852,12 @@ class SqliteSessionStore implements SessionAuthorityStore {
     return (await this.metadata.setLifecycleVersioned(sessions, state)).map(projectHeaderSnapshot);
   }
 
-  async removeSessionsVersioned(sessions: readonly VersionedSessionIdentity[]): Promise<string[]> {
+  async removeSessionsVersioned(
+    sessions: readonly VersionedSessionIdentity[],
+    archiveSessions: readonly VersionedSessionIdentity[] = [],
+  ): Promise<string[]> {
     await this.ensureReady();
-    return this.metadata.removeVersioned(sessions);
+    return this.metadata.removeVersioned(sessions, archiveSessions);
   }
 
   async reconcileOrphanedAgentGraphRetirements(): Promise<string[]> {

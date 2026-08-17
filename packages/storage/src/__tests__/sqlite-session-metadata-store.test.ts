@@ -237,6 +237,85 @@ describe('SqliteSessionMetadataStore', () => {
     }
   });
 
+  test('atomically archives linked Sessions while removing their parent', async () => {
+    const store = createSqliteSessionMetadataStore(':memory:', { now: () => 100 });
+    const parent = fullHeader({
+      id: 'parent-session',
+      isArchived: false,
+      archivedAt: undefined,
+      status: 'active',
+    });
+    const child = fullHeader({
+      id: 'child-session',
+      parentSessionId: undefined,
+      branchOfTurnId: undefined,
+      revisionRootSessionId: undefined,
+      revisionParentSessionId: undefined,
+      revisionOfTurnId: undefined,
+      revisionIndex: undefined,
+      revisionState: undefined,
+      isArchived: false,
+      archivedAt: undefined,
+      status: 'active',
+      blockedReason: undefined,
+      subagentParent: {
+        kind: 'subagent',
+        parentSessionId: parent.id,
+        spawnedBy: {
+          parentRunId: 'parent-run',
+          parentTurnId: 'parent-turn',
+          toolCallId: 'spawn-call',
+        },
+        lifecycle: 'foreground',
+      },
+      subagentRuntime: {
+        schemaVersion: 1,
+        definitionVersion: 1,
+        agentId: 'implementation',
+        agentName: 'Implementation',
+        profile: 'implementation',
+        systemPrompt: 'Implement the task.',
+        toolNames: ['Read', 'Write'],
+        categoryPolicy: {},
+      },
+      subagentSpawn: {
+        schemaVersion: 1,
+        requestFingerprint: 'a'.repeat(64),
+        initialTurnId: 'child-turn',
+        initialRunId: 'child-run',
+      },
+    });
+    try {
+      await store.create(parent);
+      await store.createSubagent(child);
+
+      await assert.rejects(
+        store.removeVersioned(
+          [{ sessionId: parent.id, expectedVersion: 1 }],
+          [{ sessionId: child.id, expectedVersion: 2 }],
+        ),
+        SessionMetadataVersionConflictError,
+      );
+      assert.equal((await store.probeRemoval(parent.id)).kind, 'present');
+      assert.equal((await store.read(child.id)).header.isArchived, false);
+
+      assert.deepEqual(
+        await store.removeVersioned(
+          [{ sessionId: parent.id, expectedVersion: 1 }],
+          [{ sessionId: child.id, expectedVersion: 1 }],
+        ),
+        [parent.id],
+      );
+      assert.deepEqual(await store.probeRemoval(parent.id), { kind: 'removed' });
+      const archivedChild = await store.read(child.id);
+      assert.equal(archivedChild.header.isArchived, true);
+      assert.equal(archivedChild.header.status, 'archived');
+      assert.equal(archivedChild.metadataVersion, 2);
+    } finally {
+      store.close();
+    }
+  });
+
   test('coexists with the RuntimeEvent schema in one workspace database', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-session-runtime-database-'));
     const path = join(root, 'runtime.sqlite');

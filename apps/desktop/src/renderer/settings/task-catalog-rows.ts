@@ -24,6 +24,19 @@ export function archivedTaskRows<T extends SessionSummary>(sessions: readonly T[
   return deriveSessionRail(sessions, undefined, (session) => session.isArchived).sessions;
 }
 
+/** Whether an archived row remains because its ordinary parent task was deleted. */
+export function isOrphanedSubagentTask(
+  session: SessionSummary,
+  knownSessionIds: ReadonlySet<string>,
+): boolean {
+  const parent = session.subagentParent;
+  return (
+    parent !== undefined &&
+    parent.graph === undefined &&
+    !knownSessionIds.has(parent.parentSessionId)
+  );
+}
+
 /**
  * Whether a task answers to what was typed in the search box.
  *

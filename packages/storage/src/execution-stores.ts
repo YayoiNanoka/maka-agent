@@ -405,8 +405,8 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
       remove: (sessionId) => run(() => sessionStore.remove(sessionId)),
       setSessionsLifecycleVersioned: (sessions, state) =>
         run(() => sessionStore.setSessionsLifecycleVersioned(sessions, state)),
-      removeSessionsVersioned: (sessions) =>
-        run(() => sessionStore.removeSessionsVersioned(sessions)),
+      removeSessionsVersioned: (sessions, archiveSessions) =>
+        run(() => sessionStore.removeSessionsVersioned(sessions, archiveSessions)),
       reconcileOrphanedAgentGraphRetirements: () =>
         run(() => sessionStore.reconcileOrphanedAgentGraphRetirements()),
       listPendingSessionRetirementCleanupIds: (sessionId) =>
