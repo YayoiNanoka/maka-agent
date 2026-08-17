@@ -10,7 +10,28 @@ import type {
 import {
   createHostWebSearchTool,
   resolveHostTavilyWebSearchReadiness,
+  shouldResolveHostTavilyWebSearchReadiness,
 } from '../server/web-search-tool.js';
+
+test('Host only resolves Tavily readiness when that execution path can be exposed', () => {
+  const policy = createDefaultRuntimePolicy();
+  assert.equal(shouldResolveHostTavilyWebSearchReadiness(policy), false);
+  assert.equal(
+    shouldResolveHostTavilyWebSearchReadiness({
+      ...policy,
+      webSearch: { enabled: true, defaultProvider: 'tavily' },
+    }),
+    true,
+  );
+  assert.equal(
+    shouldResolveHostTavilyWebSearchReadiness({
+      ...policy,
+      privacy: { incognitoActive: true },
+      webSearch: { enabled: true, defaultProvider: 'tavily' },
+    }),
+    false,
+  );
+});
 
 test('Host Tavily readiness follows the canonical execution resolver', async () => {
   assert.equal(
