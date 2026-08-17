@@ -29,12 +29,10 @@ export function isOrphanedSubagentTask(
   session: SessionSummary,
   knownSessionIds: ReadonlySet<string>,
 ): boolean {
-  const parent = session.subagentParent;
-  return (
-    parent !== undefined &&
-    parent.graph === undefined &&
-    !knownSessionIds.has(parent.parentSessionId)
-  );
+  if (session.subagentParent?.graph !== undefined) return false;
+  const parentSessionId =
+    session.subagent?.parentSessionId ?? session.subagentParent?.parentSessionId;
+  return parentSessionId !== undefined && !knownSessionIds.has(parentSessionId);
 }
 
 /**

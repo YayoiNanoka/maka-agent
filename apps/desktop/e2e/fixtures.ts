@@ -7,6 +7,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import {
   createProjectCatalog,
+  createSessionStore,
   createSettingsStore,
 } from '@maka/storage';
 import {
@@ -31,6 +32,8 @@ const execFileAsync = promisify(execFile);
  * backend echo and its display form on the sent message.
  */
 export const COMPOSER_INPUT = '.maka-composer-editor [contenteditable="true"]';
+export const PARENT_REMOVAL_PARENT_NAME = '待删除的父任务';
+export const PARENT_REMOVAL_CHILD_NAME = '应归档的子任务';
 
 /**
  * Wait for Runtime's authoritative Skill projection, not merely for the
@@ -124,6 +127,59 @@ async function seedE2eLocale(userDataDir: string, locale: 'zh' | 'en'): Promise<
   await createSettingsStore(workspaceRoot).update({
     personalization: { uiLocale: locale },
   });
+}
+
+async function seedParentRemovalSessions(userDataDir: string): Promise<void> {
+  const workspaceRoot = path.join(userDataDir, 'workspaces', 'default');
+  const store = createSessionStore(workspaceRoot);
+  try {
+    const parent = await store.create({
+      cwd: path.join(userDataDir, 'project'),
+      backend: 'fake',
+      llmConnectionSlug: 'e2e',
+      model: 'claude-sonnet-4-5-20250929',
+      permissionMode: 'ask',
+      name: PARENT_REMOVAL_PARENT_NAME,
+      labels: [],
+    });
+    await store.createSubagent({
+      cwd: path.join(userDataDir, 'project'),
+      backend: 'fake',
+      llmConnectionSlug: 'e2e',
+      model: 'claude-sonnet-4-5-20250929',
+      permissionMode: 'execute',
+      name: PARENT_REMOVAL_CHILD_NAME,
+      labels: [],
+      subagentParent: {
+        kind: 'subagent',
+        parentSessionId: parent.id,
+        spawnedBy: {
+          parentRunId: 'e2e-parent-run',
+          parentTurnId: 'e2e-parent-turn',
+          toolCallId: 'e2e-spawn-call',
+        },
+        lifecycle: 'foreground',
+      },
+      subagentRuntime: {
+        schemaVersion: 1,
+        definitionVersion: 1,
+        agentId: 'implementation',
+        agentName: 'Implementation',
+        profile: 'implementation',
+        systemPrompt: 'Implement the assigned task.',
+        toolNames: ['Read', 'Write'],
+        categoryPolicy: {},
+      },
+      subagentSpawn: {
+        schemaVersion: 1,
+        requestFingerprint: 'a'.repeat(64),
+        initialTurnId: 'e2e-child-turn',
+        initialRunId: 'e2e-child-run',
+      },
+    });
+  } finally {
+    await store.close?.();
+  }
 }
 
 async function seedE2eInvocableSkills(userDataDir: string): Promise<void> {
@@ -249,6 +305,7 @@ async function withE2eWindow(
     scrollMotion,
     invocableSkills,
     gitReviewExtraFiles,
+    parentRemovalSessions,
   }: {
     seed: boolean;
     readinessSelector: string;
@@ -262,6 +319,7 @@ async function withE2eWindow(
     showWindow?: boolean;
     invocableSkills?: boolean;
     gitReviewExtraFiles?: number;
+    parentRemovalSessions?: boolean;
   },
   use: (page: Page, context: { userDataDir: string }) => Promise<void>,
 ): Promise<void> {
@@ -275,6 +333,7 @@ async function withE2eWindow(
   const rendererLogs: string[] = [];
   try {
     if (seed) await seedE2eConnection(userDataDir);
+    if (parentRemovalSessions) await seedParentRemovalSessions(userDataDir);
     if (invocableSkills) await seedE2eInvocableSkills(userDataDir);
     if (gitReviewExtraFiles !== undefined) {
       await seedE2eGitReviewProject(userDataDir, gitReviewExtraFiles);
@@ -343,6 +402,7 @@ export const test = base.extend<{
   invocableSkillsWindow: Page;
   linkColorWindow: Page;
   projectSidebarWindow: Page;
+  parentRemovalWindow: Page;
   promptRailWindow: Page;
   promptRailMotionWindow: Page;
 }>({
@@ -392,6 +452,17 @@ export const test = base.extend<{
       locale: 'zh',
       showWindow: true,
     }, use);
+  },
+  parentRemovalWindow: async ({}, use) => {
+    await withE2eWindow(
+      {
+        seed: true,
+        readinessSelector: COMPOSER_INPUT,
+        locale: 'zh',
+        parentRemovalSessions: true,
+      },
+      use,
+    );
   },
   // A multi-prompt transcript for the prompt anchor rail. Shown, because every
   // assertion in prompt-rail.spec.ts is geometry the compositor has to settle.

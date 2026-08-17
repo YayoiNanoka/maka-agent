@@ -125,8 +125,16 @@ describe('matchesArchivedTaskQuery', () => {
 });
 
 describe('isOrphanedSubagentTask', () => {
-  it('labels only ordinary linked Sessions whose parent is missing', () => {
-    const ordinary = summary('child', linkedTo('deleted-parent'));
+  it('labels ordinary linked Sessions only when their parent is missing', () => {
+    const projected = summary('projected-child', {
+      subagent: {
+        parentSessionId: 'deleted-parent',
+        agentId: 'implementation',
+        agentName: 'Implementation',
+        profile: 'implementation',
+      },
+    });
+    const local = summary('local-child', linkedTo('deleted-parent'));
     const graph = summary('operator', {
       subagentParent: {
         ...linkedTo('deleted-parent').subagentParent!,
@@ -138,8 +146,12 @@ describe('isOrphanedSubagentTask', () => {
       },
     });
 
-    assert.equal(isOrphanedSubagentTask(ordinary, new Set(['child'])), true);
-    assert.equal(isOrphanedSubagentTask(ordinary, new Set(['child', 'deleted-parent'])), false);
+    assert.equal(isOrphanedSubagentTask(projected, new Set(['projected-child'])), true);
+    assert.equal(
+      isOrphanedSubagentTask(projected, new Set(['projected-child', 'deleted-parent'])),
+      false,
+    );
+    assert.equal(isOrphanedSubagentTask(local, new Set(['local-child'])), true);
     assert.equal(isOrphanedSubagentTask(graph, new Set(['operator'])), false);
   });
 });
