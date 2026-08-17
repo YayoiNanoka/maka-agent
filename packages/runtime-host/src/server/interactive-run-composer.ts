@@ -315,6 +315,7 @@ export interface InteractiveRunComposerFactoryInput
     'runtimePolicy' | 'boundTools' | 'boundToolNames' | 'clientCapabilities' | 'plan'
   > {
   readonly clientCapabilities: HostClientCapabilityCoordinator;
+  readonly resolveTavilyWebSearchReadiness: () => Promise<boolean>;
   readonly resolveRootTools?: (sessionId: string) => Promise<readonly MakaTool[]>;
   readonly childTools?: readonly MakaTool[];
   readonly worktreePatchWriteBackAvailable?: boolean;
@@ -344,12 +345,20 @@ export function createInteractiveRunComposerFactory(
               backendContext.abortSignal,
             )
           : [];
+      const tavilyReady =
+        runtimePolicy.policy.webSearch.defaultProvider === 'tavily'
+          ? await readDuringBackendCreation(
+              input.resolveTavilyWebSearchReadiness,
+              backendContext.abortSignal,
+            )
+          : false;
       const candidateHostTools = [...(input.hostTools ?? []), ...rootTools];
       const webSearchRouting = {
         tools: routeWebFetchTools(candidateHostTools, runtimePolicy.policy.privacy),
         settings: runtimePolicy.policy.webSearch,
         connection,
         model: modelId,
+        tavilyReady,
         privacy: runtimePolicy.policy.privacy,
       } as const;
       const hostTools = routeWebSearchTools(webSearchRouting);

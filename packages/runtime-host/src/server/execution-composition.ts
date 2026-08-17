@@ -163,6 +163,7 @@ import { HostWebSearchCoordinator } from './web-search-coordinator.js';
 import {
   createHostWebSearchService,
   createHostWebSearchToolFromService,
+  resolveHostTavilyWebSearchReadiness,
 } from './web-search-tool.js';
 import { createHostWebFetchService, createHostWebFetchToolFromService } from './web-fetch-tool.js';
 import { createHostExecutionArtifactServices } from './execution-artifacts.js';
@@ -640,6 +641,8 @@ export async function createExecutionRuntimeHostComposition(
               memory: requireMemory(memory),
               taskLedger,
               clientCapabilities: requireClientCapabilities(clientCapabilities),
+              resolveTavilyWebSearchReadiness: () =>
+                resolveHostTavilyWebSearchReadiness(runtimePolicyStores.operations),
               ...(scheduledTaskTool ? { scheduledTaskTool } : {}),
               planStore: openedPlanStore,
               deepResearchTools: requireDeepResearch(deepResearch).toolsForSession(
@@ -811,6 +814,10 @@ export async function createExecutionRuntimeHostComposition(
         return childAgentTools.childTools.filter((tool) => tool.name !== 'WebSearch');
       }
       const { models, ...connection } = resolved.connection;
+      const tavilyReady =
+        snapshot.policy.webSearch.defaultProvider === 'tavily'
+          ? await resolveHostTavilyWebSearchReadiness(runtimePolicyStores.operations)
+          : false;
       return routeWebSearchTools({
         tools: childAgentTools.childTools,
         settings: snapshot.policy.webSearch,
@@ -820,6 +827,7 @@ export async function createExecutionRuntimeHostComposition(
           ...(models ? { models: [...models] } : {}),
         },
         model: header.model,
+        tavilyReady,
         privacy: snapshot.policy.privacy,
       });
     };

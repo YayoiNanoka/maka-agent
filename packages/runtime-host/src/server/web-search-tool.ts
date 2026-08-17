@@ -27,6 +27,12 @@ export interface HostWebSearchService {
   }): Promise<WebSearchResponse>;
 }
 
+export async function resolveHostTavilyWebSearchReadiness(
+  policy: Pick<RuntimePolicyOperationCoordinator, 'resolveWebSearchExecution'>,
+): Promise<boolean> {
+  return (await policy.resolveWebSearchExecution({ provider: 'tavily' })).kind === 'ready';
+}
+
 export function createHostWebSearchService(input: HostWebSearchServiceInput): HostWebSearchService {
   const createFetchTransport = input.createFetchTransport ?? createProxiedFetchTransport;
   return {
