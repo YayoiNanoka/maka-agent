@@ -299,6 +299,10 @@ export async function assertPackagedResources(
     requirePath,
     forbidPath = assertMissing,
     requireWindowsSandbox = process.platform === 'win32',
+    // The upgrade-lifecycle check runs this against a previously released
+    // build, which predates the disclaimer being packaged. Requiring it there
+    // would fail a release that was correct when it shipped.
+    requireDisclaimer = true,
   } = {},
 ) {
   const required = [
@@ -310,6 +314,7 @@ export async function assertPackagedResources(
     join('workers', 'filesystem-worker.js'),
     join('licenses', 'maka', 'LICENSE'),
     join('licenses', 'maka', 'NOTICE'),
+    ...(requireDisclaimer ? [join('licenses', 'maka', 'DISCLAIMER-WIP')] : []),
     join('licenses', 'dugite', 'LICENSE'),
     join('licenses', 'git', 'NOTICE.txt'),
     join('licenses', 'electron', 'LICENSE'),

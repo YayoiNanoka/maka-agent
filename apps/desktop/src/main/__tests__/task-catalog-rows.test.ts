@@ -135,23 +135,11 @@ describe('isOrphanedSubagentTask', () => {
       },
     });
     const local = summary('local-child', linkedTo('deleted-parent'));
-    const graph = summary('operator', {
-      subagentParent: {
-        ...linkedTo('deleted-parent').subagentParent!,
-        graph: {
-          graphId: `graph_${'a'.repeat(32)}`,
-          workId: `graph_work_${'b'.repeat(32)}`,
-          operatorId: `graph_operator_${'c'.repeat(32)}`,
-        },
-      },
-    });
-
     assert.equal(isOrphanedSubagentTask(projected, new Set(['projected-child'])), true);
     assert.equal(
       isOrphanedSubagentTask(projected, new Set(['projected-child', 'deleted-parent'])),
       false,
     );
     assert.equal(isOrphanedSubagentTask(local, new Set(['local-child'])), true);
-    assert.equal(isOrphanedSubagentTask(graph, new Set(['operator'])), false);
   });
 });

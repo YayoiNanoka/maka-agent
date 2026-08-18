@@ -69,7 +69,7 @@ describe('Runtime Host bootstrap protocol', () => {
   });
 
   test('keeps the subscription queue Epoch correlated', () => {
-    assert.equal(SESSION_CONTINUITY_SCHEMA_VERSION, 3);
+    assert.equal(SESSION_CONTINUITY_SCHEMA_VERSION, 4);
     const opened = {
       requestId: 'open-1',
       operation: 'subscription.open',
@@ -160,6 +160,27 @@ describe('Runtime Host bootstrap protocol', () => {
         SUBSCRIPTION_OPEN_RESULT_MAX_BYTES,
     );
     assert.throws(() => decodeHostFrame(oversized), isInvalidFrame);
+  });
+
+  test('normalizes legacy Session statuses in continuity snapshots', () => {
+    for (const status of ['review', 'done']) {
+      const decoded = decodeSessionContinuitySnapshot({
+        ...continuitySnapshot('epoch-1'),
+        session: { ...continuitySnapshot('epoch-1').session, status },
+      });
+      assert.equal(decoded.session.status, 'active');
+    }
+  });
+
+  test('rejects unknown Session statuses in continuity snapshots', () => {
+    assert.throws(
+      () =>
+        decodeSessionContinuitySnapshot({
+          ...continuitySnapshot('epoch-1'),
+          session: { ...continuitySnapshot('epoch-1').session, status: 'unknown' },
+        }),
+      isInvalidSessionStatus,
+    );
   });
 
   test('decodes only privacy-normalized bounded subscription live frames', () => {
@@ -1306,6 +1327,10 @@ describe('Runtime Host bootstrap protocol', () => {
 
 function isInvalidFrame(error: unknown): boolean {
   return error instanceof RuntimeHostProtocolError && error.code === 'invalid_frame';
+}
+
+function isInvalidSessionStatus(error: unknown): boolean {
+  return error instanceof RuntimeHostProtocolError && error.message === 'Invalid Session status';
 }
 
 function queuedMessage(

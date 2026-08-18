@@ -440,3 +440,47 @@
   margin-left: auto;
   color: var(--muted-foreground);
 }
+
+.remoteProjectDirectoryBody {
+  display: flex;
+  min-height: 280px;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.remoteProjectDirectoryBreadcrumbs {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.remoteProjectDirectoryRoot,
+.remoteProjectDirectoryBreadcrumb {
+  color: var(--muted-foreground);
+}
+
+.remoteProjectDirectoryBreadcrumb::before {
+  margin-right: var(--space-1);
+  content: '/';
+}
+
+.remoteProjectDirectoryEntries {
+  display: grid;
+  gap: var(--space-1);
+  overflow-y: auto;
+}
+
+.remoteProjectDirectoryEntry {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.remoteProjectDirectoryError {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}

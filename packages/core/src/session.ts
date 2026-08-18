@@ -29,28 +29,12 @@ import { decodeTurnOrigin, type TurnOrigin } from './turn-origin.js';
 
 export { DEEP_RESEARCH_SESSION_LABEL, isDeepResearchSession } from './explore-agent.js';
 
-/**
- * `archived` is still here and still written by `SessionStore.archive()`
- * alongside `isArchived`; consolidating those two onto one authority is its own
- * change (#2984, PR 3) because it rewrites stored rows.
- *
- * `review` and `done` have no writer in current source, but they stay: this
- * list is read back out of storage, and narrowing it is a data migration, not a
- * cleanup. `resolveLegacyStatus` in the JSONL importer (removed in #2656) let
- * both values through into real SQLite stores verbatim, and `normalizeSession
- * Header` throws on an unrecognised status for the WHOLE header — so one stored
- * row carrying `done` fails an entire catalog page, not just its own row.
- * Removing them needs a schema migration or a tolerant read, which is its own
- * change with its own review.
- */
+/** Runtime execution states. Archive visibility is represented by `isArchived`. */
 export const SESSION_STATUSES = [
   'active',
   'running',
   'waiting_for_user',
   'blocked',
-  'review',
-  'done',
-  'archived',
   'aborted',
 ] as const;
 
@@ -216,7 +200,6 @@ export interface SessionHeader {
   labels: string[];
 
   isArchived: boolean;
-  archivedAt?: number;
   status: SessionStatus;
   blockedReason?: SessionBlockedReason;
   statusUpdatedAt?: number;
@@ -271,6 +254,10 @@ export interface SessionHeader {
   /** Forward-compatible schema versioning. V0.1 only writes 1. */
   schemaVersion: 1;
 }
+
+export type SessionHeaderPatch = Partial<Omit<SessionHeader, 'isArchived'>> & {
+  readonly isArchived?: never;
+};
 
 export type BackendKind = 'ai-sdk' | 'fake';
 

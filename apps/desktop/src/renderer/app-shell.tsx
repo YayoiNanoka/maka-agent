@@ -183,7 +183,6 @@ import {
   useAppShellNavRefSync,
   useSessionEventHealthPolling,
   useShellRunUpdates,
-  useSettledSessionTransientReconcile,
 } from './app-shell-effects';
 import {
   EMPTY_LIVE_CONTENT_SEED,
@@ -225,6 +224,7 @@ function rebaseWorkspaceFileReferences(
 }
 
 import { useSettingsModal } from './use-settings-modal';
+import { RemoteProjectDirectoryDialog } from './remote-project-directory-dialog';
 import { useSystemUiLocale } from './use-system-ui-locale';
 import {
   isSessionWorkspaceUnavailableError,
@@ -390,7 +390,6 @@ function AppShellContent({
     setSessionEventHealthBySession,
     setPendingPermissionModeBySession,
     setPendingSessionModelBySession,
-    clearTurnTransientState,
   } = useAppShellSessionWorkspace(toastApi);
   const interactionHydrationEpochRef = useRef(new Map<string, number>());
   const markInteractionChanged = useCallback((sessionId: string) => {
@@ -558,6 +557,7 @@ function AppShellContent({
     setUiLocalePreference,
   });
   const shellCopy = getShellCopy(uiLocale).app;
+  const projectActionsCopy = getShellCopy(uiLocale).projectActions;
   const desktopConversationCopy = getDesktopConversationCopy(uiLocale);
   const terminalPanelCopy = desktopConversationCopy.terminalPanel;
   const workbarCopy = desktopConversationCopy.workbar;
@@ -1903,11 +1903,11 @@ function AppShellContent({
         projects: host.projects.filter((project) => project.archivedAt === undefined),
         selectedProjectId,
         onSelectProject: (projectId: string) => newTask.selectProject(host, projectId),
+        ...(host.capabilities.chooseClientDirectory || host.capabilities.chooseHostDirectory
+          ? { onAdd: () => void newTask.addProject(host) }
+          : {}),
         ...(host.capabilities.chooseClientDirectory
-          ? {
-              onAdd: () => void newTask.addProject(host),
-              onRelink: (projectId: string) => void newTask.relinkProject(host, projectId),
-            }
+          ? { onRelink: (projectId: string) => void newTask.relinkProject(host, projectId) }
           : {}),
         ...(host.capabilities.selectNoProject
           ? { onSelectNoProject: () => newTask.selectNoProject(host) }
@@ -2598,13 +2598,6 @@ function AppShellContent({
     sessionEventHealthBySessionRef,
     setSessionEventHealthBySession,
   });
-  useSettledSessionTransientReconcile({
-    activeId,
-    sessions,
-    liveTurnBySessionRef,
-    clearTurnTransientState,
-  });
-
   function captureComposerImportOwner(): ComposerImportOwner {
     return {
       sessionId: activeIdRef.current,
@@ -3380,7 +3373,9 @@ function AppShellContent({
                   taskReadinessNotice?.action === 'workspace_picker'
                     ? activeSession
                       ? openNewTaskSurface
-                      : newTask.selectedHost?.capabilities.chooseClientDirectory
+                      : newTask.selectedHost &&
+                          (newTask.selectedHost.capabilities.chooseClientDirectory ||
+                            newTask.selectedHost.capabilities.chooseHostDirectory)
                         ? () => {
                             if (newTask.selectedHost) void newTask.addProject(newTask.selectedHost);
                           }
@@ -3523,6 +3518,27 @@ function AppShellContent({
       />
 
       <RuntimeHostSshTerminalDialog />
+
+      <RemoteProjectDirectoryDialog
+        host={newTask.directoryHost ? {
+          profileId: newTask.directoryHost.profile.id,
+          hostId: newTask.directoryHost.hostId,
+          name: newTask.directoryHost.profile.name,
+        } : undefined}
+        onClose={newTask.closeDirectoryPicker}
+        onRegistered={(project, host) => {
+          void newTask.acceptRegisteredProject(project, host).catch((error) => {
+            toastApi.error(
+              projectActionsCopy.projectUpdateFailedTitle,
+              localizedShellErrorMessage(
+                error,
+                projectActionsCopy.projectUpdateFailedFallback,
+                uiLocale,
+              ),
+            );
+          });
+        }}
+      />
 
       <AppShellOverlays
         settingsOpen={settingsOpen}

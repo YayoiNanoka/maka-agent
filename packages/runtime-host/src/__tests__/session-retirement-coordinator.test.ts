@@ -134,7 +134,7 @@ describe('Host Session retirement coordinator', () => {
         assert.equal(probe.kind, 'present');
         if (probe.kind !== 'present') continue;
         assert.equal(probe.record.header.isArchived, true);
-        assert.equal(probe.record.header.status, 'archived');
+        assert.equal(probe.record.header.status, 'active');
       }
       assert.deepEqual(new Set(harness.actions.removedContinuity), new Set(harness.familyIds));
       assert.deepEqual(
@@ -205,7 +205,10 @@ describe('Host Session retirement coordinator', () => {
 
       const childAfterRemoval = await harness.store.readHeaderRecordSnapshot(childSessionId);
       assert.equal(childAfterRemoval.revision, childBeforeRemoval.revision);
-      assert.equal(childAfterRemoval.header.archivedAt, childBeforeRemoval.header.archivedAt);
+      assert.equal(childAfterRemoval.committedAt, childBeforeRemoval.committedAt);
+      assert.equal(childAfterRemoval.header.isArchived, true);
+      assert.equal(childAfterRemoval.header.status, childBeforeRemoval.header.status);
+      assert.equal(childAfterRemoval.header.blockedReason, childBeforeRemoval.header.blockedReason);
       assert.equal(
         childAfterRemoval.header.statusUpdatedAt,
         childBeforeRemoval.header.statusUpdatedAt,
@@ -236,6 +239,7 @@ describe('Host Session retirement coordinator', () => {
       assert.equal(removed.ok, false);
       if (removed.ok) return;
       assert.equal(removed.error.code, 'session_busy');
+      assert.match(removed.error.message, new RegExp(childSessionId));
       assert.equal((await harness.store.probeSessionRemoval(harness.rootId)).kind, 'present');
       assert.equal((await harness.store.readHeaderSnapshot(childSessionId)).isArchived, false);
       assert.deepEqual(harness.actions.disposed, []);
@@ -258,7 +262,7 @@ describe('Host Session retirement coordinator', () => {
 
       const child = await harness.store.readHeaderSnapshot(childSessionId);
       assert.equal(child.isArchived, true);
-      assert.equal(child.status, 'archived');
+      assert.equal(child.status, 'active');
     });
   });
 
@@ -291,7 +295,9 @@ describe('Host Session retirement coordinator', () => {
       );
       assert.equal(archived.ok, true);
       for (const childSessionId of childSessionIds) {
-        assert.equal((await harness.store.readHeaderSnapshot(childSessionId)).status, 'archived');
+        const header = await harness.store.readHeaderSnapshot(childSessionId);
+        assert.equal(header.isArchived, true);
+        assert.equal(header.status, 'active');
       }
 
       const restored = await harness.coordinator.handlers['session.lifecycle.set'](
@@ -300,7 +306,9 @@ describe('Host Session retirement coordinator', () => {
       );
       assert.equal(restored.ok, true);
       for (const childSessionId of childSessionIds) {
-        assert.equal((await harness.store.readHeaderSnapshot(childSessionId)).status, 'active');
+        const header = await harness.store.readHeaderSnapshot(childSessionId);
+        assert.equal(header.isArchived, false);
+        assert.equal(header.status, 'active');
       }
 
       const target = await harness.store.readHeaderRecordSnapshot(harness.revisionId);
@@ -586,6 +594,27 @@ describe('Host Session retirement coordinator', () => {
       assert.equal(archived.ok, true);
       await assertFamilyLifecycle(harness, true);
       assert.deepEqual(new Set(harness.actions.refreshed), new Set(harness.familyIds));
+    });
+  });
+
+  test('re-resolves a removal plan that changes before admission', async () => {
+    await withHarness(async (harness) => {
+      const target = await harness.store.readHeaderRecordSnapshot(harness.rootId);
+      harness.hideRevisionFromNextFamilyRead = true;
+
+      const removed = await harness.coordinator.handlers['session.remove'](
+        { sessionId: harness.rootId, expectedRevision: target.revision },
+        CONNECTION_CONTEXT,
+      );
+
+      assert.deepEqual(removed, {
+        ok: true,
+        result: { kind: 'removed', sessionId: harness.rootId },
+      });
+      for (const sessionId of harness.familyIds) {
+        assert.deepEqual(await harness.store.probeSessionRemoval(sessionId), { kind: 'removed' });
+      }
+      assert.deepEqual(new Set(harness.actions.disposed), new Set(harness.familyIds));
     });
   });
 
@@ -1000,8 +1029,8 @@ async function withHarness(
           store.listPendingSessionRetirementCleanupIds(sessionId),
         completeSessionRetirementCleanup: (sessionId) =>
           store.completeSessionRetirementCleanup(sessionId),
-        setSessionsLifecycleVersioned: (sessions, state) =>
-          store.setSessionsLifecycleVersioned(sessions, state),
+        setSessionsArchivedVersioned: (sessions, isArchived) =>
+          store.setSessionsArchivedVersioned(sessions, isArchived),
         removeSessionsVersioned: async (sessions, archiveSessions) => {
           if (harness.failRemoveCommit) throw new Error('injected remove failure');
           if (harness.updateSiblingBeforeRemoveCommit) {
@@ -1199,7 +1228,6 @@ async function assertFamilyLifecycle(harness: RetirementHarness, archived: boole
   for (const sessionId of harness.familyIds) {
     const header = await harness.store.readHeaderSnapshot(sessionId);
     assert.equal(header.isArchived, archived);
-    assert.equal(header.status === 'archived', archived);
   }
 }
 

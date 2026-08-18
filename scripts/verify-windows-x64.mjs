@@ -97,10 +97,18 @@ export async function verifyPackagedWindowsApp(
   const appAsar = join(resources, 'app.asar');
   const sandboxExecutable = join(resources, 'windows-sandbox', 'maka-windows-sandbox.exe');
   const requireWindowsSandbox = expectedVersion === undefined;
+  // Same reason as the sandbox above: a packaged resource added after the
+  // baseline release cannot be required of that baseline.
+  const requireDisclaimer = expectedVersion === undefined;
 
   step('checking packaged resources');
   await requirePath(executable);
-  await assertPackagedResources(resources, { requirePath, forbidPath, requireWindowsSandbox });
+  await assertPackagedResources(resources, {
+    requirePath,
+    forbidPath,
+    requireWindowsSandbox,
+    requireDisclaimer,
+  });
   await requirePath(join(resources, 'git', 'cmd', 'git.exe'));
 
   step('reading the executable architecture');

@@ -29,7 +29,6 @@ export function isOrphanedSubagentTask(
   session: SessionSummary,
   knownSessionIds: ReadonlySet<string>,
 ): boolean {
-  if (session.subagentParent?.graph !== undefined) return false;
   const parentSessionId =
     session.subagent?.parentSessionId ?? session.subagentParent?.parentSessionId;
   return parentSessionId !== undefined && !knownSessionIds.has(parentSessionId);

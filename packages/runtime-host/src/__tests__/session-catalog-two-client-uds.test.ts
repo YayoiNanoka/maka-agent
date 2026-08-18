@@ -434,41 +434,6 @@ test('two Clients share stable Session creation, CAS configuration, and catalog 
         bulk.length + catalogBeforeBulk.sessions.length,
       );
 
-      const filteredStart = await desktop.request('session.catalog.query', {
-        kind: 'list_start',
-        filter: { labelSlug: 'paged' },
-      });
-      assert.equal(filteredStart.kind, 'page');
-      if (filteredStart.kind !== 'page' || !filteredStart.nextCursor) {
-        assert.fail('Filtered Session catalog must provide a continuation');
-      }
-      assert.equal(filteredStart.sessions.length, 32);
-      const filteredContinuation = await tui.request('session.catalog.query', {
-        kind: 'list_continue',
-        revision: filteredStart.revision,
-        cursor: filteredStart.nextCursor,
-      });
-      assert.equal(filteredContinuation.kind, 'page');
-      if (filteredContinuation.kind !== 'page') {
-        assert.fail('Filtered Session catalog continuation must return a page');
-      }
-      assert.equal(filteredContinuation.sessions.length, 2);
-      assert.equal(
-        [...filteredStart.sessions, ...filteredContinuation.sessions].every((session) =>
-          requireSessionProjection(session).labels.includes('paged'),
-        ),
-        true,
-      );
-      await assert.rejects(
-        desktop.request('session.catalog.query', {
-          kind: 'list_continue',
-          filter: { isFlagged: true },
-          revision: filteredStart.revision,
-          cursor: filteredStart.nextCursor,
-        }),
-        operationError('invalid_request'),
-      );
-
       const staleStart = await desktop.request('session.catalog.query', {
         kind: 'list_start',
       });
@@ -489,16 +454,6 @@ test('two Clients share stable Session creation, CAS configuration, and catalog 
         cursor: staleStart.nextCursor,
       });
       assert.equal(staleContinuation.kind, 'revision_changed');
-      const flagged = await tui.request('session.catalog.query', {
-        kind: 'list_start',
-        filter: { isFlagged: true },
-      });
-      assert.equal(flagged.kind, 'page');
-      if (flagged.kind !== 'page') assert.fail('Flagged Session query must return a page');
-      assert.deepEqual(
-        flagged.sessions.map((session) => session.id).sort(),
-        [created.id, bulkSession.id, oversizedSessionId].sort(),
-      );
 
       await subscription.close();
       const retirementSubscription = await tui.openSessionSubscription({
@@ -507,6 +462,7 @@ test('two Clients share stable Session creation, CAS configuration, and catalog 
       });
       const retirementIterator = retirementSubscription[Symbol.asyncIterator]();
       const beforeArchive = await querySession(desktop, created.id);
+      assert.equal(beforeArchive.status, 'active');
       const heartbeat = await desktop.request('scheduled-task.mutate', {
         kind: 'create',
         input: {
@@ -539,9 +495,11 @@ test('two Clients share stable Session creation, CAS configuration, and catalog 
         }),
       );
       assert.equal(archived.isArchived, true);
+      assert.equal(archived.status, beforeArchive.status);
       assert.equal((await querySession(tui, created.id)).isArchived, true);
       const archivedContinuity = await nextProjection(retirementIterator);
       assert.equal(archivedContinuity.snapshot.session.isArchived, true);
+      assert.equal(archivedContinuity.snapshot.session.status, beforeArchive.status);
       assert.ok(archived.revision > beforeArchive.revision);
 
       const restored = requireSessionProjection(
@@ -551,8 +509,10 @@ test('two Clients share stable Session creation, CAS configuration, and catalog 
         }),
       );
       assert.equal(restored.isArchived, false);
+      assert.equal(restored.status, beforeArchive.status);
       const restoredContinuity = await nextProjection(retirementIterator);
       assert.equal(restoredContinuity.snapshot.session.isArchived, false);
+      assert.equal(restoredContinuity.snapshot.session.status, beforeArchive.status);
 
       assert.deepEqual(
         await desktop.request('session.remove', {

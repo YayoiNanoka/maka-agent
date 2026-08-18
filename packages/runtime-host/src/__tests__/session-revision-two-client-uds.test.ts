@@ -56,6 +56,7 @@ test('two Clients share exact retryable Session branch and revision authority', 
     busySessionId,
     linkedChildSourceSessionId,
     metadataLinkedSourceSessionId,
+    ordinaryLinkedChildSessionId,
     archivedOwnedSourceSessionId,
     graphChildSessionId,
     continuationSourceSessionId,
@@ -69,6 +70,7 @@ test('two Clients share exact retryable Session branch and revision authority', 
       busySessionId,
       linkedChildSourceSessionId,
       metadataLinkedSourceSessionId,
+      ordinaryLinkedChildSessionId,
       archivedOwnedSourceSessionId,
       graphChildSessionId,
       continuationSourceSessionId,
@@ -113,6 +115,7 @@ async function verifyConcurrentRevisionAuthority(
   busySessionId: string,
   linkedChildSourceSessionId: string,
   metadataLinkedSourceSessionId: string,
+  ordinaryLinkedChildSessionId: string,
   archivedOwnedSourceSessionId: string,
   graphChildSessionId: string,
   continuationSourceSessionId: string,
@@ -187,6 +190,25 @@ async function verifyConcurrentRevisionAuthority(
         expectedSourceRevision: metadataLinkedSource.revision,
       }),
       operationError('operation_unavailable'),
+    );
+    const ordinaryLinkedChild = await querySession(desktop, ordinaryLinkedChildSessionId);
+    await assert.rejects(
+      desktop.request('session.branch.create', {
+        sourceSessionId: ordinaryLinkedChildSessionId,
+        targetSessionId: 'ordinary-linked-child-branch-target',
+        sourceTurnId: 'metadata-child-turn',
+        expectedSourceRevision: ordinaryLinkedChild.revision,
+      }),
+      operationError('operation_conflict'),
+    );
+    await assert.rejects(
+      desktop.request('session.revision.create', {
+        sourceSessionId: ordinaryLinkedChildSessionId,
+        targetSessionId: 'ordinary-linked-child-revision-target',
+        sourceTurnId: 'metadata-child-turn',
+        expectedSourceRevision: ordinaryLinkedChild.revision,
+      }),
+      operationError('operation_conflict'),
     );
     const archivedOwnedSource = await querySession(desktop, archivedOwnedSourceSessionId);
     await assert.rejects(
@@ -512,6 +534,7 @@ async function seedSource(
   busySessionId: string;
   linkedChildSourceSessionId: string;
   metadataLinkedSourceSessionId: string;
+  ordinaryLinkedChildSessionId: string;
   archivedOwnedSourceSessionId: string;
   graphChildSessionId: string;
   continuationSourceSessionId: string;
@@ -1073,7 +1096,7 @@ async function seedSource(
       ts: 1,
       text: 'delegate without a committed result',
     });
-    await execution.sessionStore.createSubagent({
+    const ordinaryLinkedChild = await execution.sessionStore.createSubagent({
       cwd: root,
       name: 'Metadata-linked Child Session',
       backend: 'fake',
@@ -1271,6 +1294,7 @@ async function seedSource(
       busySessionId: busy.id,
       linkedChildSourceSessionId: linkedChildSource.id,
       metadataLinkedSourceSessionId: metadataLinkedSource.id,
+      ordinaryLinkedChildSessionId: ordinaryLinkedChild.header.id,
       archivedOwnedSourceSessionId: archivedOwnedSource.id,
       graphChildSessionId: graphChild.header.id,
       continuationSourceSessionId: continuationSource.id,

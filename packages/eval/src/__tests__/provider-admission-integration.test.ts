@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
+import { meteringCheckpointMacMatches } from '../metering-checkpoint.js';
 
 const execFileAsync = promisify(execFile);
 const RESULT_TOKEN = '0123456789abcdef0123456789abcdef';
@@ -79,6 +80,7 @@ test('provider metering checkpoint records admission before the request settles'
     });
     assert.equal(checkpoint.schemaVersion, 'maka.external_provider_usage.v2');
     assert.equal(checkpoint.profile, 'opencode');
+    assert.equal(meteringCheckpointMacMatches(checkpoint, RESULT_TOKEN), true);
     assert.equal(checkpoint.requests, 1);
     // Admitted while unsettled: the state the old counter could not express.
     assert.equal(checkpoint.inFlightRequests, 1);

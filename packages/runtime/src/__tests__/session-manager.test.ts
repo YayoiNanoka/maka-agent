@@ -1574,7 +1574,7 @@ describe('SessionManager claimed graph intent execution', () => {
       ),
     ).toMatchObject({ text: 'summarize the routed records' });
 
-    await store.archive(child.id);
+    await store.updateHeader(child.id, { isArchived: true });
     const retry = await manager.runClaimedAgentGraphIntent({
       ...graphExecutionInput(claim, 'summarize the routed records'),
     });
@@ -2028,7 +2028,7 @@ describe('SessionManager claimed graph intent execution', () => {
     );
 
     const archivedChild = await createGraphOperatorSession(store, parent.id);
-    await store.archive(archivedChild.id);
+    await store.updateHeader(archivedChild.id, { isArchived: true });
     const archivedClaim = graphIntentClaim(
       {
         claimId: `graph_claim_${'3'.repeat(32)}`,
@@ -5087,46 +5087,6 @@ describe('SessionManager permission mode updates', () => {
     );
     if (modeNote?.type !== 'system_note') throw new Error('mode_change note was not written');
     expect(modeNote.data).toEqual({ from: 'explore', to: 'ask' });
-  });
-
-  test('backend configuration updates rebuild an already-active backend', async () => {
-    const store = new MemorySessionStore();
-    const backends = new BackendRegistry();
-    const built: string[] = [];
-    backends.register('fake', (ctx) => {
-      built.push(
-        `${ctx.header.backend}:${ctx.header.llmConnectionSlug}:${ctx.header.model}:${ctx.header.cwd}`,
-      );
-      return new TestBackend(ctx);
-    });
-    backends.register('ai-sdk', (ctx) => {
-      built.push(
-        `${ctx.header.backend}:${ctx.header.llmConnectionSlug}:${ctx.header.model}:${ctx.header.cwd}`,
-      );
-      return new TestBackend(ctx);
-    });
-    const manager = new SessionManager({ store, backends, newId: nextId(), now: nextNow(5_000) });
-    const session = await manager.createSession(makeInput());
-
-    await drain(manager.sendMessage(session.id, { turnId: 'turn-1', text: 'hello' }));
-    expect(built).toEqual(['fake:fake:fake-model:/tmp/cwd']);
-
-    const summary = await manager.updateSession(session.id, {
-      backend: 'ai-sdk',
-      llmConnectionSlug: 'zai-coding-plan',
-      model: 'glm-4.7',
-      cwd: '/tmp/worktree-cwd',
-    });
-    expect(summary.backend).toBe('ai-sdk');
-    expect(summary.llmConnectionSlug).toBe('zai-coding-plan');
-    expect(summary.cwd).toBe('/tmp/worktree-cwd');
-    expect(store.disposeCount).toBe(1);
-
-    await drain(manager.sendMessage(session.id, { turnId: 'turn-2', text: 'again' }));
-    expect(built).toEqual([
-      'fake:fake:fake-model:/tmp/cwd',
-      'ai-sdk:zai-coding-plan:glm-4.7:/tmp/worktree-cwd',
-    ]);
   });
 
   test('starts a new turn without workspace identity when safety inspection fails', async () => {
@@ -11912,37 +11872,6 @@ describe('SessionManager permission mode updates', () => {
     expect(output.budget.projectedBytes <= output.budget.maxBytes).toBe(true);
   });
 
-  test('rejects backend configuration updates while a turn is actively streaming', async () => {
-    const store = new MemorySessionStore();
-    const backends = new BackendRegistry();
-    const gate = makeGate();
-    backends.register('fake', (ctx) => new TestBackend(ctx, gate));
-    const manager = new SessionManager({ store, backends, newId: nextId(), now: nextNow(7_000) });
-    const session = await manager.createSession(makeInput());
-
-    const iterator = manager
-      .sendMessage(session.id, { turnId: 'turn-1', text: 'hello' })
-      [Symbol.asyncIterator]();
-    await iterator.next();
-
-    await expectRejects(
-      manager.updateSession(session.id, {
-        backend: 'ai-sdk',
-        llmConnectionSlug: 'zai-coding-plan',
-        model: 'glm-4.7',
-        cwd: '/tmp/worktree-cwd',
-      }),
-      /Cannot change backend configuration while a turn is running/,
-    );
-    const header = await store.readHeader(session.id);
-    expect(header.backend).toBe('fake');
-    expect(header.llmConnectionSlug).toBe('fake');
-
-    gate.release();
-    await iterator.next();
-    await iterator.next();
-  });
-
   test('backend build failure after user append writes a failed terminal run fact', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
@@ -17450,23 +17379,6 @@ class MemorySessionStore implements SessionStore {
     const next = { ...current, ...patch };
     this.headers.set(sessionId, next);
     return next;
-  }
-
-  async archive(sessionId: string): Promise<void> {
-    await this.updateHeader(sessionId, {
-      isArchived: true,
-      status: 'archived',
-      statusUpdatedAt: 1,
-    });
-  }
-
-  async unarchive(sessionId: string): Promise<void> {
-    await this.updateHeader(sessionId, {
-      isArchived: false,
-      status: 'active',
-      blockedReason: undefined,
-      statusUpdatedAt: 1,
-    });
   }
 
   async setFlagged(sessionId: string, isFlagged: boolean): Promise<void> {

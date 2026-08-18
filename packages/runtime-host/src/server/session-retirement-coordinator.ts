@@ -49,7 +49,7 @@ type RetirementStores = Pick<
   | 'listPendingSessionRetirementCleanupIds'
   | 'completeSessionRetirementCleanup'
   | 'removeSessionsVersioned'
-  | 'setSessionsLifecycleVersioned'
+  | 'setSessionsArchivedVersioned'
 >;
 
 type RetirementRoot = Pick<RootTurnCoordinator, 'readRootState'>;
@@ -224,12 +224,7 @@ export class HostSessionRetirementCoordinator {
       return await this.#withStableFamily(input.sessionId, async (family) => {
         const target = requireFamilyRecord(family, input.sessionId);
         const archived = input.state === 'archived';
-        if (
-          [...family.records.values()].every(
-            ({ header }) =>
-              header.isArchived === archived && (header.status === 'archived') === archived,
-          )
-        ) {
+        if ([...family.records.values()].every(({ header }) => header.isArchived === archived)) {
           return lifecycleSuccess(
             projectSessionCatalogRecord(await this.#stores.readCatalogRecord(input.sessionId)),
           );
@@ -238,7 +233,7 @@ export class HostSessionRetirementCoordinator {
         if (!archived) {
           let committed = false;
           try {
-            await this.#stores.setSessionsLifecycleVersioned(versionedFamily(family), 'active');
+            await this.#stores.setSessionsArchivedVersioned(versionedFamily(family), false);
             committed = true;
             this.#goals.unarchiveSessions(family.sessionIds);
             await this.#refreshFamily(family);
@@ -258,10 +253,7 @@ export class HostSessionRetirementCoordinator {
           await this.#finalizeWorkspacePatches(family.sessionIds);
           await this.#disposeBackends(family.sessionIds);
           const committable = await this.#refreshFamilyRecords(family);
-          await this.#stores.setSessionsLifecycleVersioned(
-            versionedFamily(committable),
-            'archived',
-          );
+          await this.#stores.setSessionsArchivedVersioned(versionedFamily(committable), true);
           committed = true;
           handles.goal.commit();
           handles.scheduledTasks.commit();
@@ -512,10 +504,10 @@ export class HostSessionRetirementCoordinator {
         childFamilyIds.has(sessionRevisionFamilyId(header)),
     );
     const archiveSessionIds = childSessionHeaders
-      .filter((header) => !header.isArchived || header.status !== 'archived')
+      .filter((header) => !header.isArchived)
       .map((header) => header.id);
     const archiveGuardSessionIds = childSessionHeaders
-      .filter((header) => header.isArchived && header.status === 'archived')
+      .filter((header) => header.isArchived)
       .map((header) => header.id);
     return {
       removeSessionIds: [...removeIds].sort(),
@@ -550,12 +542,12 @@ export class HostSessionRetirementCoordinator {
     const records = await Promise.all(
       orphanSessionIds.map((sessionId) => this.#stores.readHeaderRecordSnapshot(sessionId)),
     );
-    await this.#stores.setSessionsLifecycleVersioned(
+    await this.#stores.setSessionsArchivedVersioned(
       records.map((record) => ({
         sessionId: record.header.id,
         expectedVersion: record.revision,
       })),
-      'archived',
+      true,
     );
   }
 
@@ -565,29 +557,35 @@ export class HostSessionRetirementCoordinator {
   ): Promise<RetirementHandles> {
     for (const sessionId of family.sessionIds) {
       if (this.#root.readRootState(sessionId).kind !== 'idle') {
-        throw new SessionRetirementBusyError('Session has an active or reserved root Turn');
+        throw new SessionRetirementBusyError(
+          `Session ${sessionId} has an active or reserved root Turn`,
+        );
       }
       if (this.#messages.hasLiveSessionState(sessionId)) {
-        throw new SessionRetirementBusyError('Session has queued or in-flight Messages');
+        throw new SessionRetirementBusyError(
+          `Session ${sessionId} has queued or in-flight Messages`,
+        );
       }
       if (await this.#interactions.hasPendingSession(sessionId)) {
-        throw new SessionRetirementBusyError('Session has a pending Interaction');
+        throw new SessionRetirementBusyError(`Session ${sessionId} has a pending Interaction`);
       }
       if (this.#goals.hasLiveGoal(sessionId)) {
-        throw new SessionRetirementBusyError('Session has a live Goal');
+        throw new SessionRetirementBusyError(`Session ${sessionId} has a live Goal`);
       }
       if (await this.#resources.hasLiveSessionResources(sessionId)) {
-        throw new SessionRetirementBusyError('Session has a live Runtime Resource');
+        throw new SessionRetirementBusyError(`Session ${sessionId} has a live Runtime Resource`);
       }
       if (this.#sessionEffects.hasLiveSessionState(sessionId)) {
-        throw new SessionRetirementBusyError('Session has a live derived effect');
+        throw new SessionRetirementBusyError(`Session ${sessionId} has a live derived effect`);
       }
       const header = requireFamilyRecord(family, sessionId).header;
       if (!header.subagentParent && (await this.#graph.hasLiveSessionState(sessionId))) {
-        throw new SessionRetirementBusyError('Session has a live Agent Graph');
+        throw new SessionRetirementBusyError(`Session ${sessionId} has a live Agent Graph`);
       }
       if (!header.subagentParent && this.#graphWake.hasLiveSessionState(sessionId)) {
-        throw new SessionRetirementBusyError('Session has an active Agent Graph supervisor wake');
+        throw new SessionRetirementBusyError(
+          `Session ${sessionId} has an active Agent Graph supervisor wake`,
+        );
       }
     }
 

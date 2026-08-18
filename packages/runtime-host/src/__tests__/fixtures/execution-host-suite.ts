@@ -665,7 +665,11 @@ export class ExecutionFixture {
     let stores: Awaited<ReturnType<typeof openInteractiveExecutionStoresForWrite>> | undefined;
     try {
       stores = await openInteractiveExecutionStoresForWrite(owner.lease);
-      await stores.sessionStore.archive(this.sessionId);
+      const current = await stores.sessionStore.readHeaderRecordSnapshot(this.sessionId);
+      await stores.sessionStore.setSessionsArchivedVersioned(
+        [{ sessionId: this.sessionId, expectedVersion: current.revision }],
+        true,
+      );
     } finally {
       await stores?.sessionStore.close?.();
       await owner.close();

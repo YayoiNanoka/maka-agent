@@ -529,6 +529,127 @@ test('new Full Access Plan Skill previews use the mutating tool surface', async 
   });
 });
 
+test('Skill capability previews omit unavailable Tavily search surfaces', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    for (const [id, requiredTool] of [
+      ['web-search-preview', 'WebSearch'],
+      ['web-research-preview', 'web_research'],
+    ] as const) {
+      const skillDirectory = join(root, '.agents', 'skills', id);
+      await mkdir(skillDirectory, { recursive: true });
+      await writeFile(
+        join(skillDirectory, 'SKILL.md'),
+        [
+          '---',
+          `name: ${id}`,
+          `description: Requires ${requiredTool}.`,
+          `required-tools: [${requiredTool}]`,
+          '---',
+          `# ${id}`,
+          '',
+        ].join('\n'),
+      );
+    }
+
+    const policy = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
+    const created = await policy.connectionCatalog.create({
+      expectedCatalogRevision: 0,
+      connection: {
+        slug: 'skill-preview-model',
+        name: 'Skill preview model',
+        providerType: 'ollama',
+        enabled: true,
+        enabledModelIds: ['fake-model'],
+      },
+    });
+    assert.equal(created.kind, 'committed');
+    if (created.kind !== 'committed') return;
+    const connection = created.snapshot.connections[0];
+    assert.ok(connection);
+    if (!connection) return;
+    const fetch = await policy.operations.beginModelFetch(connection.connectionId);
+    assert.equal(fetch.kind, 'ready');
+    if (fetch.kind !== 'ready') return;
+    const fetched = await policy.operations.completeModelFetch(fetch.ticket, {
+      models: [{ id: 'fake-model' }],
+      source: 'fetched',
+      fetchedAt: Date.now(),
+    });
+    assert.equal(fetched.kind, 'committed');
+    if (fetched.kind !== 'committed') return;
+    const defaultTarget = await policy.connectionCatalog.setDefaultTarget({
+      expectedCatalogRevision: fetched.snapshot.revision,
+      target: { connectionId: connection.connectionId, modelId: 'fake-model' },
+    });
+    assert.equal(defaultTarget.kind, 'committed');
+    const policySnapshot = await policy.runtimePolicy.getSnapshot();
+    const webSearchEnabled = await policy.runtimePolicy.mutate({
+      expectedRevision: policySnapshot.revision,
+      operation: {
+        kind: 'set_web_search',
+        value: { enabled: true, defaultProvider: 'tavily' },
+      },
+    });
+    assert.equal(webSearchEnabled.kind, 'committed');
+    assert.equal(
+      (await policy.operations.resolveExecutionConnection(connection.slug)).kind,
+      'ready',
+    );
+
+    const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+    const session = await stores.sessionStore.create({
+      cwd: root,
+      backend: 'fake',
+      llmConnectionSlug: connection.slug,
+      model: 'fake-model',
+      permissionMode: 'bypass',
+    });
+    const composition = await createExecutionRuntimeHostComposition(compositionContext(owner), {
+      bootstrapRuntimePolicy: false,
+    });
+    try {
+      await composition.recover();
+      const connectionContext = {
+        hostEpoch: 'execution-composition-test',
+        connectionId: 'web-search-skill-preview-client',
+        surface: 'desktop' as const,
+        principal: 'local_os_user' as const,
+        acquireResidency: () => ({ release() {} }),
+      };
+      const query = (target: 'session' | 'new_session') =>
+        composition.handlers['skill.catalog.invocable.query'](
+          {
+            kind: 'start',
+            target:
+              target === 'session'
+                ? { kind: 'session', sessionId: session.id }
+                : {
+                    kind: 'new_session',
+                    context: { workspace: { kind: 'host_path', path: root } },
+                    collaborationMode: 'agent',
+                    permissionMode: 'bypass',
+                  },
+          },
+          connectionContext,
+        );
+
+      for (const target of ['session', 'new_session'] as const) {
+        const outcome = await query(target);
+        assert.equal(outcome.ok, true);
+        if (!outcome.ok || outcome.result.kind !== 'page') continue;
+        assert.equal(
+          outcome.result.items.some(
+            (item) => item.id === 'web-search-preview' || item.id === 'web-research-preview',
+          ),
+          false,
+        );
+      }
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
 test('production composition validates graph stop before aborting a claimed child', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const stores = await openInteractiveExecutionStoresForWrite(owner.lease);

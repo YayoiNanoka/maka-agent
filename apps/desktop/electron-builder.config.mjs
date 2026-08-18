@@ -67,6 +67,14 @@ export default {
       to: 'licenses/maka/NOTICE',
     },
     {
+      // Incubator policy requires every release archive to carry a DISCLAIMER
+      // or DISCLAIMER-WIP. Shipping it beside LICENSE and NOTICE is what makes
+      // the repository-root file reach the DMG, the ZIP and the Windows
+      // installer; `assertPackagedResources` then requires it on both paths.
+      from: '../../DISCLAIMER-WIP',
+      to: 'licenses/maka/DISCLAIMER-WIP',
+    },
+    {
       from: '../../node_modules/electron/dist/LICENSE',
       to: 'licenses/electron/LICENSE',
     },

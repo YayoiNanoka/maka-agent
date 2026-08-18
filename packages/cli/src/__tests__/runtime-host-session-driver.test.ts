@@ -10,13 +10,14 @@ import type {
   RuntimeHostSessionSubscription,
 } from '@maka/runtime-host/client';
 import { RuntimeHostSubscriptionError } from '@maka/runtime-host/client';
-import type {
-  InteractionPendingSnapshot,
-  OperationInput,
-  OperationOutput,
-  SessionCatalogProjection,
-  SessionContinuitySnapshot,
-  SubscriptionFrame,
+import {
+  SESSION_CONTINUITY_SCHEMA_VERSION,
+  type InteractionPendingSnapshot,
+  type OperationInput,
+  type OperationOutput,
+  type SessionCatalogProjection,
+  type SessionContinuitySnapshot,
+  type SubscriptionFrame,
 } from '@maka/runtime-host/protocol';
 import {
   createRuntimeHostMakaSessionDriver,
@@ -1425,7 +1426,7 @@ function continuitySnapshot(
   overrides: Partial<SessionContinuitySnapshot> = {},
 ): SessionContinuitySnapshot {
   return {
-    schemaVersion: 3,
+    schemaVersion: SESSION_CONTINUITY_SCHEMA_VERSION,
     session: {
       sessionId: 'session-1',
       metadataRevision: 1,

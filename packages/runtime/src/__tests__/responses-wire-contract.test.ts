@@ -43,6 +43,16 @@ function openAiNamespace(options: Record<string, unknown>): Record<string, unkno
 }
 
 describe('responses wire contract', () => {
+  test('keeps Qwen3.8 Max on Token Plan Chat until the provider adapter supports Responses', () => {
+    for (const providerType of ['alibaba-token-plan-cn', 'alibaba-token-plan'] as const) {
+      assert.equal(
+        resolveModelRuntime({ providerType }, 'qwen3.8-max').wire,
+        'openai-chat',
+        providerType,
+      );
+    }
+  });
+
   test('every Responses model asks for encrypted reasoning', () => {
     // `store: false` is not a privacy preference here, it is the switch that
     // makes the SDK add `include: ['reasoning.encrypted_content']` and drop

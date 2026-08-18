@@ -168,6 +168,16 @@ type ShellCopy = {
     projectUpdateFailedFallback: string;
     catalogUnavailable: string;
     retryCatalog: string;
+    remoteDirectoryTitle(host: string): string;
+    remoteDirectoryBreadcrumbs: string;
+    remoteDirectoryHome: string;
+    remoteDirectoryEmpty: string;
+    remoteDirectorySelect: string;
+    remoteDirectoryCancel: string;
+    remoteDirectoryRetry: string;
+    remoteDirectoryLoading: string;
+    remoteDirectoryShowHidden: string;
+    remoteDirectoryHideHidden: string;
     runtimeHostReadiness: Record<'connecting' | 'reconnecting' | 'unavailable', string>;
     openFailedTitle(path: string): string;
     openPathLabels: Record<'workspace' | 'skills' | 'memory' | 'project', string>;
@@ -723,6 +733,16 @@ const SHELL_COPY_BY_LOCALE = {
       projectUpdateFailedFallback: '暂时无法更新项目，请稍后重试。',
       catalogUnavailable: 'Runtime Host 暂时不可用',
       retryCatalog: '重试加载',
+      remoteDirectoryTitle: (host: string) => `在 ${host} 上添加项目`,
+      remoteDirectoryBreadcrumbs: '当前文件夹',
+      remoteDirectoryHome: '主目录',
+      remoteDirectoryEmpty: '此文件夹中没有子文件夹',
+      remoteDirectorySelect: '添加此文件夹',
+      remoteDirectoryCancel: '取消',
+      remoteDirectoryRetry: '重试',
+      remoteDirectoryLoading: '正在读取文件夹…',
+      remoteDirectoryShowHidden: '显示隐藏目录',
+      remoteDirectoryHideHidden: '不显示隐藏目录',
       runtimeHostReadiness: {
         connecting: '连接中',
         reconnecting: '正在重连',
@@ -1199,6 +1219,16 @@ const SHELL_COPY_BY_LOCALE = {
       projectUpdateFailedFallback: 'The project could not be updated. Try again later.',
       catalogUnavailable: 'Runtime Hosts unavailable',
       retryCatalog: 'Retry loading',
+      remoteDirectoryTitle: (host: string) => `Add a project on ${host}`,
+      remoteDirectoryBreadcrumbs: 'Current folder',
+      remoteDirectoryHome: 'Home',
+      remoteDirectoryEmpty: 'No folders here',
+      remoteDirectorySelect: 'Add this folder',
+      remoteDirectoryCancel: 'Cancel',
+      remoteDirectoryRetry: 'Retry',
+      remoteDirectoryLoading: 'Loading folders…',
+      remoteDirectoryShowHidden: 'Show hidden folders',
+      remoteDirectoryHideHidden: 'Hide hidden folders',
       runtimeHostReadiness: {
         connecting: 'Connecting',
         reconnecting: 'Reconnecting',

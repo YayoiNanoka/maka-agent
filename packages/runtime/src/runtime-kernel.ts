@@ -17,6 +17,7 @@ import type {
 import type {
   SessionBlockedReason,
   SessionHeader,
+  SessionHeaderPatch,
   SessionStatus,
   StoredMessage,
   SystemNoteMessage,
@@ -3237,10 +3238,7 @@ export class RuntimeKernel implements RuntimeKernelLike {
     await this.updateHeader(sessionId, buildStatusPatch(status, ts, blockedReason));
   }
 
-  private async updateHeader(
-    sessionId: string,
-    patch: Partial<SessionHeader>,
-  ): Promise<SessionHeader> {
+  private async updateHeader(sessionId: string, patch: SessionHeaderPatch): Promise<SessionHeader> {
     const next = await this.deps.store.updateHeader(sessionId, patch);
     this.updateCachedHeader(sessionId, next);
     return next;

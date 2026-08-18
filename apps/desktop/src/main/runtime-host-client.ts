@@ -66,9 +66,11 @@ import {
   type ProjectCatalogMutateResult,
   type ProjectCatalogProject,
   type ProjectCatalogProjectDetails,
+  PROJECT_DIRECTORY_MAX_ENTRIES,
+  type ProjectDirectoryEntry,
+  type ProjectDirectoryRoot,
   type QueueRetractInput,
   type QueueRetractResult,
-  type SessionCatalogFilter,
   SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES,
   type SessionCatalogChangedFrame,
   type ScheduledTaskChangedFrame,
@@ -526,12 +528,10 @@ export class DesktopRuntimeHostClient {
     }
   }
 
-  async listSessions(
-    filter?: SessionCatalogFilter,
-  ): Promise<SessionCatalogProjection[]> {
+  async listSessions(): Promise<SessionCatalogProjection[]> {
     this.#assertOpen();
     try {
-      return (await readRuntimeHostSessions(this.connection, filter)).map(requireSessionProjection);
+      return (await readRuntimeHostSessions(this.connection)).map(requireSessionProjection);
     } catch (error) {
       if (error instanceof DesktopRuntimeHostClientError) throw error;
       if (!(error instanceof RuntimeHostCatalogReadError)) throw error;
@@ -562,6 +562,52 @@ export class DesktopRuntimeHostClient {
   async registerProject(path: string): Promise<ProjectCatalogProject> {
     const result = await this.#mutateProject({ kind: "register", path });
     return this.#projectForMutation(result);
+  }
+
+  async listProjectDirectoryRoots(): Promise<readonly ProjectDirectoryRoot[]> {
+    const result = await this.request("project.catalog.query", { kind: "directory_roots" });
+    if (result.kind !== "directory_roots") throw invalidProjection("Project directory roots");
+    return result.roots;
+  }
+
+  async listProjectDirectories(
+    rootId: string,
+    segments: readonly string[],
+  ): Promise<readonly ProjectDirectoryEntry[]> {
+    const entries: ProjectDirectoryEntry[] = [];
+    let result = await this.request(
+      "project.catalog.query",
+      { kind: "directory_list_start", rootId, segments },
+    );
+    const cursors = new Set<string>();
+    while (true) {
+      if (result.kind !== "directory_page") throw invalidProjection("Project directory");
+      if (result.rootId !== rootId || !sameSegments(result.segments, segments)) {
+        throw invalidProjection("Project directory identity");
+      }
+      if (entries.length + result.entries.length > PROJECT_DIRECTORY_MAX_ENTRIES) {
+        throw invalidProjection("Project directory has too many entries");
+      }
+      entries.push(...result.entries);
+      if (result.nextCursor === null) return entries;
+      if (cursors.has(result.nextCursor)) throw repeatedCursor("Project directory");
+      cursors.add(result.nextCursor);
+      result = await this.request("project.catalog.query", {
+        kind: "directory_list_continue",
+        rootId,
+        segments,
+        cursor: result.nextCursor,
+      });
+    }
+  }
+
+  async registerProjectDirectory(
+    rootId: string,
+    segments: readonly string[],
+  ): Promise<ProjectCatalogProject> {
+    return this.#projectForMutation(
+      await this.#mutateProject({ kind: "register_directory", rootId, segments }),
+    );
   }
 
   async relinkProject(projectId: string, path: string): Promise<ProjectCatalogProject> {
@@ -1679,6 +1725,10 @@ function repeatedCursor(name: string): DesktopRuntimeHostClientError {
     "projection_unstable",
     `Runtime Host repeated a ${name} cursor`,
   );
+}
+
+function sameSegments(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((segment, index) => segment === right[index]);
 }
 
 function unstableProjection(

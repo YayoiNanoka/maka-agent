@@ -18,6 +18,8 @@ maka eval run experiment.json --out .maka-eval/run-001
 
 Use `--cell <cell-id>` to replace one failed or indeterminate cell. The attempt log is append-only and result selection always uses the earliest valid attempt.
 
+Before starting a trial, the public CLI validates the selected executor's machine paths, bundled relay files, pinned Harbor or Pier Python distribution, and Docker daemon availability for Docker environments. A missing or mismatched prerequisite is reported with the configured environment-variable name and expected framework version; the CLI does not start a trial or install external software. Subject-specific toolchain verification remains part of subject preparation and also completes before any trial starts.
+
 The built-in Harbor and Pier executors use one relay Agent. The framework prepares the task environment, the relay invokes exactly one Eval subject from `Agent.run()`, and the framework runs its native verifier and finalizer. Harbor and Pier use separate, explicitly versioned Python environments because their Agent and task contracts differ.
 
 Maka subjects ask the Runtime Host client to run one owned execution in a dedicated Host root. Session, Turn, Goal and continuation semantics remain inside Runtime Host. External subjects declare a command and arguments, and may add non-secret environment values, target-to-source bindings for declared credentials, and an explicit result contract. Omitted credential bindings use declared names unchanged. The generic `exit-code` contract discards unstructured stdout and records null usage and cost. The structured `protocol-v1` contract is restricted to the bundled external wrapper so the shared relay can separate a bounded result frame from Harbor/Pier's merged process output; cohort-specific wrappers do not gain Runtime authority.
@@ -40,8 +42,11 @@ Single-arm results are not drawn from the same run as the multi-arm cohort. Task
 
 External provider metering does not depend on the subject exiting cleanly. The wrapper's proxy writes
 `agent/<profile>.provider-usage.json` at the start of every request, at its settlement, and at the
-moment the provider states admission, renaming it into place so a reader sees one whole snapshot or
-the previous one. Admission is recorded when it is observed rather than when the request finishes,
+moment the provider states admission, chmodding the temporary file to `0644` and then renaming it
+into place so a reader sees one whole snapshot or the previous one, already readable. Recovery
+reads at most 64 KiB and only from a regular file, and accepts the snapshot only when its HMAC
+matches the host-issued relay result token. A subject that replaces the path with a symlink, a
+large write, or schema-valid forged JSON cannot feed the host. Admission is recorded when it is observed rather than when the request finishes,
 because the model work has been done and billed whether or not this process survives to see the
 stream end. When the result frame is missing — the wrapper was killed rather than asked to stop —
 the executor recovers usage from that file. A run that was cut off after admitted model work is

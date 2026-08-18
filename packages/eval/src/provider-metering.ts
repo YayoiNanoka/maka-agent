@@ -66,6 +66,10 @@ export function deriveMetering(counts: ProviderMeteringCounts): DerivedMetering 
 // other frameworks are given no cost block at all, which is why their figures
 // are not consulted here.
 //
+// Rates as published 2026-08-17, normalized at the off-peak band: DeepSeek
+// bills peak hours (01:00–04:00 and 06:00–10:00 UTC) at exactly double these,
+// and the checkpoint records no request timestamps to split by.
+//
 // DeepSeek bills input in exactly two kinds, cache hit and cache miss, and
 // charges nothing for writing the cache — a written token is a miss token. So
 // `cacheWrite` is the miss rate rather than a rate of its own: it exists to
@@ -73,10 +77,10 @@ export function deriveMetering(counts: ProviderMeteringCounts): DerivedMetering 
 // zero, and for DeepSeek itself it never applies, because the API reports only
 // `prompt_cache_hit_tokens` and `prompt_cache_miss_tokens`.
 export const DEEPSEEK_V4_FLASH_COST = {
-  input: 0.14,
-  output: 0.28,
-  cacheRead: 0.0028,
-  cacheWrite: 0.14,
+  input: 0.22,
+  output: 0.66,
+  cacheRead: 0.007,
+  cacheWrite: 0.22,
 } as const;
 
 // `inputTokens` is normalized to include both cached kinds, so each kind is

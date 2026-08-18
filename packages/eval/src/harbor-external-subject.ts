@@ -1,7 +1,8 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, rmSync, statSync } from 'node:fs';
-import { chmod, copyFile, mkdir, rename, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, writeFile } from 'node:fs/promises';
+import { signMeteringCheckpoint, writeJsonAtomic } from './metering-checkpoint.js';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { basename, dirname, join } from 'node:path';
 import type { Readable } from 'node:stream';
@@ -29,7 +30,6 @@ const resultToken = takeRelayResultToken();
 const DEEPSEEK_HARNESS_PROFILE = 'maka-eval';
 
 const PROVIDER_USAGE_CHECKPOINT_SCHEMA = 'maka.external_provider_usage.v2';
-let atomicWriteSequence = 0;
 
 type SubjectStatus = 'completed' | 'failed' | 'infra_failed' | 'indeterminate';
 const CLASSIFIABLE_RECORD_LIMIT_BYTES = 16 * 1024 * 1024;
@@ -698,11 +698,14 @@ async function startMeteringProxy(
   // not finish.
   let checkpointWrites = Promise.resolve();
   const persistCheckpoint = () => {
-    const value = {
-      schemaVersion: PROVIDER_USAGE_CHECKPOINT_SCHEMA,
-      profile: selected,
-      ...snapshot(),
-    };
+    const value = signMeteringCheckpoint(
+      {
+        schemaVersion: PROVIDER_USAGE_CHECKPOINT_SCHEMA,
+        profile: selected,
+        ...snapshot(),
+      },
+      resultToken,
+    );
     checkpointWrites = checkpointWrites.then(() =>
       writeJsonAtomic(checkpointPath, value).catch(() => undefined),
     );
@@ -847,19 +850,6 @@ async function startMeteringProxy(
       await dispatcher.close();
     },
   };
-}
-
-// The checkpoint is read by a different process after this one may have died
-// mid-write, so it is renamed into place rather than written in place: a reader
-// sees either the previous snapshot or the next one, never a truncated file.
-// /logs/agent is created under umask 077, which silently downgrades the mode
-// argument to 0600 and leaves the file unreadable by the host Eval process, so
-// the mode is restated after the rename where the umask no longer applies.
-async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
-  const temporary = `${path}.tmp-${process.pid}-${atomicWriteSequence++}`;
-  await writeFile(temporary, `${JSON.stringify(value)}\n`, { mode: 0o644 });
-  await rename(temporary, path);
-  await chmod(path, 0o644);
 }
 
 function usageParser(anthropic: boolean): {

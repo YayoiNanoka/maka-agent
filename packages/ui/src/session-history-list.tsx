@@ -345,7 +345,7 @@ function ProjectNavRow(props: {
           />
         }
       >
-        {/* Nest indent zeroed one level in sidebar.css (time-sort left edge). */}
+        {/* sidebar.css preserves one SideNav nesting step for project hierarchy. */}
         {hasSessions ? (
           <VStack gap={0.5}>{props.sessions.map((session) => props.renderSession(session))}</VStack>
         ) : undefined}
@@ -723,12 +723,10 @@ interface SessionRowSignal {
  * with unread text drew the same accent dot as one that is running. Now it
  * draws its own neutral dot and unread is still in the list behind it.
  *
- * `streaming` is the only live-run source the rail actually has. It knows only
- * about turns THIS renderer sent, which is a real limit — a task running under
- * a bot channel or a second window reads as idle here. The fix for that is a
- * live-run projection from Runtime Host, which is not in this change; there is
- * no `runningTurnIds` on a `SessionSummary` that reaches Desktop, so reading it
- * would be reading a field nothing populates.
+ * `streaming` is the live-run source the Desktop shell selected for the rail.
+ * Desktop summaries can also carry observer-projected `runningTurnIds` to keep
+ * active-turn identity across catalog refreshes, but this shared presentational
+ * component does not arbitrate those sources itself.
  */
 function sessionRowSignals(
   session: SessionSummary,

@@ -234,6 +234,54 @@ describe('Session catalog protocol', () => {
     );
   });
 
+  test('accepts only filter-free Session catalog list inputs', () => {
+    const revision = `sha256:${'a'.repeat(64)}` as const;
+    assert.deepEqual(
+      decodeClientFrame({
+        requestId: 'request-list',
+        operation: 'session.catalog.query',
+        input: { kind: 'list_start' },
+      }),
+      {
+        requestId: 'request-list',
+        operation: 'session.catalog.query',
+        input: { kind: 'list_start' },
+      },
+    );
+    assert.deepEqual(
+      decodeClientFrame({
+        requestId: 'request-continue',
+        operation: 'session.catalog.query',
+        input: { kind: 'list_continue', revision, cursor: 'cursor-1' },
+      }),
+      {
+        requestId: 'request-continue',
+        operation: 'session.catalog.query',
+        input: { kind: 'list_continue', revision, cursor: 'cursor-1' },
+      },
+    );
+    for (const filter of [{ isArchived: false }, { isFlagged: true }, { labelSlug: 'paged' }]) {
+      assert.throws(
+        () =>
+          decodeClientFrame({
+            requestId: 'request-reject',
+            operation: 'session.catalog.query',
+            input: { kind: 'list_start', filter },
+          }),
+        isProtocolError,
+      );
+      assert.throws(
+        () =>
+          decodeClientFrame({
+            requestId: 'request-reject',
+            operation: 'session.catalog.query',
+            input: { kind: 'list_continue', revision, cursor: 'cursor-1', filter },
+          }),
+        isProtocolError,
+      );
+    }
+  });
+
   test('accepts the complete 80-code-point Session name range', () => {
     const name = '🦊'.repeat(80);
     const decoded = decodeClientFrame({
@@ -366,6 +414,21 @@ describe('Session catalog protocol', () => {
     );
   });
 
+  test('normalizes legacy Session statuses in catalog projections', () => {
+    for (const status of ['review', 'done']) {
+      const decoded = decodeSessionCatalogItem({ ...projection(), status });
+      if ('kind' in decoded) assert.fail('Expected a Session catalog projection');
+      assert.equal(decoded.status, 'active');
+    }
+  });
+
+  test('rejects unknown Session statuses in catalog projections', () => {
+    assert.throws(
+      () => decodeSessionCatalogItem({ ...projection(), status: 'unknown' }),
+      isInvalidSessionStatus,
+    );
+  });
+
   test('bounds pages and preserves revision-pinned continuation results', () => {
     const sessions = Array.from({ length: SESSION_CATALOG_PAGE_MAX_ITEMS }, (_, index) =>
       projection({ id: `session-${index}` }),
@@ -424,4 +487,8 @@ function projection(overrides: Partial<SessionCatalogProjection> = {}): SessionC
 
 function isProtocolError(error: unknown): boolean {
   return error instanceof RuntimeHostProtocolError;
+}
+
+function isInvalidSessionStatus(error: unknown): boolean {
+  return error instanceof RuntimeHostProtocolError && error.message === 'Invalid Session status';
 }

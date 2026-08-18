@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { LlmConnection } from '@maka/core/llm-connections';
 import { thinkingVariantsForModel, type ThinkingLevel } from '@maka/core/model-thinking';
-import { changesBackendConfig } from '@maka/runtime/session-manager';
 
 import { buildProviderOptions, getAIModel } from '@maka/runtime/model-factory';
 
@@ -222,6 +221,26 @@ describe('buildProviderOptions: thinking level', () => {
     assert.deepEqual([...thinkingVariantsForModel('zai-coding-plan', 'glm-4.5-air')], []);
     // miss model (deepseek-chat non-reasoning) drops level
     assert.deepEqual(buildProviderOptions(conn('deepseek'), 'deepseek-chat', 'high'), {});
+  });
+
+  test('Alibaba Token Plan sends the formal Qwen3.8 effort and disable wires', () => {
+    for (const providerType of ['alibaba-token-plan-cn', 'alibaba-token-plan'] as const) {
+      assert.deepEqual(
+        Object.values(buildProviderOptions(conn(providerType), 'qwen3.8-max', 'xhigh')),
+        [{ reasoningEffort: 'xhigh' }],
+        providerType,
+      );
+      assert.deepEqual(
+        Object.values(buildProviderOptions(conn(providerType), 'qwen3.8-max', 'medium')),
+        [{ reasoningEffort: 'medium' }],
+        providerType,
+      );
+      assert.deepEqual(
+        Object.values(buildProviderOptions(conn(providerType), 'qwen3.8-max', 'off')),
+        [{ reasoningEffort: 'none' }],
+        providerType,
+      );
+    }
   });
 
   test('family fallback wires per-model override adapters under their SDK namespaces', () => {
@@ -574,21 +593,5 @@ describe('buildProviderOptions: openai-compatible namespace', () => {
       false,
       JSON.stringify(result.warnings),
     );
-  });
-});
-
-describe('changesBackendConfig', () => {
-  test('thinkingLevel change triggers backend reconfiguration', () => {
-    assert.equal(changesBackendConfig({ thinkingLevel: 'high' }), true);
-    assert.equal(changesBackendConfig({ thinkingLevel: undefined }), true);
-  });
-
-  test('permissionMode triggers, so a mode change is enforced and not merely stored', () => {
-    // The backend snapshots the header at construction and decides every
-    // tool call against that snapshot. Persisting a lower mode without
-    // rebuilding leaves the live session enforcing the OLD one — which is
-    // how the bot guard's re-pin to `explore` became advisory.
-    assert.equal(changesBackendConfig({ permissionMode: 'explore' }), true);
-    assert.equal(changesBackendConfig({ permissionMode: 'bypass' }), true);
   });
 });

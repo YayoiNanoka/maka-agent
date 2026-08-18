@@ -953,6 +953,8 @@ describe('non-serving Runtime Host kernel', () => {
           surface: 'tui',
           protocolMin: CURRENT_PROTOCOL.min,
           protocolMax: CURRENT_PROTOCOL.max,
+          compatibilityEpoch: 20,
+          compositionId: KERNEL_COMPOSITION.descriptor.id,
         }),
       );
       assert.deepEqual(decodeHostFrame(await staleWhileResident.read(1_000)), {

@@ -36,12 +36,11 @@ function makeSession(input: {
   llmConnectionSlug?: string;
 }): SessionSummary {
   const status = input.status ?? 'active';
-  const isArchived = input.isArchived ?? status === 'archived';
   return {
     id: input.id,
     name: input.name,
     isFlagged: input.isFlagged ?? false,
-    isArchived,
+    isArchived: input.isArchived ?? false,
     labels: [],
     hasUnread: input.hasUnread ?? false,
     status,
@@ -183,28 +182,6 @@ const statusSessions = [
     status: 'blocked',
     blockedReason: 'auth',
     lastMessageAt: NOW - 20 * 60 * 1000,
-  }),
-  // `review` and `done` have no writer in current source, but stored rows can
-  // still carry them (see SESSION_STATUSES) and the rail has to draw them. They
-  // are also the two colours this change decided on purpose — attention and
-  // success — so the story that shows every status has to show them.
-  makeSession({
-    id: 'status-review',
-    name: '待审核的文件 diff',
-    status: 'review',
-    lastMessageAt: NOW - 37 * 60 * 1000,
-  }),
-  makeSession({
-    id: 'status-done',
-    name: '已完成的 smoke run',
-    status: 'done',
-    lastMessageAt: NOW - 2 * 60 * 60 * 1000,
-  }),
-  makeSession({
-    id: 'status-archived',
-    name: '归档的旧实验',
-    status: 'archived',
-    lastMessageAt: NOW - 8 * 24 * 60 * 60 * 1000,
   }),
   makeSession({
     id: 'status-aborted',
