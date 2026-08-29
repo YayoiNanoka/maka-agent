@@ -28,14 +28,17 @@ export type ClientCapabilityGrantScope =
   | { readonly kind: 'capability' }
   | { readonly kind: 'mcp_tool'; readonly serverId: string; readonly toolName: string };
 
-export interface ClientCapabilitySessionGrantKey {
-  readonly sessionId: string;
+export interface ClientCapabilityGrantTarget {
   readonly providerId: string;
   readonly contractId: string;
   readonly serverId: string;
   readonly toolName: string;
   readonly capability: ClientCapabilityGrantCapability;
   readonly scope: ClientCapabilityGrantScope;
+}
+
+export interface ClientCapabilitySessionGrantKey extends ClientCapabilityGrantTarget {
+  readonly sessionId: string;
 }
 
 export interface ClientCapabilitySessionGrant extends ClientCapabilitySessionGrantKey {
@@ -71,6 +74,14 @@ export function decodeClientCapabilitySessionGrantKey(
   value: unknown,
 ): ClientCapabilitySessionGrantKey {
   const record = plainRecord(value, 'Client Capability Session Grant key');
+  return deepFreeze({
+    sessionId: safeId(record.sessionId, 'sessionId'),
+    ...decodeClientCapabilityGrantTarget(record),
+  });
+}
+
+export function decodeClientCapabilityGrantTarget(value: unknown): ClientCapabilityGrantTarget {
+  const record = plainRecord(value, 'Client Capability Grant target');
   const capability = oneOf(
     record.capability,
     ['browser', 'computer_use', 'desktop_mcp'] as const,
@@ -85,7 +96,6 @@ export function decodeClientCapabilitySessionGrantKey(
     throw new Error('Client Capability Session Grant scope does not match capability');
   }
   return deepFreeze({
-    sessionId: safeId(record.sessionId, 'sessionId'),
     providerId: safeId(record.providerId, 'providerId'),
     contractId: safeId(record.contractId, 'contractId'),
     serverId: safeId(record.serverId, 'serverId'),
