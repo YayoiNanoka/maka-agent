@@ -141,6 +141,14 @@ export interface InteractionStoreWriter extends InteractionStoreReader {
   commitClientCapabilitySessionGrant(
     grant: ClientCapabilitySessionGrant,
   ): Promise<ClientCapabilitySessionGrant>;
+  commitClientCapabilityOutcome(
+    requestId: string,
+    outcome: Extract<
+      InteractionCanonicalOutcome,
+      { kind: 'client_capability_decision' | 'closure' }
+    >,
+    grant?: ClientCapabilitySessionGrant,
+  ): Promise<CommitInteractionOutcomeResult>;
 }
 
 export interface InteractiveInteractionStoreReaderFacade extends InteractionStoreReader {
@@ -230,6 +238,14 @@ export async function openSqliteInteractiveInteractionStoreForWrite(
         run(() => store.commitOutcome(requestId, outcome)),
       commitClientCapabilitySessionGrant: (grant: ClientCapabilitySessionGrant) =>
         run(() => store.commitClientCapabilitySessionGrant(grant)),
+      commitClientCapabilityOutcome: (
+        requestId: string,
+        outcome: Extract<
+          InteractionCanonicalOutcome,
+          { kind: 'client_capability_decision' | 'closure' }
+        >,
+        grant?: ClientCapabilitySessionGrant,
+      ) => run(() => store.commitClientCapabilityOutcome(requestId, outcome, grant)),
     });
     writers.add(facade);
     sqliteWritersByLease.set(lease, facade);
@@ -357,6 +373,82 @@ class SqliteInteractionStore implements InteractionStoreWriter {
     });
   }
 
+  async commitClientCapabilityOutcome(
+    requestId: string,
+    outcome: Extract<
+      InteractionCanonicalOutcome,
+      { kind: 'client_capability_decision' | 'closure' }
+    >,
+    grant?: ClientCapabilitySessionGrant,
+  ): Promise<CommitInteractionOutcomeResult> {
+    assertId(requestId);
+    return this.#lease.transaction('write', () => {
+      const record = readSqliteInteraction(this.#lease, requestId);
+      if (!record) {
+        throw new InteractionStoreError(
+          'request_not_found',
+          `Interaction request '${requestId}' does not exist`,
+        );
+      }
+      if (record.request.request.kind !== 'client_capability') {
+        throw new InteractionStoreError(
+          'invalid_input',
+          'Client Capability outcome requires a Client Capability request',
+        );
+      }
+      const canonical = decodeClientCapabilityOutcome(outcome);
+      if (!isInteractionCanonicalOutcomeValidForRequest(record.request.request, canonical)) {
+        throw new InteractionStoreError('invalid_input', 'Outcome is not valid for its request');
+      }
+      const candidateGrant = grant === undefined ? undefined : decodeGrant(grant, 'input');
+      const shouldGrant =
+        canonical.kind === 'client_capability_decision' && canonical.decision === 'allow';
+      if (shouldGrant !== (candidateGrant !== undefined)) {
+        throw new InteractionStoreError(
+          'invalid_input',
+          'Allowed Client Capability outcome requires exactly one Session Grant',
+        );
+      }
+      if (
+        candidateGrant &&
+        (!isDeepStrictEqual(decodeGrantKey(candidateGrant, 'input'), {
+          sessionId: record.request.sessionId,
+          ...record.request.request.target,
+        }) ||
+          candidateGrant.grantedAt !== canonical.committedAt)
+      ) {
+        throw new InteractionStoreError(
+          'invalid_input',
+          'Client Capability Session Grant does not match its Interaction request',
+        );
+      }
+      const candidate: StoredInteractionOutcome = {
+        ...identity(record.request),
+        outcome: canonical,
+      };
+      const encoded = encode(candidate, STORED_INTERACTION_OUTCOME_MAX_BYTES)
+        .toString('utf8')
+        .trim();
+      this.#lease.database
+        .prepare(`
+          INSERT OR IGNORE INTO core_interaction_outcomes(request_id, record_json)
+          VALUES (?, ?)
+        `)
+        .run(requestId, encoded);
+      const settled = readSqliteInteraction(this.#lease, requestId);
+      if (!settled?.outcome) {
+        throw new InteractionStoreError('io_failed', 'Outcome publication produced no record');
+      }
+      const matches = interactionCanonicalOutcomesEquivalent(settled.outcome.outcome, canonical);
+      if (matches && candidateGrant) this.#commitClientCapabilitySessionGrant(candidateGrant);
+      return {
+        status: 'stable',
+        matches,
+        record: settled as InteractionRecord & { readonly outcome: StoredInteractionOutcome },
+      };
+    });
+  }
+
   async readInteraction(requestId: string): Promise<InteractionRecord | undefined> {
     assertId(requestId);
     return readSqliteInteraction(this.#lease, requestId);
@@ -446,25 +538,7 @@ class SqliteInteractionStore implements InteractionStoreWriter {
       .toString('utf8')
       .trim();
     return this.#lease.transaction('write', () => {
-      this.#lease.database
-        .prepare(`
-          INSERT OR IGNORE INTO core_client_capability_session_grants(
-            session_id, provider_id, contract_id, server_id, tool_name,
-            capability, scope_kind, scope_value, granted_at, record_json
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `)
-        .run(
-          candidate.sessionId,
-          candidate.providerId,
-          candidate.contractId,
-          candidate.serverId,
-          candidate.toolName,
-          candidate.capability,
-          candidate.scope.kind,
-          scope,
-          candidate.grantedAt,
-          encoded,
-        );
+      this.#insertClientCapabilitySessionGrant(candidate, scope, encoded);
       const stored = this.#readClientCapabilitySessionGrant(candidate);
       if (!stored) {
         throw new InteractionStoreError(
@@ -474,6 +548,40 @@ class SqliteInteractionStore implements InteractionStoreWriter {
       }
       return stored;
     });
+  }
+
+  #commitClientCapabilitySessionGrant(grant: ClientCapabilitySessionGrant): void {
+    const scope = clientCapabilityScopeIdentity(grant.scope);
+    const encoded = encode(grant, STORED_CLIENT_CAPABILITY_SESSION_GRANT_MAX_BYTES)
+      .toString('utf8')
+      .trim();
+    this.#insertClientCapabilitySessionGrant(grant, scope, encoded);
+  }
+
+  #insertClientCapabilitySessionGrant(
+    grant: ClientCapabilitySessionGrant,
+    scope: string,
+    encoded: string,
+  ): void {
+    this.#lease.database
+      .prepare(`
+        INSERT OR IGNORE INTO core_client_capability_session_grants(
+          session_id, provider_id, contract_id, server_id, tool_name,
+          capability, scope_kind, scope_value, granted_at, record_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        grant.sessionId,
+        grant.providerId,
+        grant.contractId,
+        grant.serverId,
+        grant.toolName,
+        grant.capability,
+        grant.scope.kind,
+        scope,
+        grant.grantedAt,
+        encoded,
+      );
   }
 
   #readClientCapabilitySessionGrant(
@@ -635,6 +743,21 @@ function decodeGrantKey(value: unknown, source: DecodeSource): ClientCapabilityS
   } catch (error) {
     decodeFailure(source, 'Invalid Client Capability Session Grant key', error);
   }
+}
+
+function decodeClientCapabilityOutcome(
+  value: unknown,
+): Extract<InteractionCanonicalOutcome, { kind: 'client_capability_decision' | 'closure' }> {
+  let outcome: InteractionCanonicalOutcome;
+  try {
+    outcome = decodeInteractionCanonicalOutcome(value);
+  } catch (error) {
+    decodeFailure('input', 'Invalid Client Capability Interaction outcome', error);
+  }
+  if (outcome.kind !== 'client_capability_decision' && outcome.kind !== 'closure') {
+    decodeFailure('input', 'Invalid Client Capability Interaction outcome kind');
+  }
+  return outcome;
 }
 
 function identity(value: InteractionIdentity): InteractionIdentity {

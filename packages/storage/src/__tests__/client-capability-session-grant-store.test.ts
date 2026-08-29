@@ -55,13 +55,31 @@ test('persists Client Capability grants for one Session and purges them with it'
       scope: { kind: 'browser_origin' as const, origin: 'https://example.com' },
     };
     try {
-      const committed = await store.commitClientCapabilitySessionGrant({
+      const grant = {
         version: 1,
         ...key,
         grantedAt: 10,
+      } as const;
+      const established = await store.establishRequest({
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        runId: 'run-1',
+        requestId: 'request-1',
+        createdAt: 5,
+        request: {
+          kind: 'client_capability',
+          toolUseId: 'tool-call-1',
+          target: key,
+        },
       });
-      assert.equal(committed.grantedAt, 10);
-      assert.deepEqual(await store.readClientCapabilitySessionGrant(key), committed);
+      assert.equal(established.status, 'stable');
+      const committed = await store.commitClientCapabilityOutcome(
+        'request-1',
+        { kind: 'client_capability_decision', decision: 'allow', committedAt: 10 },
+        grant,
+      );
+      assert.equal(committed.status, 'stable');
+      assert.deepEqual(await store.readClientCapabilitySessionGrant(key), grant);
 
       const operationalState = createConversationOperationalStateStore(root);
       try {
