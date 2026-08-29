@@ -1386,22 +1386,26 @@ test('production backend preserves coordinator Client Capability semantics acros
       clientCapabilityConnectionIdentity('client-capability-provider'),
       {
         send: async (frame) => {
-          if (frame.kind !== 'client.capability.call') return;
-          calls.push(frame);
-          queueMicrotask(() => {
-            connection?.accept({
-              kind: 'client.capability.accepted',
-              invocationId: frame.invocationId,
-              admissionEvidence: { kind: 'none' },
+          if (frame.kind === 'client.capability.call') {
+            calls.push(frame);
+            queueMicrotask(() => {
+              connection?.accept({
+                kind: 'client.capability.accepted',
+                invocationId: frame.invocationId,
+                admissionEvidence: { kind: 'none' },
+              });
             });
-            connection?.accept({
-              kind: 'client.capability.result',
-              invocationId: frame.invocationId,
-              result: {
-                content: [{ type: 'text', text: CLIENT_CAPABILITY_RESULT_TEXT }],
-              },
+          } else if (frame.kind === 'client.capability.admitted') {
+            queueMicrotask(() => {
+              connection?.accept({
+                kind: 'client.capability.result',
+                invocationId: frame.invocationId,
+                result: {
+                  content: [{ type: 'text', text: CLIENT_CAPABILITY_RESULT_TEXT }],
+                },
+              });
             });
-          });
+          }
         },
       },
     );
@@ -1515,7 +1519,7 @@ test('production backend preserves coordinator Client Capability semantics acros
         (event) =>
           event.type === 'tool_started' &&
           event.data?.toolName === tool.name &&
-          event.data?.categoryHint === 'client_capability',
+          event.data?.categoryHint === 'custom_tool',
       ),
     );
     const runtimeEvents = await store.readImmutableRuntimeEvents(sessionId, runId);
