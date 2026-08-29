@@ -43,6 +43,7 @@ import { type BrowserViewHost, provideBrowserViewHost } from '../browser/browser
 
 type FakePageConfig = {
   url?: string;
+  afterClickUrl?: string;
   title?: string;
   click?: { matches_n: number; match_level: 'exact' | 'stable' | 'reidentified' };
   fill?: { verified: boolean; actual: string; match_level: 'exact' | 'stable' | 'reidentified' };
@@ -52,11 +53,12 @@ type FakePageConfig = {
 };
 
 function makeFakePage(cfg: FakePageConfig): IPage {
+  let currentUrl = cfg.url ?? '';
   return {
-    getCurrentUrl: async () => cfg.url ?? null,
+    getCurrentUrl: async () => currentUrl || null,
     goto: async () => {},
     evaluate: async (js: string) => {
-      if (js.includes('location.href')) return (cfg.url ?? '') as never;
+      if (js.includes('location.href')) return currentUrl as never;
       if (js.includes('document.title')) return (cfg.title ?? '') as never;
       if (js.includes('outerHTML')) {
         return (cfg.extractHtml === undefined ? null : { html: cfg.extractHtml, truncated: false }) as never;
@@ -64,7 +66,10 @@ function makeFakePage(cfg: FakePageConfig): IPage {
       return '' as never;
     },
     snapshot: async () => cfg.snapshot ?? '[1] link "Home"',
-    click: async () => cfg.click ?? { matches_n: 1, match_level: 'exact' },
+    click: async () => {
+      if (cfg.afterClickUrl) currentUrl = cfg.afterClickUrl;
+      return cfg.click ?? { matches_n: 1, match_level: 'exact' };
+    },
     fillText: async () =>
       cfg.fill
         ? { filled: true, verified: cfg.fill.verified, expected: '', actual: cfg.fill.actual, length: 0, matches_n: 1, match_level: cfg.fill.match_level }
@@ -92,6 +97,7 @@ class FakeBridge implements BridgeLike {
 
 function install(cfg: FakePageConfig): void {
   const host: BrowserViewHost = {
+    currentUrl: () => cfg.url ?? "https://example.com/",
     canDrive: () => true,
     resolveEndpoint: async (id) => ({ cdpEndpoint: `ws://127.0.0.1:1/${id}` }),
     releaseSession: async () => {},
@@ -143,6 +149,26 @@ describe('browser tool execution', () => {
   it('navigate rejects a non-web URL before connecting', async () => {
     install({});
     await assert.rejects(run(buildBrowserNavigateTool(), { url: 'file:///etc/passwd' }), /Not a navigable URL/);
+  });
+
+  it('navigate suppresses the destination title after a cross-Origin redirect', async () => {
+    install({ url: 'https://other.example/landing', title: 'Private destination title' });
+    const out = await run(buildBrowserNavigateTool(), { url: 'https://example.com/start' });
+    assert.match(out, /Navigated to https:\/\/other\.example\/landing/);
+    assert.doesNotMatch(out, /Private destination title/);
+  });
+
+  it('click returns only the new URL after cross-Origin navigation', async () => {
+    install({
+      url: 'https://example.com/start',
+      afterClickUrl: 'https://other.example/landing',
+    });
+    const out = await run(buildBrowserClickTool(), { ref: '[1]' });
+    assert.equal(
+      out,
+      'Navigated to https://other.example/landing. Access to the new site requires approval on the next Browser call.',
+    );
+    assert.doesNotMatch(out, /Clicked|matched/);
   });
 
 

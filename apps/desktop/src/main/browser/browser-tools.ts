@@ -137,6 +137,9 @@ export function buildBrowserNavigateTool(): MakaTool<{ url: string }, string> {
           return { landed: typeof landed === 'string' && landed ? landed : url, title, info };
         },
       });
+      if (crossOrigin(url, result.landed)) {
+        return crossOriginNavigationResult(result.landed);
+      }
       return (
         [`Loaded ${result.landed}`, result.title ? `Title: ${result.title}` : undefined].filter(Boolean).join('\n') +
         takeoverNote(result.info)
@@ -190,8 +193,16 @@ export function buildBrowserClickTool(): MakaTool<{ ref: string }, string> {
         abortSignal,
         // A mutating action: harden a taken-over page (reload once) before clicking.
         takeover: 'mutate',
-        run: async (page, info) => ({ outcome: await page.click(normalizeElementRef(ref)), info }),
+        run: async (page, info) => {
+          const before = await currentPageUrl(page);
+          const outcome = await page.click(normalizeElementRef(ref));
+          const after = await currentPageUrl(page);
+          return { outcome, before, after, info };
+        },
       });
+      if (crossOrigin(result.before, result.after)) {
+        return crossOriginNavigationResult(result.after);
+      }
       const { matches_n, match_level } = result.outcome;
       return (
         `Clicked ${ref} (matched ${matches_n} element${matches_n === 1 ? '' : 's'}, ${match_level} match).` +
@@ -202,6 +213,24 @@ export function buildBrowserClickTool(): MakaTool<{ ref: string }, string> {
       );
     },
   };
+}
+
+async function currentPageUrl(page: Parameters<BrowserPageRun<unknown>>[0]): Promise<string> {
+  const evaluated = await page.evaluate<string>('window.location.href').catch(() => '');
+  if (typeof evaluated === 'string' && evaluated) return evaluated;
+  return (await page.getCurrentUrl?.()) ?? '';
+}
+
+function crossOrigin(before: string, after: string): boolean {
+  try {
+    return new URL(before).origin !== new URL(after).origin;
+  } catch {
+    return false;
+  }
+}
+
+function crossOriginNavigationResult(url: string): string {
+  return `Navigated to ${url}. Access to the new site requires approval on the next Browser call.`;
 }
 
 export function buildBrowserTypeTool(): MakaTool<{ ref: string; text: string; submit?: boolean }, string> {
