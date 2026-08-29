@@ -35,10 +35,6 @@ export {
 } from './interaction-store.js';
 export type {
   CommitInteractionOutcomeResult,
-  ClientCapabilityGrantCapability,
-  ClientCapabilityGrantScope,
-  ClientCapabilitySessionGrant,
-  ClientCapabilitySessionGrantKey,
   EstablishInteractionRequestResult,
   InteractionIdentity,
   InteractionMutationFailureResult,

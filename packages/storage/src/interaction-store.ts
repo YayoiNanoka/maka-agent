@@ -20,6 +20,13 @@
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import {
+  clientCapabilityScopeIdentity,
+  decodeClientCapabilitySessionGrant,
+  decodeClientCapabilitySessionGrantKey,
+  type ClientCapabilitySessionGrant,
+  type ClientCapabilitySessionGrantKey,
+} from '@maka/core/client-capability-grant';
+import {
   decodeInteractionCanonicalOutcome,
   decodeInteractionRequest,
   interactionCanonicalOutcomesEquivalent,
@@ -44,28 +51,6 @@ const REMEMBER_SCOPE_ID = /^[0-9a-f]{64}$/;
 export const STORED_INTERACTION_REQUEST_MAX_BYTES = 20 * 1024;
 export const STORED_INTERACTION_OUTCOME_MAX_BYTES = 12 * 1024;
 export const STORED_CLIENT_CAPABILITY_SESSION_GRANT_MAX_BYTES = 12 * 1024;
-
-export type ClientCapabilityGrantCapability = 'browser' | 'computer_use' | 'desktop_mcp';
-
-export type ClientCapabilityGrantScope =
-  | { readonly kind: 'browser_origin'; readonly origin: string }
-  | { readonly kind: 'capability' }
-  | { readonly kind: 'mcp_tool'; readonly serverId: string; readonly toolName: string };
-
-export interface ClientCapabilitySessionGrantKey {
-  readonly sessionId: string;
-  readonly providerId: string;
-  readonly contractId: string;
-  readonly serverId: string;
-  readonly toolName: string;
-  readonly capability: ClientCapabilityGrantCapability;
-  readonly scope: ClientCapabilityGrantScope;
-}
-
-export interface ClientCapabilitySessionGrant extends ClientCapabilitySessionGrantKey {
-  readonly version: 1;
-  readonly grantedAt: number;
-}
 
 export interface InteractionIdentity {
   readonly sessionId: string;
@@ -410,7 +395,7 @@ class SqliteInteractionStore implements InteractionStoreWriter {
   async readClientCapabilitySessionGrant(
     key: ClientCapabilitySessionGrantKey,
   ): Promise<ClientCapabilitySessionGrant | undefined> {
-    const candidate = normalizeClientCapabilityGrantKey(key, 'input');
+    const candidate = decodeGrantKey(key, 'input');
     const scope = clientCapabilityScopeIdentity(candidate.scope);
     const row = this.#lease.database
       .prepare(`
@@ -439,11 +424,11 @@ class SqliteInteractionStore implements InteractionStoreWriter {
     if (typeof row.record_json !== 'string') {
       throw new InteractionStoreError('invalid_record', 'Invalid Client Capability Session Grant');
     }
-    const grant = normalizeClientCapabilitySessionGrant(
+    const grant = decodeGrant(
       parseJsonRecord(row.record_json, 'Client Capability Session Grant'),
       'record',
     );
-    if (!isDeepStrictEqual(normalizeClientCapabilityGrantKey(grant, 'record'), candidate)) {
+    if (!isDeepStrictEqual(decodeGrantKey(grant, 'record'), candidate)) {
       throw new InteractionStoreError(
         'invalid_record',
         'Client Capability Session Grant identity does not match row',
@@ -455,7 +440,7 @@ class SqliteInteractionStore implements InteractionStoreWriter {
   async commitClientCapabilitySessionGrant(
     grant: ClientCapabilitySessionGrant,
   ): Promise<ClientCapabilitySessionGrant> {
-    const candidate = normalizeClientCapabilitySessionGrant(grant, 'input');
+    const candidate = decodeGrant(grant, 'input');
     const scope = clientCapabilityScopeIdentity(candidate.scope);
     const encoded = encode(candidate, STORED_CLIENT_CAPABILITY_SESSION_GRANT_MAX_BYTES)
       .toString('utf8')
@@ -518,10 +503,7 @@ class SqliteInteractionStore implements InteractionStoreWriter {
       throw new InteractionStoreError('invalid_record', 'Invalid Client Capability Session Grant');
     }
     return deepFreeze(
-      normalizeClientCapabilitySessionGrant(
-        parseJsonRecord(row.record_json, 'Client Capability Session Grant'),
-        'record',
-      ),
+      decodeGrant(parseJsonRecord(row.record_json, 'Client Capability Session Grant'), 'record'),
     );
   }
 
@@ -639,118 +621,19 @@ function normalizeOutcome(
   return { ...identity(request), outcome };
 }
 
-function normalizeClientCapabilitySessionGrant(
-  value: unknown,
-  source: DecodeSource,
-): ClientCapabilitySessionGrant {
-  const record = closedRecord(
-    value,
-    [
-      'version',
-      'sessionId',
-      'providerId',
-      'contractId',
-      'serverId',
-      'toolName',
-      'capability',
-      'scope',
-      'grantedAt',
-    ],
-    [],
-    source,
-  );
-  if (record.version !== 1)
-    decodeFailure(source, 'Invalid Client Capability Session Grant version');
-  if (!Number.isSafeInteger(record.grantedAt) || (record.grantedAt as number) < 0) {
-    decodeFailure(source, 'Invalid Client Capability Session Grant timestamp');
-  }
-  return {
-    version: 1,
-    ...normalizeClientCapabilityGrantKey(record, source),
-    grantedAt: record.grantedAt as number,
-  };
-}
-
-function normalizeClientCapabilityGrantKey(
-  value: unknown,
-  source: DecodeSource,
-): ClientCapabilitySessionGrantKey {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    decodeFailure(source, 'Invalid Client Capability Session Grant key');
-  }
-  const record = value as Record<string, unknown>;
-  const capability = record.capability;
-  if (capability !== 'browser' && capability !== 'computer_use' && capability !== 'desktop_mcp') {
-    decodeFailure(source, 'Invalid Client Capability Session Grant capability');
-  }
-  const scope = normalizeClientCapabilityGrantScope(record.scope, source);
-  if (
-    (capability === 'browser' && scope.kind !== 'browser_origin') ||
-    (capability === 'computer_use' && scope.kind !== 'capability') ||
-    (capability === 'desktop_mcp' && scope.kind !== 'mcp_tool')
-  ) {
-    decodeFailure(source, 'Client Capability Session Grant scope does not match capability');
-  }
-  return {
-    sessionId: assertId(record.sessionId, source),
-    providerId: assertId(record.providerId, source),
-    contractId: assertId(record.contractId, source),
-    serverId: assertId(record.serverId, source),
-    toolName: assertId(record.toolName, source),
-    capability,
-    scope,
-  };
-}
-
-function normalizeClientCapabilityGrantScope(
-  value: unknown,
-  source: DecodeSource,
-): ClientCapabilityGrantScope {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    decodeFailure(source, 'Invalid Client Capability Session Grant scope');
-  }
-  const record = value as Record<string, unknown>;
-  switch (record.kind) {
-    case 'browser_origin': {
-      const scope = closedRecord(record, ['kind', 'origin'], [], source);
-      if (typeof scope.origin !== 'string' || scope.origin.length > 16_384) {
-        decodeFailure(source, 'Invalid Browser origin scope');
-      }
-      let url: URL;
-      try {
-        url = new URL(scope.origin);
-      } catch (error) {
-        decodeFailure(source, 'Invalid Browser origin scope', error);
-      }
-      if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.origin !== scope.origin) {
-        decodeFailure(source, 'Browser origin scope must be a canonical HTTP origin');
-      }
-      return { kind: 'browser_origin', origin: scope.origin };
-    }
-    case 'capability':
-      closedRecord(record, ['kind'], [], source);
-      return { kind: 'capability' };
-    case 'mcp_tool': {
-      const scope = closedRecord(record, ['kind', 'serverId', 'toolName'], [], source);
-      return {
-        kind: 'mcp_tool',
-        serverId: assertId(scope.serverId, source),
-        toolName: assertId(scope.toolName, source),
-      };
-    }
-    default:
-      decodeFailure(source, 'Invalid Client Capability Session Grant scope kind');
+function decodeGrant(value: unknown, source: DecodeSource): ClientCapabilitySessionGrant {
+  try {
+    return decodeClientCapabilitySessionGrant(value);
+  } catch (error) {
+    decodeFailure(source, 'Invalid Client Capability Session Grant', error);
   }
 }
 
-function clientCapabilityScopeIdentity(scope: ClientCapabilityGrantScope): string {
-  switch (scope.kind) {
-    case 'browser_origin':
-      return scope.origin;
-    case 'capability':
-      return '*';
-    case 'mcp_tool':
-      return `${scope.serverId}\0${scope.toolName}`;
+function decodeGrantKey(value: unknown, source: DecodeSource): ClientCapabilitySessionGrantKey {
+  try {
+    return decodeClientCapabilitySessionGrantKey(value);
+  } catch (error) {
+    decodeFailure(source, 'Invalid Client Capability Session Grant key', error);
   }
 }
 
