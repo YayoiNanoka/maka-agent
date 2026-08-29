@@ -1,0 +1,247 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { test } from 'node:test';
+
+import { createWorkspaceWritePermissionProfile } from '@maka/core/permission-profile';
+import { createManagedExecutionBoundary } from '@maka/core/sandbox-boundary';
+import {
+  openInteractiveExecutionStoresForWrite,
+  type ExecutionStoresWriter,
+} from '@maka/storage/execution-stores';
+import type { InteractiveInteractionStoreWriterFacade } from '@maka/storage/interaction-store';
+import {
+  resolveStorageRoot,
+  tryAcquireInteractiveRootOwner,
+  type InteractiveRootOwner,
+} from '@maka/storage/root-authority';
+import {
+  HostClientCapabilityCoordinator,
+  type ClientCapabilitySnapshot,
+} from '../server/client-capability-coordinator.js';
+import type { ClientCapabilityConnection } from '../server/client-capability-service.js';
+import { clientCapabilityProviderId } from '../server/client-capability-provider-id.js';
+import {
+  HostInteractionCoordinator,
+  type HostInteractionCoordinatorOptions,
+} from '../server/interaction-coordinator.js';
+import type { ConnectionContext } from '../server/operation-dispatcher.js';
+import { RuntimePolicyActivationGate } from '../server/runtime-policy-activation-gate.js';
+import { SessionAdmissionGate } from '../server/session-admission-gate.js';
+
+const RUN = Object.freeze({
+  sessionId: 'session_1',
+  turnId: 'turn_1',
+  runId: 'run_1',
+});
+const IDENTITY = Object.freeze({
+  connectionId: 'desktop-connection-1',
+  principalKind: 'capability_provider' as const,
+  principalId: 'desktop:installation-secret',
+  clientInstanceId: 'desktop-client-secret',
+});
+
+test('persists the canonical authenticated provider identity through managed admission', async () => {
+  await withStore(async ({ store }) => {
+    const interactions = createInteractionCoordinator(store);
+    const runOwner = interactions.bindRun(RUN);
+    const capabilities = new HostClientCapabilityCoordinator({
+      activation: new RuntimePolicyActivationGate(),
+      onModelToolsChanged: () => undefined,
+      interactions,
+      grants: store,
+    });
+    let connection!: ClientCapabilityConnection;
+    connection = capabilities.attachConnection(IDENTITY, {
+      send: async (frame) => {
+        if (frame.kind === 'client.capability.call') {
+          connection.accept({
+            kind: 'client.capability.accepted',
+            invocationId: frame.invocationId,
+            admissionEvidence: {
+              kind: 'browser_url',
+              url: 'https://example.com/private?token=secret',
+            },
+          });
+        } else if (frame.kind === 'client.capability.admitted') {
+          connection.accept({
+            kind: 'client.capability.result',
+            invocationId: frame.invocationId,
+            result: { content: [{ type: 'text', text: 'snapshot' }] },
+          });
+        }
+      },
+    });
+    let snapshot: ClientCapabilitySnapshot | undefined;
+    try {
+      const replaced = await capabilities.handlers['client.capability.replace'](
+        {
+          registrationId: 'desktop-native-registration',
+          offers: [
+            {
+              offerId: 'desktop_browser',
+              version: '1',
+              affinity: 'session',
+              hostPathAccess: 'none',
+              label: 'Desktop Browser',
+              tools: [
+                {
+                  serverId: 'desktop_browser',
+                  name: 'browser_snapshot',
+                  inputSchema: { type: 'object', additionalProperties: false },
+                },
+              ],
+            },
+          ],
+        },
+        connectionContext(IDENTITY.connectionId),
+      );
+      assert.equal(replaced.ok, true, JSON.stringify(replaced));
+      assert.deepEqual(await capabilities.bindSession(RUN.sessionId, IDENTITY.connectionId), {
+        ok: true,
+      });
+      snapshot = capabilities.snapshotForSession(RUN.sessionId);
+      assert.ok(snapshot);
+      const tool = snapshot.tools[0];
+      assert.ok(tool?.prepareExecution);
+      const context = managedContext();
+      const preparing = tool.prepareExecution({}, context);
+      const request = await waitForPending(store);
+      assert.equal(request.request.kind, 'client_capability');
+      if (request.request.kind !== 'client_capability') return;
+
+      const providerId = clientCapabilityProviderId(IDENTITY);
+      assert.equal(request.request.target.providerId, providerId);
+      assert.equal(JSON.stringify(request).includes(IDENTITY.principalId), false);
+      assert.equal(JSON.stringify(request).includes(IDENTITY.clientInstanceId), false);
+
+      const answered = await interactions.handlers['interaction.answer'](
+        {
+          sessionId: RUN.sessionId,
+          interactionId: request.requestId,
+          answer: { kind: 'client_capability', decision: 'allow' },
+        },
+        connectionContext('desktop-ui'),
+      );
+      assert.equal(answered.ok, true);
+      const prepared = await preparing;
+      const grant = await store.readClientCapabilitySessionGrant({
+        sessionId: RUN.sessionId,
+        ...request.request.target,
+      });
+      assert.equal(grant?.providerId, providerId);
+      assert.deepEqual(await prepared.execute(context), {
+        content: [{ type: 'text', text: 'snapshot' }],
+      });
+    } finally {
+      snapshot?.release();
+      await connection.close();
+      await capabilities.close();
+      await runOwner.close('turn_terminal');
+      runOwner.release();
+      await interactions.close();
+    }
+  });
+});
+
+function managedContext() {
+  return {
+    ...RUN,
+    cwd: '/tmp',
+    toolCallId: 'browser-call-1',
+    permissionMode: 'ask' as const,
+    executionBoundary: createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), 0),
+    abortSignal: new AbortController().signal,
+    emitOutput: () => undefined,
+  };
+}
+
+function connectionContext(connectionId: string): ConnectionContext {
+  return {
+    hostEpoch: 'host_epoch_1',
+    connectionId,
+    principal: 'local_os_user',
+    acquireResidency: () => ({ release: () => undefined }),
+  };
+}
+
+async function waitForPending(store: InteractiveInteractionStoreWriterFacade) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const pending = await store.listSessionPending(RUN.sessionId);
+    if (pending[0]) return pending[0];
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error('Client Capability approval was not published');
+}
+
+function createInteractionCoordinator(
+  store: InteractiveInteractionStoreWriterFacade,
+): HostInteractionCoordinator {
+  let now = 100;
+  const options: HostInteractionCoordinatorOptions = {
+    store,
+    sandboxBoundaries: {
+      createSandboxBoundaryRequest: async () => {
+        throw new Error('Unexpected sandbox boundary publication');
+      },
+      readSandboxBoundaryRequest: async () => undefined,
+      listPendingSandboxBoundaryRequests: async () => [],
+      settleSandboxBoundaryRequest: async () => {
+        throw new Error('Unexpected sandbox boundary settlement');
+      },
+      listHeaders: async () => [],
+    },
+    sessionAdmission: new SessionAdmissionGate(),
+    sessions: { probeSessionRemoval: async () => ({ kind: 'present' }) },
+    now: () => ++now,
+    preflightSessionSnapshot: () => true,
+    refreshCanonicalContinuity: async () => undefined,
+    onPoison: () => undefined,
+    onSandboxBoundarySettled: async () => undefined,
+  };
+  return new HostInteractionCoordinator(options);
+}
+
+interface StoreContext {
+  readonly owner: InteractiveRootOwner;
+  readonly store: InteractiveInteractionStoreWriterFacade;
+  readonly stores: ExecutionStoresWriter<'interactive'>;
+}
+
+async function withStore(run: (context: StoreContext) => Promise<void>): Promise<void> {
+  const base = await mkdtemp(join(tmpdir(), 'maka-client-capability-admission-'));
+  const root = join(base, 'root');
+  await mkdir(root);
+  const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+  const owner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(owner);
+  if (!owner) return;
+  const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+  try {
+    await run({ owner, store: stores.interactionStore, stores });
+  } finally {
+    if (!owner.closed) await owner.close();
+    await rm(owner.controlDirectory, { recursive: true, force: true });
+    await rm(base, { recursive: true, force: true });
+  }
+}

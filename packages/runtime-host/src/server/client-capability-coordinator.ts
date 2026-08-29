@@ -59,6 +59,7 @@ import type {
   ClientCapabilityService,
 } from './client-capability-service.js';
 import type { HostInteractionCoordinator } from './interaction-coordinator.js';
+import { clientCapabilityProviderId } from './client-capability-provider-id.js';
 
 // Leave the Host deadline outside the provider's bounded action deadline so an
 // accepted call can return its real terminal result instead of outcome_unknown.
@@ -1156,7 +1157,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
   }
 
   #provider(identity: ClientCapabilityConnectionIdentity): ClientProviderState {
-    const providerId = clientProviderId(identity.principalId, identity.clientInstanceId);
+    const providerId = clientCapabilityProviderId(identity);
     const trustedProvider = identity.principalKind === 'capability_provider';
     if (identity.capabilityOwner && !trustedProvider) {
       throw new Error('Only a capability provider may declare a Client Capability owner');
@@ -1516,10 +1517,6 @@ function managedClientCapabilityGrantTarget(
     capability: 'browser',
     scope: Object.freeze({ kind: 'browser_origin', origin: url.origin }),
   });
-}
-
-function clientProviderId(principalId: string, clientInstanceId: string): string {
-  return `${principalId}\0${clientInstanceId}`;
 }
 
 function serviceContract(serviceId: string, version: string): string {
