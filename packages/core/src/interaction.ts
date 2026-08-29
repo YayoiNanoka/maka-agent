@@ -65,6 +65,7 @@ export const INTERACTION_CLOSURE_REASONS = [
   'turn_terminal',
   'timed_out',
   'host_restarted',
+  'provider_disconnected',
 ] as const;
 
 const UTF8 = new TextEncoder();

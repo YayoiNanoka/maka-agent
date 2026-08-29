@@ -82,6 +82,7 @@ interface InvocationState<Registration extends ClientCapabilityInvocationRegistr
   readonly onAbort?: () => void;
   onProgress?: (current: number, total: number) => void;
   readonly timeoutMs: number;
+  readonly providerAvailability: AbortController;
   timer: NodeJS.Timeout | undefined;
   acceptedSettled: boolean;
   phase: 'dispatched' | 'accepted' | 'admitted' | 'chunks';
@@ -102,6 +103,8 @@ export interface PreparedClientCapabilityInvocation {
   admit(onProgress?: (current: number, total: number) => void): Promise<ClientCapabilityCallResult>;
   /** Cancels an accepted call that will not cross the admission cut. */
   cancel(): void;
+  /** Aborts when the provider connection disappears before this call is admitted. */
+  readonly providerSignal: AbortSignal;
 }
 
 export interface ClientCapabilityInvocationBrokerOptions<
@@ -273,6 +276,7 @@ export class ClientCapabilityInvocationBroker<
         onAbort,
         onProgress,
         timeoutMs,
+        providerAvailability: new AbortController(),
         timer: undefined,
         acceptedSettled: false,
         phase: 'dispatched',
@@ -300,6 +304,8 @@ export class ClientCapabilityInvocationBroker<
     void result.catch(() => {});
     return {
       invocationId,
+      providerSignal:
+        this.#invocations.get(invocationId)?.providerAvailability.signal ?? AbortSignal.abort(),
       waitUntilAccepted: () => accepted,
       admit: async (onProgress) => {
         await accepted;
@@ -442,6 +448,14 @@ export class ClientCapabilityInvocationBroker<
   releaseConnection(connectionId: string): void {
     for (const invocation of [...this.#invocations.values()]) {
       if (invocation.registration.connectionId !== connectionId) continue;
+      if (invocation.phase === 'dispatched' || invocation.phase === 'accepted') {
+        invocation.providerAvailability.abort(
+          new ClientCapabilityInvocationError(
+            'capability_lost',
+            'Client Capability provider disconnected before admission',
+          ),
+        );
+      }
       this.#settle(
         invocation,
         undefined,

@@ -1077,6 +1077,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
                 turnId: options.context.turnId,
                 runId: options.context.runId,
                 toolCallId: options.context.toolCallId,
+                providerSignal: prepared.providerSignal,
               });
               if (decision !== 'allow') throw new Error('Client Capability request was denied');
               if (!(await this.#grants.readClientCapabilitySessionGrant(key))) {
@@ -1119,6 +1120,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
     readonly toolName: string;
     readonly capability: ClientCapabilityGrantTarget['capability'];
     readonly scope: ClientCapabilityGrantTarget['scope'];
+    readonly providerSignal: AbortSignal;
   }): Promise<'allow' | 'deny'> {
     const target: ClientCapabilityGrantTarget = {
       providerId: input.providerId,
@@ -1144,6 +1146,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
         runId: input.runId,
         toolCallId: input.toolCallId,
         target,
+        providerSignal: input.providerSignal,
       })
       .finally(() => {
         if (this.#pendingApprovals.get(key) === pending) this.#pendingApprovals.delete(key);

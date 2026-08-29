@@ -164,6 +164,7 @@ export interface ClientCapabilityApprovalInput {
   readonly runId: string;
   readonly toolCallId: string;
   readonly target: ClientCapabilityGrantTarget;
+  readonly providerSignal?: AbortSignal;
 }
 
 export class ClientCapabilityApprovalClosedError extends Error {
@@ -274,7 +275,33 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
       resolve: resolveDecision,
       reject: rejectDecision,
     });
-    return decision;
+    const onProviderDisconnect = () => {
+      void this.#closeClientCapabilityApproval(requestId).catch(rejectDecision);
+    };
+    if (input.providerSignal?.aborted) onProviderDisconnect();
+    else input.providerSignal?.addEventListener('abort', onProviderDisconnect, { once: true });
+    try {
+      return await decision;
+    } finally {
+      input.providerSignal?.removeEventListener('abort', onProviderDisconnect);
+    }
+  }
+
+  async #closeClientCapabilityApproval(requestId: string): Promise<void> {
+    const candidate = this.#live.get(requestId);
+    if (!candidate || candidate.kind !== 'client_capability') return;
+    await this.#sessionAdmission.run(candidate.request.sessionId, async (admission) => {
+      const current = this.#live.get(requestId);
+      if (!current || current !== candidate || current.kind !== 'client_capability') return;
+      const outcome = await this.#commitClientCapabilityOutcome(candidate.request, {
+        kind: 'closure',
+        reason: 'provider_disconnected',
+        committedAt: this.#now(),
+      });
+      await this.#refreshCanonicalContinuity(candidate.request.sessionId, admission);
+      this.#throwIfPoisoned();
+      await this.#applyAndDelete(candidate, outcome);
+    });
   }
 
   beginDrain(): void {
