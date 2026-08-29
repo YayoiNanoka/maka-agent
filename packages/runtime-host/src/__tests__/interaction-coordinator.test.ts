@@ -119,6 +119,52 @@ describe('HostInteractionCoordinator', () => {
     });
   });
 
+  test('commits a Client Capability approval and Session Grant before resuming the caller', async () => {
+    await withStore(async ({ store }) => {
+      const coordinator = createCoordinator(store);
+      const owner = coordinator.bindRun(RUN);
+      const target = {
+        providerId: 'provider-1',
+        contractId: 'contract-1',
+        serverId: 'desktop_browser',
+        toolName: 'browser_snapshot',
+        capability: 'browser' as const,
+        scope: { kind: 'browser_origin' as const, origin: 'https://example.com' },
+      };
+      const approval = coordinator.requestClientCapabilityApproval({
+        ...RUN,
+        toolCallId: 'browser-call-1',
+        target,
+      });
+      let pending = await store.listSessionPending(RUN.sessionId);
+      while (pending.length === 0) {
+        await new Promise((resolve) => setImmediate(resolve));
+        pending = await store.listSessionPending(RUN.sessionId);
+      }
+      const request = pending[0];
+      assert.equal(request?.request.kind, 'client_capability');
+      assert.ok(request);
+
+      const answered = await coordinator.handlers['interaction.answer'](
+        {
+          sessionId: RUN.sessionId,
+          interactionId: request.requestId,
+          answer: { kind: 'client_capability', decision: 'allow' },
+        },
+        connection(),
+      );
+      assert.equal(answered.ok, true);
+      assert.equal(await approval, 'allow');
+      assert.ok(
+        await store.readClientCapabilitySessionGrant({ sessionId: RUN.sessionId, ...target }),
+      );
+
+      await owner.close('turn_terminal');
+      owner.release();
+      await coordinator.close();
+    });
+  });
+
   test('settles a sandbox boundary once through the canonical boundary Store and wakes its graph', async () => {
     await withStore(async ({ owner, store, stores }) => {
       const workspace = join(owner.capability.canonicalPath, 'workspace');
