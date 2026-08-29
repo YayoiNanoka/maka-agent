@@ -132,6 +132,36 @@ describe('ClientCapabilityInvocationBroker', () => {
     );
     broker.close();
   });
+
+  test('cancels accepted work without crossing admission', async () => {
+    const sent: ClientCapabilityHostFrame[] = [];
+    let broker!: ClientCapabilityInvocationBroker<Registration>;
+    broker = new ClientCapabilityInvocationBroker({
+      senderFor: () => ({
+        send: async (frame) => {
+          sent.push(frame);
+          if (frame.kind === 'client.capability.call') {
+            broker.accept('connection-a', {
+              kind: 'client.capability.accepted',
+              invocationId: frame.invocationId,
+              admissionEvidence: { kind: 'none' },
+            });
+          }
+        },
+      }),
+      onRegistrationIdle: () => {},
+    });
+
+    const prepared = broker.prepare(registration, binding, {}, context, undefined, 1_000);
+    await prepared.waitUntilAccepted();
+    prepared.cancel();
+    await assert.rejects(() => prepared.admit(), /cancelled before admission/u);
+    assert.deepEqual(
+      sent.map((frame) => frame.kind),
+      ['client.capability.call', 'client.capability.cancel', 'client.capability.release'],
+    );
+    broker.close();
+  });
 });
 
 function delay(ms: number): Promise<void> {

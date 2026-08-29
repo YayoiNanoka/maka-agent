@@ -19,12 +19,23 @@
 
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { buildMcpTools, mcpProxyToolName, type McpToolProvider } from '@maka/runtime/mcp-tools';
+import {
+  buildMcpTools,
+  mcpProxyToolName,
+  type McpPreparedToolCall,
+  type McpToolProvider,
+} from '@maka/runtime/mcp-tools';
 import { type MakaTool } from '@maka/runtime/tool-runtime';
 import type { RootExecutionDescriptor } from '@maka/core/agent-run';
+import {
+  clientCapabilityScopeIdentity,
+  type ClientCapabilityGrantTarget,
+} from '@maka/core/client-capability-grant';
 import { type ToolGroup } from '@maka/runtime/tool-availability';
+import type { InteractiveInteractionStoreWriterFacade } from '@maka/storage/interaction-store';
 import {
   type ClientCapabilityOffer,
+  type ClientCapabilityAdmissionEvidence,
   type ClientCapabilityOwnerIdentity,
   type ClientCapabilityReplaceInput,
   type ClientCapabilityServiceOffer,
@@ -47,10 +58,22 @@ import type {
   ClientCapabilityConnectionSender,
   ClientCapabilityService,
 } from './client-capability-service.js';
+import type { HostInteractionCoordinator } from './interaction-coordinator.js';
 
 // Leave the Host deadline outside the provider's bounded action deadline so an
 // accepted call can return its real terminal result instead of outcome_unknown.
 const DEFAULT_CALL_TIMEOUT_MS = 150_000;
+const DESKTOP_BROWSER_SERVER_ID = 'desktop_browser';
+const DESKTOP_SETTINGS_SERVER_ID = 'desktop_settings';
+const DESKTOP_BROWSER_TOOLS = new Set([
+  'browser_navigate',
+  'browser_snapshot',
+  'browser_click',
+  'browser_type',
+  'browser_wait',
+  'browser_extract',
+]);
+const DESKTOP_SETTINGS_TOOLS = new Set(['MakaClientSettingsGet', 'MakaClientSettingsUpdate']);
 
 export { ClientCapabilityInvocationError };
 export type { ClientCapabilityInvocationFailure };
@@ -152,6 +175,11 @@ type ClientCapabilityToolBinding = ClientCapabilityBoundTool['binding'];
 export interface HostClientCapabilityCoordinatorOptions {
   readonly activation: RuntimePolicyActivationGate;
   readonly onModelToolsChanged: () => void;
+  readonly interactions: Pick<HostInteractionCoordinator, 'requestClientCapabilityApproval'>;
+  readonly grants: Pick<
+    InteractiveInteractionStoreWriterFacade,
+    'readClientCapabilitySessionGrant'
+  >;
 }
 
 export interface ClientCapabilityServiceInvocationInput {
@@ -181,9 +209,12 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
 
   readonly #activation: RuntimePolicyActivationGate;
   readonly #onModelToolsChanged: () => void;
+  readonly #interactions: HostClientCapabilityCoordinatorOptions['interactions'];
+  readonly #grants: HostClientCapabilityCoordinatorOptions['grants'];
   readonly #providers = new Map<string, ClientProviderState>();
   readonly #connections = new Map<string, ClientProviderConnection>();
   readonly #sessions = new Map<string, SessionCapabilityState>();
+  readonly #pendingApprovals = new Map<string, Promise<'allow' | 'deny'>>();
   readonly #previewSessions = new AsyncLocalStorage<ReadonlyMap<string, SessionCapabilityState>>();
   readonly #pendingConnectionReleases = new Set<Promise<void>>();
   readonly #invocations: ClientCapabilityInvocationBroker<CapabilityRegistration>;
@@ -193,6 +224,8 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
   constructor(options: HostClientCapabilityCoordinatorOptions) {
     this.#activation = options.activation;
     this.#onModelToolsChanged = options.onModelToolsChanged;
+    this.#interactions = options.interactions;
+    this.#grants = options.grants;
     this.#invocations = new ClientCapabilityInvocationBroker({
       senderFor: (connectionId) => {
         const connection = this.#connections.get(connectionId);
@@ -567,6 +600,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
         callTimeoutMs: DEFAULT_CALL_TIMEOUT_MS,
         categoryHint: 'client_capability',
         recoveryMode: 'outcome_unknown',
+        executionLocation: 'remote',
       }),
       ...buildMcpTools(this.#snapshotProvider(state?.initiatingProviderId, trusted), {
         callTimeoutMs: DEFAULT_CALL_TIMEOUT_MS,
@@ -983,29 +1017,84 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
       revision: this.#revision,
       tools: Object.freeze(boundTools),
     });
+    const resolveBinding = (binding: ClientCapabilityToolBinding) => {
+      const selectedBinding = bindings.get(binding);
+      if (!selectedBinding) {
+        throw new ClientCapabilityInvocationError(
+          'capability_lost',
+          'Client Capability tool is not part of the frozen offer',
+        );
+      }
+      const { serverId, name: toolName } = selectedBinding.tool.descriptor;
+      const dynamicBinding = selectedBinding.registration
+        ? {
+            registration: selectedBinding.registration,
+            tool: selectedBinding.tool,
+          }
+        : this.#selectCallBinding(
+            selectedBinding.contractId,
+            initiatingProviderId,
+            toolIdentity(serverId, toolName),
+          );
+      return { selectedBinding, dynamicBinding };
+    };
     return {
       toolSnapshot: () => snapshot,
-      callTool: (binding, args, options) => {
-        const selectedBinding = bindings.get(binding);
-        if (!selectedBinding) {
-          return Promise.reject(
-            new ClientCapabilityInvocationError(
-              'capability_lost',
-              'Client Capability tool is not part of the frozen offer',
-            ),
-          );
-        }
-        const { serverId, name: toolName } = selectedBinding.tool.descriptor;
-        const dynamicBinding = selectedBinding.registration
-          ? {
-              registration: selectedBinding.registration,
-              tool: selectedBinding.tool,
+      prepareTool: async (binding, args, options): Promise<McpPreparedToolCall> => {
+        const { selectedBinding, dynamicBinding } = resolveBinding(binding);
+        const prepared = this.#invocations.prepare(
+          dynamicBinding.registration,
+          dynamicBinding.tool,
+          args,
+          options.context,
+          options.signal,
+          options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
+        );
+        try {
+          const evidence = await prepared.waitUntilAccepted();
+          const boundary = options.context.executionBoundary;
+          if (!boundary) throw new Error('Client Capability execution boundary is unavailable');
+          if (boundary.kind !== 'bypass') {
+            if (options.context.permissionMode !== 'ask' || !options.context.runId) {
+              throw new Error('Client Capability is unavailable in the current permission mode');
             }
-          : this.#selectCallBinding(
+            const target = managedClientCapabilityGrantTarget(
               selectedBinding.contractId,
-              initiatingProviderId,
-              toolIdentity(serverId, toolName),
+              dynamicBinding.registration,
+              dynamicBinding.tool,
+              evidence,
             );
+            if (!target) {
+              return {
+                execute: ({ emitProgress } = {}) => prepared.admit(emitProgress),
+                cancel: () => prepared.cancel(),
+              };
+            }
+            const key = { sessionId: options.context.sessionId, ...target };
+            if (!(await this.#grants.readClientCapabilitySessionGrant(key))) {
+              const decision = await this.#requestApprovalOnce({
+                ...key,
+                turnId: options.context.turnId,
+                runId: options.context.runId,
+                toolCallId: options.context.toolCallId,
+              });
+              if (decision !== 'allow') throw new Error('Client Capability request was denied');
+              if (!(await this.#grants.readClientCapabilitySessionGrant(key))) {
+                throw new Error('Client Capability approval did not publish its Session Grant');
+              }
+            }
+          }
+          return {
+            execute: ({ emitProgress } = {}) => prepared.admit(emitProgress),
+            cancel: () => prepared.cancel(),
+          };
+        } catch (error) {
+          prepared.cancel();
+          throw error;
+        }
+      },
+      callTool: (binding, args, options) => {
+        const { dynamicBinding } = resolveBinding(binding);
         return this.#invocations.invoke(
           dynamicBinding.registration,
           dynamicBinding.tool,
@@ -1017,6 +1106,50 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
         );
       },
     };
+  }
+
+  #requestApprovalOnce(input: {
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+    readonly toolCallId: string;
+    readonly providerId: string;
+    readonly contractId: string;
+    readonly serverId: string;
+    readonly toolName: string;
+    readonly capability: ClientCapabilityGrantTarget['capability'];
+    readonly scope: ClientCapabilityGrantTarget['scope'];
+  }): Promise<'allow' | 'deny'> {
+    const target: ClientCapabilityGrantTarget = {
+      providerId: input.providerId,
+      contractId: input.contractId,
+      serverId: input.serverId,
+      toolName: input.toolName,
+      capability: input.capability,
+      scope: input.scope,
+    };
+    const key = [
+      input.sessionId,
+      target.providerId,
+      target.contractId,
+      target.capability,
+      clientCapabilityScopeIdentity(target.scope),
+    ].join('\0');
+    const existing = this.#pendingApprovals.get(key);
+    if (existing) return existing;
+    const pending = this.#interactions
+      .requestClientCapabilityApproval({
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        runId: input.runId,
+        toolCallId: input.toolCallId,
+        target,
+      })
+      .finally(() => {
+        if (this.#pendingApprovals.get(key) === pending) this.#pendingApprovals.delete(key);
+      });
+    this.#pendingApprovals.set(key, pending);
+    return pending;
   }
 
   #provider(identity: ClientCapabilityConnectionIdentity): ClientProviderState {
@@ -1331,6 +1464,55 @@ function freezeRegistration(
     servicesByContract,
     snapshotRefs: 0,
   };
+}
+
+function managedClientCapabilityGrantTarget(
+  contractId: string,
+  registration: CapabilityRegistration,
+  tool: FrozenToolBinding,
+  evidence: ClientCapabilityAdmissionEvidence,
+): ClientCapabilityGrantTarget | undefined {
+  const { serverId, name: toolName } = tool.descriptor;
+  if (!registration.trustedProvider) {
+    throw new Error('Managed Client Capability requires a trusted Desktop provider');
+  }
+  if (
+    tool.offerId === DESKTOP_SETTINGS_SERVER_ID &&
+    serverId === DESKTOP_SETTINGS_SERVER_ID &&
+    DESKTOP_SETTINGS_TOOLS.has(toolName)
+  ) {
+    if (evidence.kind !== 'none') {
+      throw new Error('Desktop Settings admission does not accept scope evidence');
+    }
+    return undefined;
+  }
+  if (
+    tool.offerId !== DESKTOP_BROWSER_SERVER_ID ||
+    serverId !== DESKTOP_BROWSER_SERVER_ID ||
+    !DESKTOP_BROWSER_TOOLS.has(toolName)
+  ) {
+    throw new Error(`Client Capability has no managed admission policy: ${serverId}/${toolName}`);
+  }
+  if (evidence.kind !== 'browser_url') {
+    throw new Error('Desktop Browser admission requires URL evidence');
+  }
+  let url: URL;
+  try {
+    url = new URL(evidence.url);
+  } catch {
+    throw new Error('Desktop Browser admission URL is invalid');
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('Desktop Browser admission requires an HTTP origin');
+  }
+  return Object.freeze({
+    providerId: registration.providerId,
+    contractId,
+    serverId,
+    toolName,
+    capability: 'browser',
+    scope: Object.freeze({ kind: 'browser_origin', origin: url.origin }),
+  });
 }
 
 function clientProviderId(principalId: string, clientInstanceId: string): string {

@@ -80,7 +80,7 @@ interface InvocationState<Registration extends ClientCapabilityInvocationRegistr
   readonly rejectAccepted: (error: Error) => void;
   readonly signal?: AbortSignal;
   readonly onAbort?: () => void;
-  readonly onProgress?: (current: number, total: number) => void;
+  onProgress?: (current: number, total: number) => void;
   readonly timeoutMs: number;
   timer: NodeJS.Timeout | undefined;
   acceptedSettled: boolean;
@@ -99,7 +99,9 @@ export interface PreparedClientCapabilityInvocation {
   /** Resolves once the provider has parsed the call and is waiting at its admission cut. */
   waitUntilAccepted(): Promise<ClientCapabilityAdmissionEvidence>;
   /** Crosses the admission cut and returns the provider result. */
-  admit(): Promise<ClientCapabilityCallResult>;
+  admit(onProgress?: (current: number, total: number) => void): Promise<ClientCapabilityCallResult>;
+  /** Cancels an accepted call that will not cross the admission cut. */
+  cancel(): void;
 }
 
 export interface ClientCapabilityInvocationBrokerOptions<
@@ -299,11 +301,12 @@ export class ClientCapabilityInvocationBroker<
     return {
       invocationId,
       waitUntilAccepted: () => accepted,
-      admit: async () => {
+      admit: async (onProgress) => {
         await accepted;
         const invocation = this.#invocations.get(invocationId);
         if (!invocation) return result;
         if (invocation.phase === 'accepted') {
+          invocation.onProgress = onProgress ?? invocation.onProgress;
           invocation.phase = 'admitted';
           this.#startTimeout(invocation);
           const currentSender = this.#senderFor(invocation.registration.connectionId);
@@ -335,6 +338,23 @@ export class ClientCapabilityInvocationBroker<
           }
         }
         return result;
+      },
+      cancel: () => {
+        const invocation = this.#invocations.get(invocationId);
+        if (!invocation) return;
+        const currentSender = this.#senderFor(invocation.registration.connectionId);
+        void currentSender
+          ?.send({ kind: 'client.capability.cancel', invocationId })
+          .catch(() => {});
+        this.#settle(
+          invocation,
+          undefined,
+          new ClientCapabilityInvocationError(
+            'provider_rejected',
+            'Client Capability invocation was cancelled before admission',
+          ),
+          true,
+        );
       },
     };
   }
@@ -373,7 +393,7 @@ export class ClientCapabilityInvocationBroker<
         return;
       case 'client.capability.failed':
         if (invocation.phase !== 'admitted' && invocation.phase !== 'chunks') {
-          throw new Error('Client Capability failure arrived before acceptance');
+          throw new Error('Client Capability failure arrived before admission');
         }
         this.#settle(
           invocation,
@@ -384,7 +404,7 @@ export class ClientCapabilityInvocationBroker<
         return;
       case 'client.capability.progress':
         if (invocation.phase !== 'admitted' && invocation.phase !== 'chunks') {
-          throw new Error('Client Capability progress arrived before acceptance');
+          throw new Error('Client Capability progress arrived before admission');
         }
         if (
           invocation.progress &&
@@ -398,13 +418,13 @@ export class ClientCapabilityInvocationBroker<
         return;
       case 'client.capability.result':
         if (invocation.phase !== 'admitted') {
-          throw new Error('Client Capability result arrived outside the accepted phase');
+          throw new Error('Client Capability result arrived outside the admitted phase');
         }
         this.#settle(invocation, frame.result, undefined, true);
         return;
       case 'client.capability.result_start':
         if (invocation.phase !== 'admitted') {
-          throw new Error('Client Capability result chunks started outside the accepted phase');
+          throw new Error('Client Capability result chunks started outside the admitted phase');
         }
         invocation.phase = 'chunks';
         invocation.chunks = {

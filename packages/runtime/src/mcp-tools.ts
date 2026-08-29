@@ -70,6 +70,7 @@ export interface McpToolCallOptions {
 
 export interface McpToolInvocationContext {
   readonly sessionId: string;
+  readonly runId?: string;
   readonly turnId: string;
   readonly toolCallId: string;
   readonly cwd: string;
@@ -120,6 +121,7 @@ export function buildMcpTools(
                 timeoutMs: options.callTimeoutMs,
                 context: {
                   sessionId: context.sessionId,
+                  runId: context.runId,
                   turnId: context.turnId,
                   toolCallId: context.toolCallId,
                   cwd: context.cwd,
