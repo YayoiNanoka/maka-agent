@@ -162,7 +162,7 @@ test('unknown Client Capability loads, invokes, and rebinds after UDS reconnect'
         if (frame.toolName === 'reject_unknown') {
           throw new Error('Provider rejected before acceptance');
         }
-        await accept();
+        await accept({ kind: 'none' });
         return {
           content: [
             {
@@ -267,7 +267,7 @@ test('unknown Client Capability loads, invokes, and rebinds after UDS reconnect'
     await client.replaceClientCapabilities({
       offers: provider.offers,
       call: async (frame, { accept }) => {
-        await accept();
+        await accept({ kind: 'none' });
         return {
           content: [{ type: 'text', text: `reconnected:${String(frame.arguments.prefix)}` }],
         };

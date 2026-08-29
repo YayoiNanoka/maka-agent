@@ -890,6 +890,7 @@ async function attachPresentation(
         connection.accept({
           kind: 'client.capability.accepted',
           invocationId: frame.invocationId,
+          admissionEvidence: { kind: 'none' },
         });
         return;
       }

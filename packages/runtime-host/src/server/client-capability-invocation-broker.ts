@@ -24,6 +24,7 @@ import {
   CLIENT_CAPABILITY_RESULT_CHUNK_MAX_BYTES,
   decodeClientCapabilityResult,
   type ClientCapabilityCallResult,
+  type ClientCapabilityAdmissionEvidence,
   type ClientCapabilityClientFrame,
   type ClientCapabilityHostFrame,
   type ClientCapabilityHostPathAccess,
@@ -75,7 +76,7 @@ interface InvocationState<Registration extends ClientCapabilityInvocationRegistr
   readonly registration: Registration;
   readonly resolve: (result: ClientCapabilityCallResult) => void;
   readonly reject: (error: Error) => void;
-  readonly resolveAccepted: () => void;
+  readonly resolveAccepted: (evidence: ClientCapabilityAdmissionEvidence) => void;
   readonly rejectAccepted: (error: Error) => void;
   readonly signal?: AbortSignal;
   readonly onAbort?: () => void;
@@ -96,7 +97,7 @@ interface InvocationState<Registration extends ClientCapabilityInvocationRegistr
 export interface PreparedClientCapabilityInvocation {
   readonly invocationId: string;
   /** Resolves once the provider has parsed the call and is waiting at its admission cut. */
-  waitUntilAccepted(): Promise<void>;
+  waitUntilAccepted(): Promise<ClientCapabilityAdmissionEvidence>;
   /** Crosses the admission cut and returns the provider result. */
   admit(): Promise<ClientCapabilityCallResult>;
 }
@@ -235,9 +236,9 @@ export class ClientCapabilityInvocationBroker<
     }
 
     const invocationId = randomUUID();
-    let resolveAccepted!: () => void;
+    let resolveAccepted!: (evidence: ClientCapabilityAdmissionEvidence) => void;
     let rejectAccepted!: (error: Error) => void;
-    const accepted = new Promise<void>((resolve, reject) => {
+    const accepted = new Promise<ClientCapabilityAdmissionEvidence>((resolve, reject) => {
       resolveAccepted = resolve;
       rejectAccepted = reject;
     });
@@ -356,7 +357,7 @@ export class ClientCapabilityInvocationBroker<
         if (invocation.timer) clearTimeout(invocation.timer);
         invocation.timer = undefined;
         invocation.acceptedSettled = true;
-        invocation.resolveAccepted();
+        invocation.resolveAccepted(frame.admissionEvidence);
         return;
       }
       case 'client.capability.rejected':

@@ -62,6 +62,7 @@ describe('ClientCapabilityInvocationBroker', () => {
               broker.accept('connection-a', {
                 kind: 'client.capability.accepted',
                 invocationId: frame.invocationId,
+                admissionEvidence: { kind: 'none' },
               }),
             );
           }
@@ -104,6 +105,7 @@ describe('ClientCapabilityInvocationBroker', () => {
               broker.accept('connection-a', {
                 kind: 'client.capability.accepted',
                 invocationId: frame.invocationId,
+                admissionEvidence: { kind: 'none' },
               }),
             );
           }

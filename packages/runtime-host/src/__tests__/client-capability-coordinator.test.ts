@@ -45,6 +45,7 @@ describe('Host Client Capability coordinator', () => {
           connection.accept({
             kind: 'client.capability.accepted',
             invocationId: frame.invocationId,
+            admissionEvidence: { kind: 'none' },
           });
           connection.accept({
             kind: 'client.capability.result',
@@ -129,6 +130,7 @@ describe('Host Client Capability coordinator', () => {
         connection.accept({
           kind: 'client.capability.accepted',
           invocationId: frame.invocationId,
+          admissionEvidence: { kind: 'none' },
         });
         connection.accept({
           kind: 'client.capability.result',
@@ -192,6 +194,7 @@ describe('Host Client Capability coordinator', () => {
           connection.accept({
             kind: 'client.capability.accepted',
             invocationId: frame.invocationId,
+            admissionEvidence: { kind: 'none' },
           });
           connection.accept({
             kind: 'client.capability.result',
@@ -883,6 +886,7 @@ describe('Host Client Capability coordinator', () => {
         first.accept({
           kind: 'client.capability.accepted',
           invocationId: frame.invocationId,
+          admissionEvidence: { kind: 'none' },
         });
         first.accept({
           kind: 'client.capability.result',
@@ -898,6 +902,7 @@ describe('Host Client Capability coordinator', () => {
         second.accept({
           kind: 'client.capability.accepted',
           invocationId: frame.invocationId,
+          admissionEvidence: { kind: 'none' },
         });
         second.accept({
           kind: 'client.capability.result',
@@ -1105,6 +1110,7 @@ describe('Host Client Capability coordinator', () => {
         connection.accept({
           kind: 'client.capability.accepted',
           invocationId: frame.invocationId,
+          admissionEvidence: { kind: 'none' },
         });
         callArrived();
       },
@@ -1174,7 +1180,11 @@ describe('Host Client Capability coordinator', () => {
       {
         name: 'chunk before start',
         transition: (connection: ClientCapabilityConnection, invocationId: string) => {
-          connection.accept({ kind: 'client.capability.accepted', invocationId });
+          connection.accept({
+            kind: 'client.capability.accepted',
+            invocationId,
+            admissionEvidence: { kind: 'none' },
+          });
           connection.accept({
             kind: 'client.capability.result_chunk',
             invocationId,
@@ -1187,7 +1197,11 @@ describe('Host Client Capability coordinator', () => {
       {
         name: 'duplicate start',
         transition: (connection: ClientCapabilityConnection, invocationId: string) => {
-          connection.accept({ kind: 'client.capability.accepted', invocationId });
+          connection.accept({
+            kind: 'client.capability.accepted',
+            invocationId,
+            admissionEvidence: { kind: 'none' },
+          });
           connection.accept({
             kind: 'client.capability.result_start',
             invocationId,
@@ -1206,7 +1220,11 @@ describe('Host Client Capability coordinator', () => {
       {
         name: 'unchunked result after start',
         transition: (connection: ClientCapabilityConnection, invocationId: string) => {
-          connection.accept({ kind: 'client.capability.accepted', invocationId });
+          connection.accept({
+            kind: 'client.capability.accepted',
+            invocationId,
+            admissionEvidence: { kind: 'none' },
+          });
           connection.accept({
             kind: 'client.capability.result_start',
             invocationId,
@@ -1224,7 +1242,11 @@ describe('Host Client Capability coordinator', () => {
       {
         name: 'out-of-order chunk',
         transition: (connection: ClientCapabilityConnection, invocationId: string) => {
-          connection.accept({ kind: 'client.capability.accepted', invocationId });
+          connection.accept({
+            kind: 'client.capability.accepted',
+            invocationId,
+            admissionEvidence: { kind: 'none' },
+          });
           connection.accept({
             kind: 'client.capability.result_start',
             invocationId,
@@ -1295,6 +1317,7 @@ async function assertLossClassification(
         connection.accept({
           kind: 'client.capability.accepted',
           invocationId: frame.invocationId,
+          admissionEvidence: { kind: 'none' },
         });
       }
       connection.close();
@@ -1410,6 +1433,7 @@ test('Host services stay bound to the explicitly initiating Client connection', 
           connection.accept({
             kind: 'client.capability.accepted',
             invocationId: frame.invocationId,
+            admissionEvidence: { kind: 'none' },
           });
           return;
         }

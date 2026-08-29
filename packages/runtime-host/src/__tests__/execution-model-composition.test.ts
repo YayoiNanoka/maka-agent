@@ -1387,6 +1387,7 @@ test('production backend preserves coordinator Client Capability semantics acros
             connection?.accept({
               kind: 'client.capability.accepted',
               invocationId: frame.invocationId,
+              admissionEvidence: { kind: 'none' },
             });
             connection?.accept({
               kind: 'client.capability.result',

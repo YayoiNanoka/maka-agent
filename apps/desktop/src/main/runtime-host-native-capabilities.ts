@@ -238,7 +238,7 @@ async function invokeAdditionalService(
   options: Parameters<NonNullable<ClientCapabilityProvider["callService"]>>[1],
 ): Promise<Record<string, unknown>> {
   options.signal.throwIfAborted();
-  await options.accept();
+  await options.accept({ kind: "none" });
   options.signal.throwIfAborted();
   return service.call(frame.method, frame.input, { signal: options.signal });
 }
@@ -331,7 +331,7 @@ async function invokeNativeTool(
   const parameters = requireZodSchema(binding.tool);
   const args = await parameters.parseAsync(frame.arguments);
   signal.throwIfAborted();
-  await options.accept();
+  await options.accept({ kind: "none" });
   signal.throwIfAborted();
   usedSessionIds.add(frame.sessionId);
   providerOptions.onSessionUsed?.(frame.sessionId);

@@ -3662,6 +3662,7 @@ async function assertSessionSuccessorCapabilityDegradation(
         previousProvider.accept({
           kind: 'client.capability.accepted',
           invocationId: frame.invocationId,
+          admissionEvidence: { kind: 'none' },
         });
         previousProvider.accept({
           kind: 'client.capability.result',
@@ -3681,6 +3682,7 @@ async function assertSessionSuccessorCapabilityDegradation(
         followupProvider.accept({
           kind: 'client.capability.accepted',
           invocationId: frame.invocationId,
+          admissionEvidence: { kind: 'none' },
         });
         followupProvider.accept({
           kind: 'client.capability.result',
