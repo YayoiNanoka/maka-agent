@@ -92,6 +92,7 @@ type HostSpy = {
 function installHost(overrides: Partial<BrowserViewHost> = {}): HostSpy {
   const spy: HostSpy = { resolved: [], released: [], disposed: [], host: null as never };
   const host: BrowserViewHost = {
+    currentUrl: () => "https://example.com/",
     canDrive: () => true,
     resolveEndpoint: async (id) => {
       spy.resolved.push(id);

@@ -47,6 +47,9 @@ export function createBrowserViewHost(
   shownSessionId: () => string | null,
 ): BrowserViewHost {
   return {
+    currentUrl(sessionId) {
+      return manager.get(sessionId)?.state().url ?? '';
+    },
     canDrive(sessionId, kind, opts) {
       const shown = sessionId === shownSessionId();
       const controller = manager.get(sessionId);

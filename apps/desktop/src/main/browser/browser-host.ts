@@ -34,6 +34,8 @@
 import type { BrowserActionKind } from './logic.js';
 
 export interface BrowserViewHost {
+  /** Read the current real URL without creating or attaching an automation endpoint. */
+  currentUrl(sessionId: string): string;
   /**
    * The visible-lease gate (see browserActionAllowed): may `sessionId` run a
    * `kind` action right now? EVERY kind — read, navigate, mutate — requires the

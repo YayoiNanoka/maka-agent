@@ -79,6 +79,7 @@ import { renderAttachmentPreview, resizeImageForAttachment } from "./attachment-
 import { registerAttachmentPreviewIpc } from "./attachment-preview.js";
 import { readFileCapped } from "./attachment-ingest.js";
 import { registerBrowserIpc } from "./browser-ipc-main.js";
+import { browserViewHost } from "./browser/browser-host.js";
 import { releaseBrowserSession } from "./browser/session.js";
 import { createE2eFixtureBotOnboardingAdapters } from "./bot-onboarding-e2e-fixture.js";
 import { resolveBuildInfo } from "./build-info.js";
@@ -875,6 +876,17 @@ runtimeHostManager = await startRuntimeHostDesktopManager(
     resizeImage: resizeImageForAttachment,
     nativeCapabilities: {
       browserTools: native.browserTools,
+      resolveBrowserUrl: ({ sessionId, toolName, arguments: args }) => {
+        if (toolName === "browser_navigate") {
+          if (typeof args.url !== "string") {
+            throw new Error("Browser navigation URL is unavailable");
+          }
+          return args.url;
+        }
+        const url = browserViewHost().currentUrl(sessionId);
+        if (!url) throw new Error("Browser session has no current URL");
+        return url;
+      },
       releaseBrowserSession,
       computerUseTools: native.computerUseTools,
       additionalGroups: () => {

@@ -62,6 +62,12 @@ type DesktopToolContentPart = Extract<
 
 export interface DesktopNativeCapabilityProviderInput {
   readonly browserTools: readonly MakaTool[];
+  readonly resolveBrowserUrl: (input: {
+    readonly sessionId: string;
+    readonly toolName: string;
+    readonly arguments: Record<string, unknown>;
+    readonly signal: AbortSignal;
+  }) => string | Promise<string>;
   readonly releaseBrowserSession: (sessionId: string) => void | Promise<void>;
   readonly computerUseTools: ComputerUseToolSet;
   readonly releaseComputerUseSession: (
@@ -156,6 +162,7 @@ export function createDesktopNativeCapabilityProvider(
 
       const invocation = new AbortController();
       const task = invokeNativeTool(
+        input,
         binding,
         frame,
         options,
@@ -309,6 +316,7 @@ function capabilityGroups(
 }
 
 async function invokeNativeTool(
+  input: DesktopNativeCapabilityProviderInput,
   binding: NativeToolBinding,
   frame: ClientCapabilityCallFrame,
   options: Parameters<NonNullable<ClientCapabilityProvider["call"]>>[1],
@@ -331,17 +339,42 @@ async function invokeNativeTool(
   const parameters = requireZodSchema(binding.tool);
   const args = await parameters.parseAsync(frame.arguments);
   signal.throwIfAborted();
-  await options.accept({ kind: "none" });
+  const sessionId =
+    frame.offerId === BROWSER_OFFER_ID || frame.offerId === COMPUTER_USE_OFFER_ID
+      ? providerOptions.nativeSessionId?.(frame.sessionId) ?? frame.sessionId
+      : frame.sessionId;
+  const admissionEvidence =
+    frame.offerId === BROWSER_OFFER_ID
+      ? {
+          kind: "browser_url" as const,
+          url: await input.resolveBrowserUrl({
+            sessionId,
+            toolName: frame.toolName,
+            arguments: frame.arguments,
+            signal,
+          }),
+        }
+      : { kind: "none" as const };
+  signal.throwIfAborted();
+  await options.accept(admissionEvidence);
+  signal.throwIfAborted();
+  if (admissionEvidence.kind === "browser_url") {
+    const currentUrl = await input.resolveBrowserUrl({
+      sessionId,
+      toolName: frame.toolName,
+      arguments: frame.arguments,
+      signal,
+    });
+    if (browserOrigin(currentUrl) !== browserOrigin(admissionEvidence.url)) {
+      throw new Error("Browser origin changed while admission was pending");
+    }
+  }
   signal.throwIfAborted();
   usedSessionIds.add(frame.sessionId);
   providerOptions.onSessionUsed?.(frame.sessionId);
   if (frame.offerId === COMPUTER_USE_OFFER_ID) {
     providerOptions.onComputerUseTurnUsed?.(frame.sessionId, frame.turnId);
   }
-  const sessionId =
-    frame.offerId === BROWSER_OFFER_ID || frame.offerId === COMPUTER_USE_OFFER_ID
-      ? providerOptions.nativeSessionId?.(frame.sessionId) ?? frame.sessionId
-      : frame.sessionId;
   const output = await binding.tool.impl(args, {
     sessionId,
     turnId: frame.turnId,
@@ -352,6 +385,14 @@ async function invokeNativeTool(
     ...(options.progress ? { emitProgress: options.progress } : {}),
   });
   return projectToolResult(binding.tool, frame.toolCallId, args, output);
+}
+
+function browserOrigin(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("Browser admission requires an HTTP origin");
+  }
+  return url.origin;
 }
 
 function abortInvocations(
