@@ -26,7 +26,8 @@ import type {
   McpToolDescriptor,
   McpToolSnapshot,
 } from '@maka/core/mcp';
-import type { ToolCategory } from '@maka/core/permission';
+import type { PermissionMode, ToolCategory } from '@maka/core/permission';
+import type { ExecutionBoundary } from '@maka/core/sandbox-boundary';
 import type { ToolRecoveryMode } from '@maka/core/runtime-event';
 import type { ToolResultContentPart, ToolResultOutput } from './model-protocol.js';
 import type { MakaTool } from './tool-runtime.js';
@@ -41,11 +42,23 @@ const TRUNCATION_MARKER = '\n…[truncated by Maka]';
 
 export interface McpToolProvider {
   toolSnapshot(): McpToolSnapshot;
+  prepareTool?(
+    binding: McpToolBinding,
+    args: Record<string, unknown>,
+    options: Omit<McpToolCallOptions, 'emitProgress'>,
+  ): Promise<McpPreparedToolCall>;
   callTool(
     binding: McpToolBinding,
     args: Record<string, unknown>,
     options: McpToolCallOptions,
   ): Promise<McpCallResult>;
+}
+
+export interface McpPreparedToolCall {
+  execute(options?: {
+    readonly emitProgress?: (current: number, total: number) => void;
+  }): Promise<McpCallResult>;
+  cancel(): Promise<void> | void;
 }
 
 export interface McpToolCallOptions {
@@ -60,6 +73,8 @@ export interface McpToolInvocationContext {
   readonly turnId: string;
   readonly toolCallId: string;
   readonly cwd: string;
+  readonly executionBoundary?: ExecutionBoundary;
+  readonly permissionMode?: PermissionMode;
 }
 
 export interface BuildMcpToolsOptions {
@@ -97,6 +112,33 @@ export function buildMcpTools(
       categoryHint: options.categoryHint ?? 'network_send',
       ...(options.recoveryMode ? { recoveryMode: options.recoveryMode } : {}),
       parameters: jsonSchema(descriptor.inputSchema),
+      ...(provider.prepareTool
+        ? {
+            prepareExecution: async (args: unknown, context) => {
+              const prepared = await provider.prepareTool!(binding, asArguments(args), {
+                signal: context.abortSignal,
+                timeoutMs: options.callTimeoutMs,
+                context: {
+                  sessionId: context.sessionId,
+                  turnId: context.turnId,
+                  toolCallId: context.toolCallId,
+                  cwd: context.cwd,
+                  executionBoundary: context.executionBoundary,
+                  permissionMode: context.permissionMode,
+                },
+              });
+              return {
+                execute: (executionContext) =>
+                  prepared.execute({
+                    ...(executionContext.emitProgress
+                      ? { emitProgress: executionContext.emitProgress }
+                      : {}),
+                  }),
+                cancel: () => prepared.cancel(),
+              };
+            },
+          }
+        : {}),
       impl: async (args: unknown, context) => {
         // Managed network authority applies equally to Direct and nested CodeMode dispatch.
         if (

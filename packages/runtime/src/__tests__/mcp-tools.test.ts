@@ -243,6 +243,59 @@ test('a trusted composition can apply the Client Capability permission floor and
   });
 });
 
+test('MCP preparation keeps provider admission separate from execution', async () => {
+  const toolBinding = binding('prepared-binding');
+  const order: string[] = [];
+  const provider: McpToolProvider = {
+    toolSnapshot: () => ({
+      revision: 1,
+      tools: [boundTool(descriptor('client', 'inspect', true), toolBinding)],
+    }),
+    prepareTool: async (_binding, _args, options) => {
+      order.push(`prepare:${options.context.permissionMode}`);
+      return {
+        execute: async () => {
+          order.push('execute');
+          return { content: [{ type: 'text', text: 'ok' }] };
+        },
+        cancel: () => {
+          order.push('cancel');
+        },
+      };
+    },
+    callTool: async () => assert.fail('Prepared MCP tools must not call the direct path'),
+  };
+  const [tool] = buildMcpTools(provider, { categoryHint: 'client_capability' });
+  assert.ok(tool?.prepareExecution);
+  const boundary = createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), 0);
+  const prepared = await tool.prepareExecution(
+    {},
+    {
+      sessionId: 'session',
+      turnId: 'turn',
+      cwd: '/workspace',
+      executionBoundary: boundary,
+      permissionMode: 'ask',
+      toolCallId: 'tool-call',
+      abortSignal: new AbortController().signal,
+    },
+  );
+  assert.deepEqual(
+    await prepared.execute({
+      sessionId: 'session',
+      turnId: 'turn',
+      cwd: '/workspace',
+      executionBoundary: boundary,
+      permissionMode: 'ask',
+      toolCallId: 'tool-call',
+      abortSignal: new AbortController().signal,
+      emitOutput() {},
+    }),
+    { content: [{ type: 'text', text: 'ok' }] },
+  );
+  assert.deepEqual(order, ['prepare:ask', 'execute']);
+});
+
 test('a trusted composition can preserve provider-owned activity semantics', () => {
   const [tool] = buildMcpTools(
     fakeProvider(

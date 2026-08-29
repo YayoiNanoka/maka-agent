@@ -80,6 +80,46 @@ describe('ToolRuntime settlement', () => {
     assert.deepEqual(allowed.result, { ok: true });
   });
 
+  it('admits a prepared Client Capability in Ask mode before executing it', async () => {
+    const order: string[] = [];
+    const clientTool: MakaTool = {
+      name: 'client_browser',
+      description: 'client browser',
+      parameters: {},
+      categoryHint: 'client_capability',
+      prepareExecution: async () => {
+        order.push('prepare');
+        return {
+          execute: async () => {
+            order.push('execute');
+            return { ok: true };
+          },
+          cancel: () => {
+            order.push('cancel');
+          },
+        };
+      },
+      impl: () => assert.fail('Prepared Client Capability must use its prepared execution'),
+    };
+    const settlement = await makeRuntime({
+      readExecutionBoundary: async () => createGenesisExecutionBoundary('ask'),
+    }).settleToolCall({
+      tool: clientTool,
+      turnId: 'turn-1',
+      stepId: 'step-1',
+      toolCallId: 'call-managed-prepared',
+      input: {},
+      abortSignal: new AbortController().signal,
+      eventSink: {
+        push: () => {},
+        pushAndWaitUntilConsumed: async () => {},
+      },
+    });
+
+    assert.deepEqual(order, ['prepare', 'execute']);
+    assert.deepEqual(settlement.result, { ok: true });
+  });
+
   it('keeps the durable Bash command while omitting it from the durable projection', async () => {
     const runtime = makeRuntime();
     const events: SessionEvent[] = [];
