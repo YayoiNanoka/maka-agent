@@ -124,8 +124,7 @@ export function migrateSqliteCoreExecutionDatabase(db: DatabaseSync): void {
       granted_at INTEGER NOT NULL,
       record_json TEXT NOT NULL,
       PRIMARY KEY (
-        session_id, provider_id, contract_id, server_id, tool_name,
-        capability, scope_kind, scope_value
+        session_id, provider_id, contract_id, capability, scope_kind, scope_value
       )
     );
 

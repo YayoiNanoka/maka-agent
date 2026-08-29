@@ -496,8 +496,6 @@ class SqliteInteractionStore implements InteractionStoreWriter {
         WHERE session_id = ?
           AND provider_id = ?
           AND contract_id = ?
-          AND server_id = ?
-          AND tool_name = ?
           AND capability = ?
           AND scope_kind = ?
           AND scope_value = ?
@@ -506,8 +504,6 @@ class SqliteInteractionStore implements InteractionStoreWriter {
         candidate.sessionId,
         candidate.providerId,
         candidate.contractId,
-        candidate.serverId,
-        candidate.toolName,
         candidate.capability,
         candidate.scope.kind,
         scope,
@@ -520,7 +516,7 @@ class SqliteInteractionStore implements InteractionStoreWriter {
       parseJsonRecord(row.record_json, 'Client Capability Session Grant'),
       'record',
     );
-    if (!isDeepStrictEqual(decodeGrantKey(grant, 'record'), candidate)) {
+    if (!sameGrantAuthority(decodeGrantKey(grant, 'record'), candidate)) {
       throw new InteractionStoreError(
         'invalid_record',
         'Client Capability Session Grant identity does not match row',
@@ -593,19 +589,12 @@ class SqliteInteractionStore implements InteractionStoreWriter {
         SELECT record_json
         FROM core_client_capability_session_grants
         WHERE session_id = ? AND provider_id = ? AND contract_id = ?
-          AND server_id = ? AND tool_name = ? AND capability = ?
+          AND capability = ?
           AND scope_kind = ? AND scope_value = ?
       `)
-      .get(
-        key.sessionId,
-        key.providerId,
-        key.contractId,
-        key.serverId,
-        key.toolName,
-        key.capability,
-        key.scope.kind,
-        scope,
-      ) as { record_json?: unknown } | undefined;
+      .get(key.sessionId, key.providerId, key.contractId, key.capability, key.scope.kind, scope) as
+      | { record_json?: unknown }
+      | undefined;
     if (!row) return undefined;
     if (typeof row.record_json !== 'string') {
       throw new InteractionStoreError('invalid_record', 'Invalid Client Capability Session Grant');
@@ -618,6 +607,20 @@ class SqliteInteractionStore implements InteractionStoreWriter {
   close(): void {
     this.#lease.close();
   }
+}
+
+function sameGrantAuthority(
+  left: ClientCapabilitySessionGrantKey,
+  right: ClientCapabilitySessionGrantKey,
+): boolean {
+  return (
+    left.sessionId === right.sessionId &&
+    left.providerId === right.providerId &&
+    left.contractId === right.contractId &&
+    left.capability === right.capability &&
+    left.scope.kind === right.scope.kind &&
+    clientCapabilityScopeIdentity(left.scope) === clientCapabilityScopeIdentity(right.scope)
+  );
 }
 
 function readSqliteInteraction(

@@ -80,6 +80,13 @@ test('persists Client Capability grants for one Session and purges them with it'
       );
       assert.equal(committed.status, 'stable');
       assert.deepEqual(await store.readClientCapabilitySessionGrant(key), grant);
+      assert.deepEqual(
+        await store.readClientCapabilitySessionGrant({
+          ...key,
+          toolName: 'browser_click',
+        }),
+        grant,
+      );
 
       const operationalState = createConversationOperationalStateStore(root);
       try {
