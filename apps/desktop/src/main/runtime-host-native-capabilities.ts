@@ -35,6 +35,7 @@ import type {
   ClientCapabilityServiceOffer,
 } from "@maka/runtime-host/protocol";
 import { toJSONSchema, z } from "zod";
+import { withBrowserOriginAdmission } from './browser/browser-origin-admission.js';
 import type { DesktopTargetScope } from '../shared/runtime-host-identity.js';
 
 const CAPABILITY_VERSION = "0";
@@ -375,15 +376,22 @@ async function invokeNativeTool(
   if (frame.offerId === COMPUTER_USE_OFFER_ID) {
     providerOptions.onComputerUseTurnUsed?.(frame.sessionId, frame.turnId);
   }
-  const output = await binding.tool.impl(args, {
-    sessionId,
-    turnId: frame.turnId,
-    cwd,
-    toolCallId: frame.toolCallId,
-    abortSignal: signal,
-    emitOutput() {},
-    ...(options.progress ? { emitProgress: options.progress } : {}),
-  });
+  const execute = () =>
+    binding.tool.impl(args, {
+      sessionId,
+      turnId: frame.turnId,
+      cwd,
+      toolCallId: frame.toolCallId,
+      abortSignal: signal,
+      emitOutput() {},
+      ...(options.progress ? { emitProgress: options.progress } : {}),
+    });
+  const output = await (admissionEvidence.kind === "browser_url"
+    ? withBrowserOriginAdmission(
+        { sessionId, url: admissionEvidence.url },
+        execute,
+      )
+    : execute());
   return projectToolResult(binding.tool, frame.toolCallId, args, output);
 }
 

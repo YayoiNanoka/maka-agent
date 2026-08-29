@@ -31,6 +31,7 @@ import {
 } from '@maka/runtime-host/protocol';
 import { z } from 'zod';
 import { buildClientSettingsTools } from '../client-settings-tools.js';
+import { browserOriginAdmission } from '../browser/browser-origin-admission.js';
 import { buildRiveWorkflowTool } from '../rive-workflow-tool.js';
 import { createDesktopNativeCapabilityProvider } from '../runtime-host-native-capabilities.js';
 
@@ -225,6 +226,10 @@ test('validates before admission and invokes the exact offered tool with Host co
       browserTools: [
         tool('browser_navigate', z.object({ url: z.string().url() }), async (args, context) => {
           assert.equal(admitted, true);
+          assert.deepEqual(browserOriginAdmission(context.sessionId), {
+            sessionId: 'host-a:session-1',
+            url: 'https://example.com/path',
+          });
           invoked = true;
           received = {
             args,
