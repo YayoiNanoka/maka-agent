@@ -832,6 +832,8 @@ function AppShellContent({
   const activeInteraction = activeInteractionFor(interactionBySession, ownerActiveId);
   const activeSandboxBoundary =
     activeInteraction?.type === 'sandbox_boundary_request' ? activeInteraction : undefined;
+  const activeClientCapability =
+    activeInteraction?.type === 'client_capability_request' ? activeInteraction : undefined;
   const activeQuestion = activeInteraction?.type === 'user_question_request' ? activeInteraction : undefined;
   const activeSession = activeCatalogSession;
   const activeMessageQueue = activeId ? messageQueueBySession[activeId] : undefined;
@@ -1829,6 +1831,7 @@ function AppShellContent({
     send,
     enqueueMessage,
     respondToSandboxBoundary,
+    respondToClientCapability,
     respondToUserQuestion,
     refreshMessages,
     retryMessages,
@@ -2970,6 +2973,8 @@ function AppShellContent({
                   stopPendingBySession={stopPendingBySession}
                   activeSandboxBoundary={activeSandboxBoundary}
                   respondToSandboxBoundary={respondToSandboxBoundary}
+                  activeClientCapability={activeClientCapability}
+                  respondToClientCapability={respondToClientCapability}
                   activeQuestion={activeQuestion}
                   respondToUserQuestion={respondToUserQuestion}
                   stop={stop}

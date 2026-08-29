@@ -18,7 +18,14 @@
  */
 
 import { useLayoutEffect, useRef, type ComponentProps, type RefObject } from 'react';
-import { Button, Composer, SandboxBoundaryPrompt, UserQuestionPrompt, Banner } from '@maka/ui';
+import {
+  Banner,
+  Button,
+  ClientCapabilityPrompt,
+  Composer,
+  SandboxBoundaryPrompt,
+  UserQuestionPrompt,
+} from '@maka/ui';
 import type { ComposerHandle, ComposerInteraction } from '@maka/ui';
 import { useComposerMentionsContext } from './composer-mentions.js';
 import {
@@ -96,6 +103,8 @@ interface ChatComposerRegionProps
   stopPendingBySession: Record<string, boolean>;
   respondToSandboxBoundary: ComponentProps<typeof SandboxBoundaryPrompt>['onRespond'];
   activeSandboxBoundary: ComponentProps<typeof SandboxBoundaryPrompt>['request'] | undefined;
+  activeClientCapability: ComponentProps<typeof ClientCapabilityPrompt>['request'] | undefined;
+  respondToClientCapability: ComponentProps<typeof ClientCapabilityPrompt>['onRespond'];
   activeQuestion: ComponentProps<typeof UserQuestionPrompt>['request'] | undefined;
   respondToUserQuestion: ComponentProps<typeof UserQuestionPrompt>['onRespond'];
   stop: ComponentProps<typeof UserQuestionPrompt>['onStop'];
@@ -118,6 +127,8 @@ export function ChatComposerRegion({
   stopPendingBySession,
   respondToSandboxBoundary,
   activeSandboxBoundary,
+  activeClientCapability,
+  respondToClientCapability,
   activeQuestion,
   respondToUserQuestion,
   stop,
@@ -214,6 +225,12 @@ export function ChatComposerRegion({
           <SandboxBoundaryPrompt
             request={activeSandboxBoundary}
             onRespond={respondToSandboxBoundary}
+          />
+        )}
+        {activeClientCapability && (
+          <ClientCapabilityPrompt
+            request={activeClientCapability}
+            onRespond={respondToClientCapability}
           />
         )}
         {activeQuestion && (

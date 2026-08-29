@@ -46,6 +46,11 @@ export interface ClientCapabilitySessionGrant extends ClientCapabilitySessionGra
   readonly grantedAt: number;
 }
 
+export interface ClientCapabilityResponse {
+  readonly requestId: string;
+  readonly decision: 'allow' | 'deny';
+}
+
 const GRANT_SHAPE = defineObjectShape<ClientCapabilitySessionGrant>()(
   [
     'version',

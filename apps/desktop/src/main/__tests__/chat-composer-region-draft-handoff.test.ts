@@ -122,6 +122,8 @@ async function mountRegion(): Promise<{
               stopPendingBySession: {},
               respondToSandboxBoundary: () => {},
               activeSandboxBoundary: undefined,
+              respondToClientCapability: () => {},
+              activeClientCapability: undefined,
               activeQuestion: undefined,
               respondToUserQuestion: () => {},
               stop: () => {},

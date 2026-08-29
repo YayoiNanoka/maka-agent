@@ -216,6 +216,15 @@ export interface ConversationCopy {
     reject: string;
     allowSession: string;
   };
+  clientCapability: {
+    title: string;
+    browser: (origin: string) => string;
+    computerUse: string;
+    desktopMcp: (serverId: string, toolName: string) => string;
+    sessionNotice: string;
+    reject: string;
+    allowSession: string;
+  };
   questions: {
     other: string;
     otherDescription: string;
@@ -492,6 +501,15 @@ const CONVERSATION_COPY = {
       reject: '拒绝',
       allowSession: '本任务允许',
     },
+    clientCapability: {
+      title: '允许使用客户端能力？',
+      browser: (origin) => `允许 Browser 操作 ${origin}`,
+      computerUse: '允许 Computer Use 操作这台 Mac',
+      desktopMcp: (serverId, toolName) => `允许调用 ${serverId} 的 ${toolName} 工具`,
+      sessionNotice: '允许后，本任务中相同范围的后续操作将不再询问。',
+      reject: '拒绝',
+      allowSession: '本任务允许',
+    },
     questions: { other: '其他', otherDescription: '输入一个不同的答案。', otherAriaLabel: '其他答案', otherPlaceholder: '输入你的答案', stop: '停止', stopping: '停止中…', previous: '上一题', submitting: '正在提交…', submit: '提交答案', next: '下一题' },
     mentions: { noFiles: '未找到文件', noSkills: '暂无技能', noCommandsOrSkills: '没有匹配的命令或技能', filesAriaLabel: '工作区文件', skillsAriaLabel: '技能', commandsAndSkillsAriaLabel: '命令和技能', commandsGroup: '命令', skillsGroup: 'Skills', loading: '加载中…' },
     workspace: {
@@ -638,6 +656,15 @@ const CONVERSATION_COPY = {
       scope: { exact: 'Exact path', subtree: 'Directory subtree' },
       network: 'Network access',
       enabled: 'Enabled',
+      reject: 'Reject',
+      allowSession: 'Allow for this task',
+    },
+    clientCapability: {
+      title: 'Allow this client capability?',
+      browser: (origin) => `Allow Browser to operate ${origin}`,
+      computerUse: 'Allow Computer Use to operate this Mac',
+      desktopMcp: (serverId, toolName) => `Allow ${toolName} from ${serverId}`,
+      sessionNotice: 'Matching operations will be allowed for the rest of this task.',
       reject: 'Reject',
       allowSession: 'Allow for this task',
     },

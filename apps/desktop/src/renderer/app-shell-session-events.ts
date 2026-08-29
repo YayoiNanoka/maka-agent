@@ -390,6 +390,7 @@ export function createAppShellSessionEventHandlers(options: {
         void refreshMessages(sessionId, { requiredAssistantMessageId: event.messageId }).catch(() => false);
         break;
       case 'sandbox_boundary_request':
+      case 'client_capability_request':
       case 'user_question_request':
         onInteractionChanged?.(sessionId);
         setInteractionBySession((current) => enqueueInteraction(current, sessionId, event));
@@ -410,6 +411,12 @@ export function createAppShellSessionEventHandlers(options: {
         // or the permission label keeps describing the permissions the session
         // had before the user granted more.
         onExecutionBoundaryChanged?.(sessionId);
+        setInteractionBySession((current) =>
+          dequeueInteractionByRequestId(current, sessionId, event.requestId),
+        );
+        break;
+      case 'client_capability_decision_ack':
+        onInteractionChanged?.(sessionId);
         setInteractionBySession((current) =>
           dequeueInteractionByRequestId(current, sessionId, event.requestId),
         );
