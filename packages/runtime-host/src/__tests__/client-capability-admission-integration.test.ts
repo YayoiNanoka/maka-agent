@@ -25,6 +25,9 @@ import { test } from 'node:test';
 
 import { createWorkspaceWritePermissionProfile } from '@maka/core/permission-profile';
 import { createManagedExecutionBoundary } from '@maka/core/sandbox-boundary';
+import type { LlmConnection } from '@maka/core/llm-connections';
+import type { SessionHeader } from '@maka/core/session';
+import { ToolRuntime } from '@maka/runtime/tool-runtime';
 import {
   openInteractiveExecutionStoresForWrite,
   type ExecutionStoresWriter,
@@ -63,6 +66,7 @@ const IDENTITY = Object.freeze({
 
 test('persists the canonical authenticated provider identity through managed admission', async () => {
   await withStore(async ({ store }) => {
+    const order: string[] = [];
     const interactions = createInteractionCoordinator(store);
     const runOwner = interactions.bindRun(RUN);
     const capabilities = new HostClientCapabilityCoordinator({
@@ -75,6 +79,7 @@ test('persists the canonical authenticated provider identity through managed adm
     connection = capabilities.attachConnection(IDENTITY, {
       send: async (frame) => {
         if (frame.kind === 'client.capability.call') {
+          order.push('accepted');
           connection.accept({
             kind: 'client.capability.accepted',
             invocationId: frame.invocationId,
@@ -84,6 +89,7 @@ test('persists the canonical authenticated provider identity through managed adm
             },
           });
         } else if (frame.kind === 'client.capability.admitted') {
+          order.push('admitted');
           connection.accept({
             kind: 'client.capability.result',
             invocationId: frame.invocationId,
@@ -123,9 +129,43 @@ test('persists the canonical authenticated provider identity through managed adm
       snapshot = capabilities.snapshotForSession(RUN.sessionId);
       assert.ok(snapshot);
       const tool = snapshot.tools[0];
-      assert.ok(tool?.prepareExecution);
-      const context = managedContext();
-      const preparing = tool.prepareExecution({}, context);
+      assert.ok(tool);
+      assert.equal(tool.hostAdmission, 'client_capability');
+      assert.equal(tool.categoryHint, 'custom_tool');
+      const runtime = new ToolRuntime({
+        sessionId: RUN.sessionId,
+        header: sessionHeader(),
+        connection: llmConnection(),
+        modelId: 'model-1',
+        appendMessage: async () => undefined,
+        readExecutionBoundary: async () =>
+          createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), 0),
+        newId: nextId(),
+        now: nextNow(),
+        getPermissionPauseTarget: () => null,
+        turnId: RUN.turnId,
+        runId: RUN.runId,
+        invocationId: 'invocation-1',
+        runtimeCommitSink: {
+          commitToolPrepared: async () => {
+            order.push('T1');
+            return { created: true, runtimeEventSeq: 1 };
+          },
+          commitToolOutcome: async () => ({ created: true, runtimeEventSeq: 2 }),
+        },
+      });
+      const settling = runtime.settleToolCall({
+        tool,
+        turnId: RUN.turnId,
+        stepId: 'step-1',
+        toolCallId: 'browser-call-1',
+        input: {},
+        abortSignal: new AbortController().signal,
+        eventSink: {
+          push: () => undefined,
+          pushAndWaitUntilConsumed: async () => undefined,
+        },
+      });
       const request = await waitForPending(store);
       assert.equal(request.request.kind, 'client_capability');
       if (request.request.kind !== 'client_capability') return;
@@ -144,15 +184,15 @@ test('persists the canonical authenticated provider identity through managed adm
         connectionContext('desktop-ui'),
       );
       assert.equal(answered.ok, true);
-      const prepared = await preparing;
+      order.push('approved');
+      const settlement = await settling;
       const grant = await store.readClientCapabilitySessionGrant({
         sessionId: RUN.sessionId,
         ...request.request.target,
       });
       assert.equal(grant?.providerId, providerId);
-      assert.deepEqual(await prepared.execute(context), {
-        content: [{ type: 'text', text: 'snapshot' }],
-      });
+      assert.deepEqual(settlement.result, { content: [{ type: 'text', text: 'snapshot' }] });
+      assert.deepEqual(order, ['accepted', 'approved', 'T1', 'admitted']);
     } finally {
       snapshot?.release();
       await connection.close();
@@ -164,16 +204,49 @@ test('persists the canonical authenticated provider identity through managed adm
   });
 });
 
-function managedContext() {
+function sessionHeader(): SessionHeader {
   return {
-    ...RUN,
+    id: RUN.sessionId,
+    workspaceRoot: '/tmp',
     cwd: '/tmp',
-    toolCallId: 'browser-call-1',
-    permissionMode: 'ask' as const,
-    executionBoundary: createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), 0),
-    abortSignal: new AbortController().signal,
-    emitOutput: () => undefined,
+    createdAt: 1,
+    name: 'test',
+    titleIsManual: false,
+    isFlagged: false,
+    labels: [],
+    isArchived: false,
+    status: 'active',
+    statusUpdatedAt: 1,
+    hasUnread: false,
+    backend: 'ai-sdk',
+    llmConnectionSlug: 'connection-1',
+    connectionLocked: true,
+    model: 'model-1',
+    permissionMode: 'ask',
+    schemaVersion: 1,
   };
+}
+
+function llmConnection(): LlmConnection {
+  return {
+    slug: 'connection-1',
+    name: 'test',
+    providerType: 'openai',
+    defaultModel: 'model-1',
+    enabled: true,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+}
+
+function nextId(): () => string {
+  let value = 0;
+  return () => `event-${++value}`;
+}
+
+function nextNow(): () => number {
+  let value = 100;
+  return () => ++value;
 }
 
 function connectionContext(connectionId: string): ConnectionContext {

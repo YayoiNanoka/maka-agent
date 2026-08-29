@@ -81,6 +81,7 @@ export interface McpToolInvocationContext {
 export interface BuildMcpToolsOptions {
   callTimeoutMs?: number;
   categoryHint?: ToolCategory;
+  hostAdmission?: MakaTool['hostAdmission'];
   recoveryMode?: ToolRecoveryMode;
   executionLocation?: 'host' | 'remote';
   activityKindForDescriptor?: (descriptor: McpToolDescriptor) => ToolActivityKind | undefined;
@@ -111,6 +112,7 @@ export function buildMcpTools(
       // The trusted composition may select a stricter open-world category;
       // ordinary MCP servers retain the side-effecting network default.
       categoryHint: options.categoryHint ?? 'network_send',
+      ...(options.hostAdmission ? { hostAdmission: options.hostAdmission } : {}),
       ...(options.recoveryMode ? { recoveryMode: options.recoveryMode } : {}),
       parameters: jsonSchema(descriptor.inputSchema),
       ...(provider.prepareTool

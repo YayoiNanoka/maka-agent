@@ -135,24 +135,32 @@ describe('Host Client Capability coordinator', () => {
     const coordinator = createCoordinator();
     let observedCall: unknown;
     let connection!: ClientCapabilityConnection;
-    connection = coordinator.attachConnection(clientCapabilityConnectionIdentity('connection-a'), {
-      send: async (frame) => {
-        if (frame.kind === 'client.capability.call') {
-          observedCall = frame;
-          connection.accept({
-            kind: 'client.capability.accepted',
-            invocationId: frame.invocationId,
-            admissionEvidence: { kind: 'none' },
-          });
-        } else if (frame.kind === 'client.capability.admitted') {
-          connection.accept({
-            kind: 'client.capability.result',
-            invocationId: frame.invocationId,
-            result: textResult('path independent'),
-          });
-        }
+    connection = coordinator.attachConnection(
+      clientCapabilityConnectionIdentity(
+        'connection-a',
+        'connection-a',
+        'remote-owner',
+        'remote_owner',
+      ),
+      {
+        send: async (frame) => {
+          if (frame.kind === 'client.capability.call') {
+            observedCall = frame;
+            connection.accept({
+              kind: 'client.capability.accepted',
+              invocationId: frame.invocationId,
+              admissionEvidence: { kind: 'none' },
+            });
+          } else if (frame.kind === 'client.capability.admitted') {
+            connection.accept({
+              kind: 'client.capability.result',
+              invocationId: frame.invocationId,
+              result: textResult('path independent'),
+            });
+          }
+        },
       },
-    });
+    );
     const replaced = await coordinator.handlers['client.capability.replace'](
       {
         registrationId: 'registration-a',
@@ -282,6 +290,106 @@ describe('Host Client Capability coordinator', () => {
     snapshot.release();
     await connection.close();
     await coordinator.close();
+  });
+
+  test('trusts capability-provider Desktop bindings but not a remote owner spoofing their names', async () => {
+    const local = createCoordinator();
+    const localConnection = local.attachConnection(
+      clientCapabilityConnectionIdentity(
+        'local-connection',
+        'desktop-local',
+        'local_os_user',
+        'capability_provider',
+      ),
+      { send: async () => undefined },
+    );
+    const localReplace = await local.handlers['client.capability.replace'](
+      {
+        registrationId: 'local-native-registration',
+        offers: [
+          {
+            offerId: 'desktop_browser',
+            version: '1',
+            affinity: 'session',
+            hostPathAccess: 'none',
+            label: 'Desktop Browser',
+            tools: [
+              {
+                serverId: 'desktop_browser',
+                name: 'browser_snapshot',
+                inputSchema: { type: 'object', additionalProperties: false },
+              },
+            ],
+          },
+        ],
+      },
+      connectionContext('local-connection'),
+    );
+    assert.equal(localReplace.ok, true);
+    assert.deepEqual(await local.bindSession('local-session', 'local-connection'), { ok: true });
+    const localSnapshot = local.snapshotForSession('local-session');
+    assert.ok(localSnapshot);
+    assert.equal(localSnapshot.tools[0]?.categoryHint, 'custom_tool');
+    assert.equal(localSnapshot.tools[0]?.hostAdmission, 'client_capability');
+    localSnapshot.release();
+    await localConnection.close();
+    await local.close();
+
+    const remote = createCoordinator();
+    let remoteConnection!: ClientCapabilityConnection;
+    remoteConnection = remote.attachConnection(
+      clientCapabilityConnectionIdentity(
+        'remote-connection',
+        'desktop-remote',
+        'remote-owner',
+        'remote_owner',
+      ),
+      {
+        send: async (frame) => {
+          if (frame.kind !== 'client.capability.call') return;
+          remoteConnection.accept({
+            kind: 'client.capability.accepted',
+            invocationId: frame.invocationId,
+            admissionEvidence: { kind: 'browser_url', url: 'https://example.com/' },
+          });
+        },
+      },
+    );
+    const remoteReplace = await remote.handlers['client.capability.replace'](
+      {
+        registrationId: 'spoofed-native-registration',
+        offers: [
+          {
+            offerId: 'desktop_browser',
+            version: '1',
+            affinity: 'session',
+            hostPathAccess: 'none',
+            label: 'Spoofed Desktop Browser',
+            tools: [
+              {
+                serverId: 'desktop_browser',
+                name: 'browser_snapshot',
+                inputSchema: { type: 'object', additionalProperties: false },
+              },
+            ],
+          },
+        ],
+      },
+      connectionContext('remote-connection'),
+    );
+    assert.equal(remoteReplace.ok, true);
+    assert.deepEqual(await remote.bindSession('remote-session', 'remote-connection'), { ok: true });
+    const remoteSnapshot = remote.snapshotForSession('remote-session');
+    assert.ok(remoteSnapshot);
+    assert.equal(remoteSnapshot.tools[0]?.categoryHint, 'client_capability');
+    assert.equal(remoteSnapshot.tools[0]?.hostAdmission, 'client_capability');
+    await assert.rejects(
+      () => prepare(remoteSnapshot.tools[0], {}, 'spoofed-browser-call'),
+      /requires a trusted Desktop provider/u,
+    );
+    remoteSnapshot.release();
+    await remoteConnection.close();
+    await remote.close();
   });
 
   test('approves a trusted Browser origin once and reuses the Session Grant across tools', async () => {

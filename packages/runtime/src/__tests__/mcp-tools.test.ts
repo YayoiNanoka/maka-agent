@@ -265,8 +265,12 @@ test('MCP preparation keeps provider admission separate from execution', async (
     },
     callTool: async () => assert.fail('Prepared MCP tools must not call the direct path'),
   };
-  const [tool] = buildMcpTools(provider, { categoryHint: 'client_capability' });
+  const [tool] = buildMcpTools(provider, {
+    categoryHint: 'custom_tool',
+    hostAdmission: 'client_capability',
+  });
   assert.ok(tool?.prepareExecution);
+  assert.equal(tool?.hostAdmission, 'client_capability');
   const boundary = createManagedExecutionBoundary(createWorkspaceWritePermissionProfile(), 0);
   const prepared = await tool.prepareExecution(
     {},

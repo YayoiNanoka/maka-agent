@@ -181,6 +181,8 @@ export interface MakaTool<P = any, R = unknown> {
   activityKind?: ToolActivityKind;
   /** Optional trusted category override for custom tools. */
   categoryHint?: ToolCategory;
+  /** Host-owned admission contract, independent of model/UI tool categorization. */
+  hostAdmission?: 'client_capability';
   /** Optional trusted facts about the executor that runs this tool. */
   executionFacts?: ToolExecutionFacts;
   /**
@@ -333,6 +335,8 @@ const SUBAGENT_TOOL_LIMIT_MESSAGE =
   '子代理并发过多：同一轮最多 5 个子代理。请等待已有任务完成后再继续。';
 const CLIENT_CAPABILITY_BOUNDARY_MESSAGE =
   'Client Capability tools require the Bypass execution boundary because their client-side effects cannot be sandboxed by the Host. Switch this Session to Bypass and retry.';
+const CLIENT_CAPABILITY_PREPARATION_MESSAGE =
+  'Client Capability tool is missing its Host admission preparation contract.';
 
 function composeChildAbortSignal(
   invocationSignal: AbortSignal,
@@ -1406,7 +1410,7 @@ export class ToolRuntime {
 
     let clientCapabilityBoundary: ExecutionBoundary | undefined;
     let preparedExecution: PreparedMakaToolExecution | undefined;
-    if (tool.categoryHint === 'client_capability') {
+    if (tool.hostAdmission === 'client_capability') {
       try {
         clientCapabilityBoundary = await this.readExecutionBoundary();
       } catch (error) {
@@ -1421,11 +1425,13 @@ export class ToolRuntime {
         this.recordLoopGateOutcome(callSignature, true);
         return this.errorReturn(reason);
       }
-      if (
-        clientCapabilityBoundary.kind !== 'bypass' &&
-        (this.input.header.permissionMode !== 'ask' || !tool.prepareExecution)
-      ) {
-        await refuseBeforeDispatch(CLIENT_CAPABILITY_BOUNDARY_MESSAGE, {
+      const admissionFailure = !tool.prepareExecution
+        ? CLIENT_CAPABILITY_PREPARATION_MESSAGE
+        : clientCapabilityBoundary.kind !== 'bypass' && this.input.header.permissionMode !== 'ask'
+          ? CLIENT_CAPABILITY_BOUNDARY_MESSAGE
+          : undefined;
+      if (admissionFailure) {
+        await refuseBeforeDispatch(admissionFailure, {
           reason: 'requires_bypass',
           source: 'client_capability',
         });
@@ -1436,36 +1442,37 @@ export class ToolRuntime {
           errorClass: 'ClientCapabilityBoundary',
         });
         this.recordLoopGateOutcome(callSignature, true);
-        return this.errorReturn(CLIENT_CAPABILITY_BOUNDARY_MESSAGE);
+        return this.errorReturn(admissionFailure);
       }
-      if (tool.prepareExecution) {
-        const pauseTarget = this.input.getPermissionPauseTarget();
-        pauseTarget?.pause();
-        try {
-          preparedExecution = await tool.prepareExecution(structuredClone(executionArgs) as never, {
-            sessionId: this.input.sessionId,
-            turnId,
-            ...(runId ? { runId } : {}),
-            cwd: this.input.header.cwd,
-            executionBoundary: clientCapabilityBoundary,
-            permissionMode: this.input.header.permissionMode,
-            toolCallId: toolUseId,
-            abortSignal: ctx.abortSignal,
-          });
-        } catch (error) {
-          const reason = formatSyntheticToolErrorText(error);
-          await refuseBeforeDispatch(reason);
-          trace?.emit('tool', 'tool_failed', 'Client Capability preparation failed', {
-            toolUseId,
-            toolName: tool.name,
-            status: 'error',
-            errorClass: 'ClientCapabilityPreparation',
-          });
-          this.recordLoopGateOutcome(callSignature, true);
-          return this.errorReturn(reason);
-        } finally {
-          pauseTarget?.resume();
-        }
+      // Narrowed by admissionFailure above; Bypass still prepares so the
+      // provider cannot regain a direct pre-T1 dispatch path.
+      const prepareExecution = tool.prepareExecution!;
+      const pauseTarget = this.input.getPermissionPauseTarget();
+      pauseTarget?.pause();
+      try {
+        preparedExecution = await prepareExecution(structuredClone(executionArgs) as never, {
+          sessionId: this.input.sessionId,
+          turnId,
+          ...(runId ? { runId } : {}),
+          cwd: this.input.header.cwd,
+          executionBoundary: clientCapabilityBoundary,
+          permissionMode: this.input.header.permissionMode,
+          toolCallId: toolUseId,
+          abortSignal: ctx.abortSignal,
+        });
+      } catch (error) {
+        const reason = formatSyntheticToolErrorText(error);
+        await refuseBeforeDispatch(reason);
+        trace?.emit('tool', 'tool_failed', 'Client Capability preparation failed', {
+          toolUseId,
+          toolName: tool.name,
+          status: 'error',
+          errorClass: 'ClientCapabilityPreparation',
+        });
+        this.recordLoopGateOutcome(callSignature, true);
+        return this.errorReturn(reason);
+      } finally {
+        pauseTarget?.resume();
       }
     }
 

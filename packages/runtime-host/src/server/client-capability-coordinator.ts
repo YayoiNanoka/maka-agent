@@ -600,12 +600,14 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
       ...buildMcpTools(this.#snapshotProvider(state?.initiatingProviderId, interactive), {
         callTimeoutMs: DEFAULT_CALL_TIMEOUT_MS,
         categoryHint: 'client_capability',
+        hostAdmission: 'client_capability',
         recoveryMode: 'outcome_unknown',
         executionLocation: 'remote',
       }),
       ...buildMcpTools(this.#snapshotProvider(state?.initiatingProviderId, trusted), {
         callTimeoutMs: DEFAULT_CALL_TIMEOUT_MS,
         categoryHint: 'custom_tool',
+        hostAdmission: 'client_capability',
         recoveryMode: 'outcome_unknown',
         executionLocation: 'remote',
         activityKindForDescriptor: (descriptor) => trustedClientToolActivityKind(descriptor),
@@ -879,7 +881,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
       let registration: CapabilityRegistration;
       try {
         if (
-          provider.trustedProvider &&
+          provider.principalKind === 'capability_provider' &&
           (input.services?.length ||
             input.offers.some(
               (offer) => offer.affinity !== 'session' || offer.hostPathAccess !== 'none',
@@ -1165,13 +1167,13 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
     let provider = this.#providers.get(providerId);
     if (!provider) {
       provider = {
-        providerId,
-        principalId: identity.principalId,
-        clientInstanceId: identity.clientInstanceId,
-        ...(identity.credentialBoundClientInstanceId
-          ? { credentialBoundClientInstanceId: identity.credentialBoundClientInstanceId }
-          : {}),
-        principalKind: identity.principalKind,
+          providerId,
+          principalId: identity.principalId,
+          clientInstanceId: identity.clientInstanceId,
+          ...(identity.credentialBoundClientInstanceId
+            ? { credentialBoundClientInstanceId: identity.credentialBoundClientInstanceId }
+            : {}),
+          principalKind: identity.principalKind,
         trustedProvider,
         ...(identity.capabilityOwner
           ? { capabilityOwner: Object.freeze({ ...identity.capabilityOwner }) }
