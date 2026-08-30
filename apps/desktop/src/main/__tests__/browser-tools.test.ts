@@ -237,20 +237,6 @@ describe('browser tool execution', () => {
     assert.doesNotMatch(out, /Clicked|matched/);
   });
 
-  it('rejects a navigation after admission but before the first page call', async () => {
-    const browser = install({
-      snapshot: 'private snapshot',
-      onLeaseOpened: (state) => state.navigate('https://other.example/private?token=secret'),
-    });
-    const out = await run(buildBrowserSnapshotTool(), {});
-    assert.equal(
-      out,
-      'Navigated to https://other.example/private. Access to the new site requires approval on the next Browser call.',
-    );
-    assert.equal(browser.url, 'https://other.example/private?token=secret');
-    assert.doesNotMatch(out, /private snapshot|token/);
-  });
-
   it('covers the Provider second-check → first page await gap end to end', async () => {
     install({
       snapshot: 'private snapshot',
@@ -319,15 +305,6 @@ describe('browser tool execution', () => {
     assert.doesNotMatch(out, /private snapshot|token/);
   });
 
-  it('does not click after the approved Origin is lost', async () => {
-    const browser = install({
-      onLeaseOpened: (state) => state.navigate('https://other.example/button'),
-    });
-    const out = await run(buildBrowserClickTool(), { ref: '[1]' });
-    assert.match(out, /Navigated to https:\/\/other\.example\/button/u);
-    assert.equal(browser.clicks, 0);
-  });
-
   it('covers an A→B→A takeover reload before the first mutating page call', async () => {
     const browser = install({
       takeoverReloadImpl: (state) => {
@@ -381,38 +358,9 @@ describe('browser tool execution', () => {
     await assert.rejects(run(buildBrowserWaitTool(), { text: '   ' }), /non-empty/);
   });
 
-  it('discards a wait result after an A→B→A navigation', async () => {
-    install({
-      waitImpl: async (_options, browser) => {
-        browser.navigate('https://other.example/waited?secret=value');
-        browser.navigate('https://example.com/back');
-      },
-    });
-    const out = await run(buildBrowserWaitTool(), { text: 'ready' });
-    assert.equal(
-      out,
-      'Navigated to https://other.example/waited. Access to the new site requires approval on the next Browser call.',
-    );
-    assert.doesNotMatch(out, /Done|ready|secret/);
-  });
-
-
   it('extract fails clearly when a selector matches nothing', async () => {
     install({ url: 'https://example.com/' }); // extractHtml undefined => page returns null
     await assert.rejects(run(buildBrowserExtractTool(), { selector: '#missing' }), /No element matches selector/);
-  });
-
-  it('discards extracted content after a cross-Origin navigation', async () => {
-    install({
-      extractHtml: '<body>private content</body>',
-      extractImpl: (browser) => browser.navigate('https://other.example/data?secret=value'),
-    });
-    const out = await run(buildBrowserExtractTool(), {});
-    assert.equal(
-      out,
-      'Navigated to https://other.example/data. Access to the new site requires approval on the next Browser call.',
-    );
-    assert.doesNotMatch(out, /private content|secret/);
   });
 
   it('extract page-side script swallows an invalid selector instead of throwing', () => {

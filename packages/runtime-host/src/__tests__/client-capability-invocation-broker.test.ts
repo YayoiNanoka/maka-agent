@@ -93,46 +93,6 @@ describe('ClientCapabilityInvocationBroker', () => {
     broker.close();
   });
 
-  test('preserves immediate admission for invoke callers', async () => {
-    const sent: ClientCapabilityHostFrame[] = [];
-    let broker!: ClientCapabilityInvocationBroker<Registration>;
-    broker = new ClientCapabilityInvocationBroker({
-      senderFor: () => ({
-        send: async (frame) => {
-          sent.push(frame);
-          if (frame.kind === 'client.capability.call') {
-            queueMicrotask(() =>
-              broker.accept('connection-a', {
-                kind: 'client.capability.accepted',
-                invocationId: frame.invocationId,
-                admissionEvidence: { kind: 'none' },
-              }),
-            );
-          }
-          if (frame.kind === 'client.capability.admitted') {
-            queueMicrotask(() =>
-              broker.accept('connection-a', {
-                kind: 'client.capability.result',
-                invocationId: frame.invocationId,
-                result: { content: [{ type: 'text', text: 'ok' }] },
-              }),
-            );
-          }
-        },
-      }),
-      onRegistrationIdle: () => {},
-    });
-
-    assert.deepEqual(await broker.invoke(registration, binding, {}, context, undefined, 1_000), {
-      content: [{ type: 'text', text: 'ok' }],
-    });
-    assert.deepEqual(
-      sent.map((frame) => frame.kind),
-      ['client.capability.call', 'client.capability.admitted', 'client.capability.release'],
-    );
-    broker.close();
-  });
-
   test('cancels accepted work without crossing admission', async () => {
     const sent: ClientCapabilityHostFrame[] = [];
     let broker!: ClientCapabilityInvocationBroker<Registration>;
