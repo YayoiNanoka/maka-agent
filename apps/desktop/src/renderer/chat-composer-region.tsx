@@ -102,10 +102,7 @@ interface ChatComposerRegionProps
   newTaskSendPending: boolean;
   stopPendingBySession: Record<string, boolean>;
   respondToSandboxBoundary: ComponentProps<typeof SandboxBoundaryPrompt>['onRespond'];
-  activeSandboxBoundary: ComponentProps<typeof SandboxBoundaryPrompt>['request'] | undefined;
-  activeClientCapability: ComponentProps<typeof ClientCapabilityPrompt>['request'] | undefined;
   respondToClientCapability: ComponentProps<typeof ClientCapabilityPrompt>['onRespond'];
-  activeQuestion: ComponentProps<typeof UserQuestionPrompt>['request'] | undefined;
   respondToUserQuestion: ComponentProps<typeof UserQuestionPrompt>['onRespond'];
   stop: ComponentProps<typeof UserQuestionPrompt>['onStop'];
   boundaryUnreadableNotice?: BoundaryUnreadableNotice;
@@ -126,10 +123,7 @@ export function ChatComposerRegion({
   newTaskSendPending,
   stopPendingBySession,
   respondToSandboxBoundary,
-  activeSandboxBoundary,
-  activeClientCapability,
   respondToClientCapability,
-  activeQuestion,
   respondToUserQuestion,
   stop,
   boundaryUnreadableNotice,
@@ -138,6 +132,11 @@ export function ChatComposerRegion({
   ...composerRest
 }: ChatComposerRegionProps) {
   const mentions = useComposerMentionsContext();
+  const activeSandboxBoundary =
+    activeInteraction?.type === 'sandbox_boundary_request' ? activeInteraction : undefined;
+  const activeClientCapability =
+    activeInteraction?.type === 'client_capability_request' ? activeInteraction : undefined;
+  const activeQuestion = activeInteraction?.type === 'user_question_request' ? activeInteraction : undefined;
   const previousNewTaskDraftKey = useRef(newTaskDraftKey);
   useLayoutEffect(() => {
     const previous = previousNewTaskDraftKey.current;

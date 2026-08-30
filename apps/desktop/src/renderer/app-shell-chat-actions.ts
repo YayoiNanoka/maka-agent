@@ -23,7 +23,6 @@ import type { DesktopNewTaskTarget } from '../preload/bridge-contract.js';
 import type { InlineReference, QuoteRef } from '@maka/core/events';
 import type { OrchestrationMode } from '@maka/core/orchestration';
 import type { SandboxBoundaryResponse } from '@maka/core/sandbox-boundary';
-import type { ClientCapabilityResponse } from '@maka/core/client-capability-grant';
 import type { SkillInvocationResult } from '@maka/runtime/skill-invocation';
 import type { StoredMessage } from '@maka/core/session';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
@@ -142,7 +141,6 @@ export interface AppShellChatActions {
     options?: MessageContextOptions,
   ): Promise<boolean>;
   respondToSandboxBoundary(response: SandboxBoundaryResponse): Promise<void>;
-  respondToClientCapability(response: ClientCapabilityResponse): Promise<void>;
   respondToUserQuestion(response: UserQuestionResponse): Promise<void>;
   refreshMessages(sessionId: string, options?: RefreshMessagesOptions): Promise<boolean>;
   retryMessages(sessionId: string): Promise<void>;
@@ -753,30 +751,6 @@ export function createAppShellChatActions(deps: {
     }
   }
 
-  async function respondToClientCapability(response: ClientCapabilityResponse) {
-    const sessionId = activeIdRef.current;
-    if (!sessionId) return;
-    try {
-      await window.maka.sessions.respondToClientCapability(sessionId, response);
-      onInteractionChanged?.(sessionId);
-      setInteractionBySession((current) =>
-        dequeueInteractionByRequestId(current, sessionId, response.requestId),
-      );
-    } catch (error) {
-      if (activeIdRef.current !== sessionId) return;
-      if (isSessionWorkspaceUnavailableError(error)) {
-        showSessionWorkspaceUnavailableToast(toastApi, uiLocale, { sessionId });
-      } else {
-        toastApi.error(
-          copy.responseFailedTitle,
-          localizedShellErrorMessage(error, copy.responseFailedFallback, uiLocale),
-          undefined,
-          { sessionId },
-        );
-      }
-    }
-  }
-
   async function respondToUserQuestion(response: UserQuestionResponse) {
     const sessionId = activeIdRef.current;
     if (!sessionId) return;
@@ -863,7 +837,6 @@ export function createAppShellChatActions(deps: {
     send,
     enqueueMessage,
     respondToSandboxBoundary,
-    respondToClientCapability,
     respondToUserQuestion,
     refreshMessages,
     retryMessages,
