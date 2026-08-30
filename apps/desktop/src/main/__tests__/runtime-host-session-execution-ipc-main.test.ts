@@ -124,33 +124,30 @@ test("keeps synthetic E2E interactions visible through Host hydration and retire
 });
 
 test('answers a Client Capability approval through the existing Interaction authority', async () => {
-  const observer = observerWithSnapshot({
-    interactions: {
-      pending: [
-        {
-          schemaVersion: 1,
-          interactionId: 'capability-1',
-          sessionId: 'session-1',
-          turnId: 'turn-1',
-          runId: 'run-1',
-          revision: 1,
-          request: {
-            kind: 'client_capability',
-            toolUseId: 'tool-1',
-            target: {
-              providerId: 'provider-1',
-              contractId: 'contract-1',
-              serverId: 'desktop_browser',
-              toolName: 'browser_snapshot',
-              capability: 'browser',
-              scope: { kind: 'browser_origin', origin: 'https://example.com' },
-            },
-          },
-          status: 'pending',
-          outcome: null,
-        },
-      ],
+  const pending = {
+    schemaVersion: 1 as const,
+    interactionId: 'capability-1',
+    sessionId: 'session-1',
+    turnId: 'turn-1',
+    runId: 'run-1',
+    revision: 1 as const,
+    request: {
+      kind: 'client_capability' as const,
+      toolUseId: 'tool-1',
+      target: {
+        providerId: 'provider-1',
+        contractId: 'contract-1',
+        serverId: 'desktop_browser',
+        toolName: 'browser_snapshot',
+        capability: 'browser' as const,
+        scope: { kind: 'browser_origin' as const, origin: 'https://example.com' },
+      },
     },
+    status: 'pending' as const,
+    outcome: null,
+  };
+  const observer = observerWithSnapshot({
+    interactions: { pending: [pending] },
   });
   const answers: unknown[] = [];
   const ipc = ipcHarness();
@@ -160,28 +157,12 @@ test('answers a Client Capability approval through the existing Interaction auth
         answerInteraction: async (input) => {
           answers.push(input);
           return {
-            schemaVersion: 1,
-            interactionId: 'capability-1',
-            sessionId: 'session-1',
-            turnId: 'turn-1',
-            runId: 'run-1',
+            ...pending,
             revision: 2,
-            request: {
-              kind: 'client_capability',
-              toolUseId: 'tool-1',
-              target: {
-                providerId: 'provider-1',
-                contractId: 'contract-1',
-                serverId: 'desktop_browser',
-                toolName: 'browser_snapshot',
-                capability: 'browser',
-                scope: { kind: 'browser_origin', origin: 'https://example.com' },
-              },
-            },
-            status: 'answered',
+            status: 'answered' as const,
             outcome: {
-              kind: 'client_capability_decision',
-              decision: 'allow',
+              kind: 'client_capability_decision' as const,
+              decision: 'allow' as const,
               committedAt: 2,
             },
           };

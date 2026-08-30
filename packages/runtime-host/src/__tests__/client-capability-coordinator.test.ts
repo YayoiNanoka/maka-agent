@@ -23,7 +23,11 @@ import { createManagedExecutionBoundary } from '@maka/core/sandbox-boundary';
 import { createWorkspaceWritePermissionProfile } from '@maka/core/permission-profile';
 import { ToolOutcomeUnknownError } from '@maka/core/events';
 import type { McpCallResult } from '@maka/core/mcp';
-import type { ClientCapabilityReplaceInput } from '../protocol/index.js';
+import type {
+  ClientCapabilityAdmissionEvidence,
+  ClientCapabilityCallFrame,
+  ClientCapabilityReplaceInput,
+} from '../protocol/index.js';
 import {
   ClientCapabilityInvocationError,
   HostClientCapabilityCoordinator,
@@ -303,30 +307,16 @@ describe('Host Client Capability coordinator', () => {
       ),
       { send: async () => undefined },
     );
-    const localReplace = await local.handlers['client.capability.replace'](
-      {
-        registrationId: 'local-native-registration',
-        offers: [
-          {
-            offerId: 'desktop_browser',
-            version: '1',
-            affinity: 'session',
-            hostPathAccess: 'none',
-            label: 'Desktop Browser',
-            tools: [
-              {
-                serverId: 'desktop_browser',
-                name: 'browser_snapshot',
-                inputSchema: { type: 'object', additionalProperties: false },
-              },
-            ],
-          },
-        ],
-      },
-      connectionContext('local-connection'),
+    await registerSessionTools(
+      local,
+      'local-connection',
+      'local-native-registration',
+      'desktop_browser',
+      ['browser_snapshot'],
     );
-    assert.equal(localReplace.ok, true);
-    assert.deepEqual(await local.bindSession('local-session', 'local-connection'), { ok: true });
+    assert.deepEqual(await local.bindSession('local-session', 'local-connection'), {
+      ok: true,
+    });
     const localSnapshot = local.snapshotForSession('local-session');
     assert.ok(localSnapshot);
     assert.equal(localSnapshot.tools[0]?.categoryHint, 'custom_tool');
@@ -336,49 +326,24 @@ describe('Host Client Capability coordinator', () => {
     await local.close();
 
     const remote = createCoordinator();
-    let remoteConnection!: ClientCapabilityConnection;
-    remoteConnection = remote.attachConnection(
-      clientCapabilityConnectionIdentity(
-        'remote-connection',
-        'desktop-remote',
-        'remote-owner',
-        'remote_owner',
-      ),
-      {
-        send: async (frame) => {
-          if (frame.kind !== 'client.capability.call') return;
-          remoteConnection.accept({
-            kind: 'client.capability.accepted',
-            invocationId: frame.invocationId,
-            admissionEvidence: { kind: 'browser_url', url: 'https://example.com/' },
-          });
-        },
-      },
+    const remoteConnection = attachAutoAdmittingConnection(
+      remote,
+      'remote-connection',
+      () => ({ kind: 'browser_url', url: 'https://example.com/' }),
+      'spoofed',
+      undefined,
+      'remote_owner',
     );
-    const remoteReplace = await remote.handlers['client.capability.replace'](
-      {
-        registrationId: 'spoofed-native-registration',
-        offers: [
-          {
-            offerId: 'desktop_browser',
-            version: '1',
-            affinity: 'session',
-            hostPathAccess: 'none',
-            label: 'Spoofed Desktop Browser',
-            tools: [
-              {
-                serverId: 'desktop_browser',
-                name: 'browser_snapshot',
-                inputSchema: { type: 'object', additionalProperties: false },
-              },
-            ],
-          },
-        ],
-      },
-      connectionContext('remote-connection'),
+    await registerSessionTools(
+      remote,
+      'remote-connection',
+      'spoofed-native-registration',
+      'desktop_browser',
+      ['browser_snapshot'],
     );
-    assert.equal(remoteReplace.ok, true);
-    assert.deepEqual(await remote.bindSession('remote-session', 'remote-connection'), { ok: true });
+    assert.deepEqual(await remote.bindSession('remote-session', 'remote-connection'), {
+      ok: true,
+    });
     const remoteSnapshot = remote.snapshotForSession('remote-session');
     assert.ok(remoteSnapshot);
     assert.equal(remoteSnapshot.tools[0]?.categoryHint, 'client_capability');
@@ -421,58 +386,26 @@ describe('Host Client Capability coordinator', () => {
       },
     });
     const sent: unknown[] = [];
-    let connection!: ClientCapabilityConnection;
-    connection = coordinator.attachConnection(
-      clientCapabilityConnectionIdentity(
-        'connection-a',
-        'desktop-a',
-        'test-principal',
-        'capability_provider',
-      ),
-      {
-        send: async (frame) => {
-          sent.push(frame);
-          if (frame.kind === 'client.capability.call') {
-            const requestedUrl =
-              frame.toolName === 'browser_navigate' && typeof frame.arguments.url === 'string'
-                ? frame.arguments.url
-                : 'https://example.com/current';
-            connection.accept({
-              kind: 'client.capability.accepted',
-              invocationId: frame.invocationId,
-              admissionEvidence: { kind: 'browser_url', url: requestedUrl },
-            });
-          } else if (frame.kind === 'client.capability.admitted') {
-            connection.accept({
-              kind: 'client.capability.result',
-              invocationId: frame.invocationId,
-              result: textResult('done'),
-            });
-          }
-        },
-      },
+    const connection = attachAutoAdmittingConnection(
+      coordinator,
+      'connection-a',
+      (frame) => ({
+        kind: 'browser_url',
+        url:
+          frame.toolName === 'browser_navigate' && typeof frame.arguments.url === 'string'
+            ? frame.arguments.url
+            : 'https://example.com/current',
+      }),
+      'done',
+      sent,
     );
-    const replaced = await coordinator.handlers['client.capability.replace'](
-      {
-        registrationId: 'registration-browser',
-        offers: [
-          {
-            offerId: 'desktop_browser',
-            version: '1',
-            affinity: 'session',
-            hostPathAccess: 'none',
-            label: 'Browser',
-            tools: ['browser_snapshot', 'browser_click', 'browser_navigate'].map((name) => ({
-              serverId: 'desktop_browser',
-              name,
-              inputSchema: { type: 'object' },
-            })),
-          },
-        ],
-      },
-      connectionContext('connection-a'),
+    await registerSessionTools(
+      coordinator,
+      'connection-a',
+      'registration-browser',
+      'desktop_browser',
+      ['browser_snapshot', 'browser_click', 'browser_navigate'],
     );
-    assert.equal(replaced.ok, true);
     assert.deepEqual(await coordinator.bindSession('session-a', 'connection-a'), { ok: true });
     const snapshot = coordinator.snapshotForSession('session-a');
     assert.ok(snapshot);
@@ -511,55 +444,19 @@ describe('Host Client Capability coordinator', () => {
 
   test('passes trusted Desktop Settings through managed admission without a Session Grant', async () => {
     const coordinator = createCoordinator();
-    let connection!: ClientCapabilityConnection;
-    connection = coordinator.attachConnection(
-      clientCapabilityConnectionIdentity(
-        'connection-a',
-        'desktop-a',
-        'test-principal',
-        'capability_provider',
-      ),
-      {
-        send: async (frame) => {
-          if (frame.kind === 'client.capability.call') {
-            connection.accept({
-              kind: 'client.capability.accepted',
-              invocationId: frame.invocationId,
-              admissionEvidence: { kind: 'none' },
-            });
-          } else if (frame.kind === 'client.capability.admitted') {
-            connection.accept({
-              kind: 'client.capability.result',
-              invocationId: frame.invocationId,
-              result: textResult('settings'),
-            });
-          }
-        },
-      },
+    const connection = attachAutoAdmittingConnection(
+      coordinator,
+      'connection-a',
+      () => ({ kind: 'none' }),
+      'settings',
     );
-    const replaced = await coordinator.handlers['client.capability.replace'](
-      {
-        registrationId: 'registration-settings',
-        offers: [
-          {
-            offerId: 'desktop_settings',
-            version: '1',
-            affinity: 'session',
-            hostPathAccess: 'none',
-            label: 'Settings',
-            tools: [
-              {
-                serverId: 'desktop_settings',
-                name: 'MakaClientSettingsGet',
-                inputSchema: { type: 'object' },
-              },
-            ],
-          },
-        ],
-      },
-      connectionContext('connection-a'),
+    await registerSessionTools(
+      coordinator,
+      'connection-a',
+      'registration-settings',
+      'desktop_settings',
+      ['MakaClientSettingsGet'],
     );
-    assert.equal(replaced.ok, true);
     assert.deepEqual(await coordinator.bindSession('session-a', 'connection-a'), { ok: true });
     const snapshot = coordinator.snapshotForSession('session-a');
     assert.ok(snapshot);
@@ -1690,6 +1587,75 @@ function managedContext(toolCallId: string) {
     abortSignal: new AbortController().signal,
     emitOutput: () => undefined,
   };
+}
+
+function attachAutoAdmittingConnection(
+  coordinator: HostClientCapabilityCoordinator,
+  connectionId: string,
+  admissionEvidence: (frame: ClientCapabilityCallFrame) => ClientCapabilityAdmissionEvidence,
+  resultText: string,
+  sent?: unknown[],
+  principalKind: Parameters<typeof clientCapabilityConnectionIdentity>[3] = 'capability_provider',
+): ClientCapabilityConnection {
+  let connection!: ClientCapabilityConnection;
+  connection = coordinator.attachConnection(
+    clientCapabilityConnectionIdentity(
+      connectionId,
+      `${connectionId}-client`,
+      `${connectionId}-principal`,
+      principalKind,
+    ),
+    {
+      send: async (frame) => {
+        sent?.push(frame);
+        if (frame.kind === 'client.capability.call') {
+          connection.accept({
+            kind: 'client.capability.accepted',
+            invocationId: frame.invocationId,
+            admissionEvidence: admissionEvidence(frame),
+          });
+        } else if (frame.kind === 'client.capability.admitted') {
+          connection.accept({
+            kind: 'client.capability.result',
+            invocationId: frame.invocationId,
+            result: textResult(resultText),
+          });
+        }
+      },
+    },
+  );
+  return connection;
+}
+
+async function registerSessionTools(
+  coordinator: HostClientCapabilityCoordinator,
+  connectionId: string,
+  registrationId: string,
+  serverId: string,
+  toolNames: readonly string[],
+  hostPathAccess: ClientCapabilityReplaceInput['offers'][number]['hostPathAccess'] = 'none',
+): Promise<void> {
+  const result = await coordinator.handlers['client.capability.replace'](
+    {
+      registrationId,
+      offers: [
+        {
+          offerId: serverId,
+          version: '1',
+          affinity: 'session',
+          hostPathAccess,
+          label: serverId,
+          tools: toolNames.map((name) => ({
+            serverId,
+            name,
+            inputSchema: { type: 'object' },
+          })),
+        },
+      ],
+    },
+    connectionContext(connectionId),
+  );
+  assert.equal(result.ok, true, JSON.stringify(result));
 }
 
 async function replace(

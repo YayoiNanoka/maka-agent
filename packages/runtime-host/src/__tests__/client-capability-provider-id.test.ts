@@ -30,7 +30,7 @@ const IDENTITY = {
 };
 
 describe('clientCapabilityProviderId', () => {
-  test('is stable, serializable, bounded, and does not disclose authenticated identity fields', () => {
+  test('is stable, safe, private, and sensitive to every authenticated identity field', () => {
     const first = clientCapabilityProviderId(IDENTITY);
     const second = clientCapabilityProviderId({ ...IDENTITY });
 
@@ -48,10 +48,6 @@ describe('clientCapabilityProviderId', () => {
         scope: { kind: 'browser_origin', origin: 'https://example.com' },
       }),
     );
-  });
-
-  test('changes when any authenticated identity field changes', () => {
-    const original = clientCapabilityProviderId(IDENTITY);
     const variants = [
       { ...IDENTITY, principalKind: 'local_owner' as const },
       { ...IDENTITY, principalId: 'desktop:installation-b' },
@@ -59,7 +55,7 @@ describe('clientCapabilityProviderId', () => {
     ];
 
     for (const variant of variants) {
-      assert.notEqual(clientCapabilityProviderId(variant), original);
+      assert.notEqual(clientCapabilityProviderId(variant), first);
     }
   });
 });
