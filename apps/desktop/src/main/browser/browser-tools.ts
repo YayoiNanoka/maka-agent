@@ -279,10 +279,23 @@ function sanitizedPageUrl(value: string): string {
   }
 }
 
+function unapprovedPageOrigin(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return 'an unapproved page';
+    // The pathname may itself contain credentials or reset tokens; disclose it only after approval.
+    return url.origin;
+  } catch {
+    return 'an unapproved page';
+  }
+}
+
 function navigationResult(url: string, requiresApproval: boolean): string {
+  if (requiresApproval) {
+    return `Navigated to ${unapprovedPageOrigin(url)}. Access to the new site requires approval on the next Browser call.`;
+  }
   return (
-    `Navigated to ${sanitizedPageUrl(url)}.` +
-    (requiresApproval ? ' Access to the new site requires approval on the next Browser call.' : '')
+    `Navigated to ${sanitizedPageUrl(url)}.`
   );
 }
 

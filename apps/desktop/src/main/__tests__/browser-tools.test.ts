@@ -213,28 +213,40 @@ describe('browser tool execution', () => {
   it('navigate returns only a sanitized destination after a cross-Origin redirect', async () => {
     install({
       url: 'https://old.example/',
-      afterGotoUrl: 'https://other.example/landing?token=private#account',
+      afterGotoUrl: 'https://other.example/reset/redirect-secret?token=private#account',
       title: 'Private destination title',
     });
     const out = await run(buildBrowserNavigateTool(), { url: 'https://example.com/start' });
     assert.equal(
       out,
-      'Navigated to https://other.example/landing. Access to the new site requires approval on the next Browser call.',
+      'Navigated to https://other.example. Access to the new site requires approval on the next Browser call.',
     );
-    assert.doesNotMatch(out, /Private destination title|token|account/);
+    assert.doesNotMatch(out, /Private destination title|reset|redirect-secret|token|account/);
   });
 
   it('click returns only the new URL after cross-Origin navigation', async () => {
     install({
       url: 'https://example.com/start',
-      afterClickUrl: 'https://other.example/landing?token=private#account',
+      afterClickUrl: 'https://other.example/reset/click-secret?token=private#account',
     });
     const out = await run(buildBrowserClickTool(), { ref: '[1]' });
     assert.equal(
       out,
-      'Navigated to https://other.example/landing. Access to the new site requires approval on the next Browser call.',
+      'Navigated to https://other.example. Access to the new site requires approval on the next Browser call.',
     );
-    assert.doesNotMatch(out, /Clicked|matched/);
+    assert.doesNotMatch(out, /Clicked|matched|reset|click-secret|token|account/);
+
+    resetBrowserSessionsForTest();
+    install({
+      url: 'https://example.com/start',
+      afterClickUrl: 'file:///reset/local-secret',
+    });
+    const nonWebOut = await run(buildBrowserClickTool(), { ref: '[1]' });
+    assert.equal(
+      nonWebOut,
+      'Navigated to an unapproved page. Access to the new site requires approval on the next Browser call.',
+    );
+    assert.doesNotMatch(nonWebOut, /file|reset|local-secret/);
   });
 
   it('covers the Provider second-check → first page await gap end to end', async () => {
@@ -282,7 +294,7 @@ describe('browser tool execution', () => {
       content: [
         {
           type: 'text',
-          text: 'Navigated to https://other.example/private. Access to the new site requires approval on the next Browser call.',
+          text: 'Navigated to https://other.example. Access to the new site requires approval on the next Browser call.',
         },
       ],
     });
@@ -292,7 +304,7 @@ describe('browser tool execution', () => {
   it('discards a snapshot when the page crosses Origin and returns to the approved site', async () => {
     install({
       snapshotImpl: (browser) => {
-        browser.navigate('https://other.example/private?token=secret');
+        browser.navigate('https://other.example/reset/first-violated-secret?token=secret');
         browser.navigate('https://example.com/back');
         return 'private snapshot';
       },
@@ -300,25 +312,25 @@ describe('browser tool execution', () => {
     const out = await run(buildBrowserSnapshotTool(), {});
     assert.equal(
       out,
-      'Navigated to https://other.example/private. Access to the new site requires approval on the next Browser call.',
+      'Navigated to https://other.example. Access to the new site requires approval on the next Browser call.',
     );
-    assert.doesNotMatch(out, /private snapshot|token/);
+    assert.doesNotMatch(out, /private snapshot|reset|first-violated-secret|token/);
   });
 
   it('covers an A→B→A takeover reload before the first mutating page call', async () => {
     const browser = install({
       takeoverReloadImpl: (state) => {
-        state.navigate('https://other.example/reload?token=secret');
+        state.navigate('https://other.example/reset/reload-secret?token=secret');
         state.navigate('https://example.com/back');
       },
     });
     const out = await run(buildBrowserClickTool(), { ref: '[1]' });
     assert.equal(
       out,
-      'Navigated to https://other.example/reload. Access to the new site requires approval on the next Browser call.',
+      'Navigated to https://other.example. Access to the new site requires approval on the next Browser call.',
     );
     assert.equal(browser.clicks, 0);
-    assert.doesNotMatch(out, /token/);
+    assert.doesNotMatch(out, /reset|reload-secret|token/);
   });
 
   it('does not press Enter when filling navigates away from the approved Origin', async () => {
@@ -328,7 +340,7 @@ describe('browser tool execution', () => {
     const out = await run(buildBrowserTypeTool(), { ref: '[2]', text: 'hello', submit: true });
     assert.equal(
       out,
-      'Navigated to https://other.example/login. Access to the new site requires approval on the next Browser call.',
+      'Navigated to https://other.example. Access to the new site requires approval on the next Browser call.',
     );
     assert.equal(browser.fills, 1);
     assert.equal(browser.presses, 0);
