@@ -296,14 +296,14 @@ describe('Host Client Capability coordinator', () => {
     await coordinator.close();
   });
 
-  test('trusts capability-provider Desktop bindings but not a remote owner spoofing their names', async () => {
+  test('trusts local-owner Desktop bindings but not a remote owner spoofing their names', async () => {
     const local = createCoordinator();
     const localConnection = local.attachConnection(
       clientCapabilityConnectionIdentity(
         'local-connection',
         'desktop-local',
         'local_os_user',
-        'capability_provider',
+        'local_owner',
       ),
       { send: async () => undefined },
     );
@@ -313,6 +313,7 @@ describe('Host Client Capability coordinator', () => {
       'local-native-registration',
       'desktop_browser',
       ['browser_snapshot'],
+      'cwd',
     );
     assert.deepEqual(await local.bindSession('local-session', 'local-connection'), {
       ok: true,

@@ -1160,20 +1160,21 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
 
   #provider(identity: ClientCapabilityConnectionIdentity): ClientProviderState {
     const providerId = clientCapabilityProviderId(identity);
-    const trustedProvider = identity.principalKind === 'capability_provider';
-    if (identity.capabilityOwner && !trustedProvider) {
+    const trustedProvider =
+      identity.principalKind === 'local_owner' || identity.principalKind === 'capability_provider';
+    if (identity.capabilityOwner && identity.principalKind !== 'capability_provider') {
       throw new Error('Only a capability provider may declare a Client Capability owner');
     }
     let provider = this.#providers.get(providerId);
     if (!provider) {
       provider = {
-          providerId,
-          principalId: identity.principalId,
-          clientInstanceId: identity.clientInstanceId,
-          ...(identity.credentialBoundClientInstanceId
-            ? { credentialBoundClientInstanceId: identity.credentialBoundClientInstanceId }
-            : {}),
-          principalKind: identity.principalKind,
+        providerId,
+        principalId: identity.principalId,
+        clientInstanceId: identity.clientInstanceId,
+        ...(identity.credentialBoundClientInstanceId
+          ? { credentialBoundClientInstanceId: identity.credentialBoundClientInstanceId }
+          : {}),
+        principalKind: identity.principalKind,
         trustedProvider,
         ...(identity.capabilityOwner
           ? { capabilityOwner: Object.freeze({ ...identity.capabilityOwner }) }
