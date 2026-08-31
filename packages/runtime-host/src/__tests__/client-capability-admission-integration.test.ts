@@ -64,7 +64,7 @@ const IDENTITY = Object.freeze({
   clientInstanceId: 'desktop-client-secret',
 });
 
-test('persists the canonical authenticated provider identity through managed admission', async () => {
+test('cancels pending managed admission and retries with the canonical provider identity', async () => {
   await withStore(async ({ store }) => {
     const order: string[] = [];
     const interactions = createInteractionCoordinator(store);
@@ -154,13 +154,14 @@ test('persists the canonical authenticated provider identity through managed adm
           commitToolOutcome: async () => ({ created: true, runtimeEventSeq: 2 }),
         },
       });
-      const settling = runtime.settleToolCall({
+      const caller = new AbortController();
+      const cancelled = runtime.settleToolCall({
         tool,
         turnId: RUN.turnId,
         stepId: 'step-1',
         toolCallId: 'browser-call-1',
         input: {},
-        abortSignal: new AbortController().signal,
+        abortSignal: caller.signal,
         eventSink: {
           push: () => undefined,
           pushAndWaitUntilConsumed: async () => undefined,
@@ -175,10 +176,36 @@ test('persists the canonical authenticated provider identity through managed adm
       assert.equal(JSON.stringify(request).includes(IDENTITY.principalId), false);
       assert.equal(JSON.stringify(request).includes(IDENTITY.clientInstanceId), false);
 
+      caller.abort(new DOMException('Code Mode deadline reached', 'TimeoutError'));
+      await cancelled;
+      const closed = await store.readInteraction(request.requestId);
+      assert.equal(closed?.outcome?.outcome.kind, 'closure');
+      if (closed?.outcome?.outcome.kind === 'closure') {
+        assert.equal(closed.outcome.outcome.reason, 'timed_out');
+      }
+      assert.deepEqual(order, ['accepted']);
+
+      const settling = runtime.settleToolCall({
+        tool,
+        turnId: RUN.turnId,
+        stepId: 'step-2',
+        toolCallId: 'browser-call-2',
+        input: {},
+        abortSignal: new AbortController().signal,
+        eventSink: {
+          push: () => undefined,
+          pushAndWaitUntilConsumed: async () => undefined,
+        },
+      });
+      const retryRequest = await waitForPending(store);
+      assert.notEqual(retryRequest.requestId, request.requestId);
+      assert.equal(retryRequest.request.kind, 'client_capability');
+      if (retryRequest.request.kind !== 'client_capability') return;
+
       const answered = await interactions.handlers['interaction.answer'](
         {
           sessionId: RUN.sessionId,
-          interactionId: request.requestId,
+          interactionId: retryRequest.requestId,
           answer: { kind: 'client_capability', decision: 'allow' },
         },
         connectionContext('desktop-ui'),
@@ -188,11 +215,11 @@ test('persists the canonical authenticated provider identity through managed adm
       const settlement = await settling;
       const grant = await store.readClientCapabilitySessionGrant({
         sessionId: RUN.sessionId,
-        ...request.request.target,
+        ...retryRequest.request.target,
       });
       assert.equal(grant?.providerId, providerId);
       assert.deepEqual(settlement.result, { content: [{ type: 'text', text: 'snapshot' }] });
-      assert.deepEqual(order, ['accepted', 'approved', 'T1', 'admitted']);
+      assert.deepEqual(order, ['accepted', 'accepted', 'approved', 'T1', 'admitted']);
     } finally {
       snapshot?.release();
       await connection.close();

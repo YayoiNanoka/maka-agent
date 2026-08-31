@@ -165,6 +165,7 @@ export interface ClientCapabilityApprovalInput {
   readonly toolCallId: string;
   readonly target: ClientCapabilityGrantTarget;
   readonly providerSignal?: AbortSignal;
+  readonly callerSignal?: AbortSignal;
 }
 
 export class ClientCapabilityApprovalClosedError extends Error {
@@ -275,19 +276,27 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
       resolve: resolveDecision,
       reject: rejectDecision,
     });
-    const onProviderDisconnect = () => {
-      void this.#closeClientCapabilityApproval(requestId).catch(rejectDecision);
+    const close = (reason: InteractionClosureReason) => {
+      void this.#closeClientCapabilityApproval(requestId, reason).catch(rejectDecision);
     };
+    const onProviderDisconnect = () => close('provider_disconnected');
+    const onCallerAbort = () => close(clientCapabilityCallerClosureReason(input.callerSignal));
     if (input.providerSignal?.aborted) onProviderDisconnect();
     else input.providerSignal?.addEventListener('abort', onProviderDisconnect, { once: true });
+    if (input.callerSignal?.aborted) onCallerAbort();
+    else input.callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
     try {
       return await decision;
     } finally {
       input.providerSignal?.removeEventListener('abort', onProviderDisconnect);
+      input.callerSignal?.removeEventListener('abort', onCallerAbort);
     }
   }
 
-  async #closeClientCapabilityApproval(requestId: string): Promise<void> {
+  async #closeClientCapabilityApproval(
+    requestId: string,
+    reason: InteractionClosureReason,
+  ): Promise<void> {
     const candidate = this.#live.get(requestId);
     if (!candidate || candidate.kind !== 'client_capability') return;
     await this.#sessionAdmission.run(candidate.request.sessionId, async (admission) => {
@@ -295,7 +304,7 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
       if (!current || current !== candidate || current.kind !== 'client_capability') return;
       const outcome = await this.#commitClientCapabilityOutcome(candidate.request, {
         kind: 'closure',
-        reason: 'provider_disconnected',
+        reason,
         committedAt: this.#now(),
       });
       await this.#refreshCanonicalContinuity(candidate.request.sessionId, admission);
@@ -1515,6 +1524,22 @@ function interactionNotFound() {
     ok: false,
     error: { code: 'not_found', message: 'Interaction was not found' },
   } as const;
+}
+
+function clientCapabilityCallerClosureReason(
+  signal: AbortSignal | undefined,
+): InteractionClosureReason {
+  const reason = signal?.reason;
+  if (
+    (reason instanceof Error && reason.name === 'TimeoutError') ||
+    (typeof reason === 'object' &&
+      reason !== null &&
+      'code' in reason &&
+      reason.code === 'CODE_MODE_TIMEOUT')
+  ) {
+    return 'timed_out';
+  }
+  return 'turn_stopped';
 }
 
 function operationConflict(message: string) {

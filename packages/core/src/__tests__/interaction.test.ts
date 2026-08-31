@@ -803,6 +803,17 @@ describe('Interaction decoding and validity', () => {
     });
     assert.equal(isInteractionAnswerValidForRequest(request, answer), true);
     assert.equal(isInteractionCanonicalOutcomeValidForRequest(request, outcome), true);
+    assert.equal(
+      isInteractionCanonicalOutcomeValidForRequest(
+        request,
+        decodeInteractionCanonicalOutcome({
+          kind: 'closure',
+          reason: 'timed_out',
+          committedAt: 3,
+        }),
+      ),
+      true,
+    );
     assert.deepEqual(decodeInteractionRequest(request), request);
     assert.throws(() =>
       projectInteractionClientCapabilityRequest({

@@ -557,7 +557,11 @@ export function isInteractionCanonicalOutcomeValidForRequest(
 ): boolean {
   if (!interactionOutcomeMatchesRequestKind(request, outcome)) return false;
   if (outcome.kind === 'closure')
-    return request.kind === 'permission' || outcome.reason !== 'timed_out';
+    return (
+      request.kind === 'permission' ||
+      request.kind === 'client_capability' ||
+      outcome.reason !== 'timed_out'
+    );
   if (outcome.kind === 'permission_answer') {
     return interactionRememberForTurnIsEligible(request, outcome);
   }
