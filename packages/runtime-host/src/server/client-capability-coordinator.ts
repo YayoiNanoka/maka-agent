@@ -1143,7 +1143,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
       clientCapabilityScopeIdentity(target.scope),
     ].join('\0');
     const existing = this.#pendingApprovals.get(key);
-    if (existing) return existing;
+    if (existing) return waitForClientCapabilityApproval(existing, input.callerSignal);
     const pending = this.#interactions
       .requestClientCapabilityApproval({
         sessionId: input.sessionId,
@@ -1633,6 +1633,42 @@ function clientCapabilityOwnerIdentitiesEqual(
       left.principalId === right.principalId &&
       left.clientInstanceId === right.clientInstanceId)
   );
+}
+
+function waitForClientCapabilityApproval(
+  approval: Promise<'allow' | 'deny'>,
+  callerSignal: AbortSignal | undefined,
+): Promise<'allow' | 'deny'> {
+  if (!callerSignal) return approval;
+  if (callerSignal.aborted) {
+    return Promise.reject(clientCapabilityCallerAbortError(callerSignal));
+  }
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => callerSignal.removeEventListener('abort', onAbort);
+    const onAbort = (): void => {
+      cleanup();
+      reject(clientCapabilityCallerAbortError(callerSignal));
+    };
+    callerSignal.addEventListener('abort', onAbort, { once: true });
+    void approval.then(
+      (decision) => {
+        cleanup();
+        resolve(decision);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+function clientCapabilityCallerAbortError(signal: AbortSignal): Error {
+  const reason = signal.reason;
+  if (reason instanceof Error) return reason;
+  return new Error(typeof reason === 'string' ? reason : 'Client Capability caller cancelled', {
+    ...(reason === undefined ? {} : { cause: reason }),
+  });
 }
 
 function canonicalJson(value: unknown): string {

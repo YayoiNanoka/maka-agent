@@ -64,9 +64,16 @@ const IDENTITY = Object.freeze({
   clientInstanceId: 'desktop-client-secret',
 });
 
-test('cancels pending managed admission and retries with the canonical provider identity', async () => {
+test('cancels managed approval owners and joiners with the canonical provider identity', async () => {
   await withStore(async ({ store }) => {
     const order: string[] = [];
+    const toolCallByInvocation = new Map<string, string>();
+    const cancelledToolCalls: string[] = [];
+    let acceptedCount = 0;
+    let resolveThirdAccepted!: () => void;
+    const thirdAccepted = new Promise<void>((resolve) => {
+      resolveThirdAccepted = resolve;
+    });
     const interactions = createInteractionCoordinator(store);
     const runOwner = interactions.bindRun(RUN);
     const capabilities = new HostClientCapabilityCoordinator({
@@ -79,7 +86,10 @@ test('cancels pending managed admission and retries with the canonical provider 
     connection = capabilities.attachConnection(IDENTITY, {
       send: async (frame) => {
         if (frame.kind === 'client.capability.call') {
+          toolCallByInvocation.set(frame.invocationId, frame.toolCallId);
           order.push('accepted');
+          acceptedCount += 1;
+          if (acceptedCount === 3) resolveThirdAccepted();
           connection.accept({
             kind: 'client.capability.accepted',
             invocationId: frame.invocationId,
@@ -88,6 +98,9 @@ test('cancels pending managed admission and retries with the canonical provider 
               url: 'https://example.com/private?token=secret',
             },
           });
+        } else if (frame.kind === 'client.capability.cancel') {
+          const toolCallId = toolCallByInvocation.get(frame.invocationId);
+          if (toolCallId) cancelledToolCalls.push(toolCallId);
         } else if (frame.kind === 'client.capability.admitted') {
           order.push('admitted');
           connection.accept({
@@ -202,6 +215,31 @@ test('cancels pending managed admission and retries with the canonical provider 
       assert.equal(retryRequest.request.kind, 'client_capability');
       if (retryRequest.request.kind !== 'client_capability') return;
 
+      const joinedCaller = new AbortController();
+      const joined = runtime.settleToolCall({
+        tool,
+        turnId: RUN.turnId,
+        stepId: 'step-3',
+        toolCallId: 'browser-call-3',
+        input: {},
+        abortSignal: joinedCaller.signal,
+        eventSink: {
+          push: () => undefined,
+          pushAndWaitUntilConsumed: async () => undefined,
+        },
+      });
+      await thirdAccepted;
+      assert.deepEqual(
+        (await store.listSessionPending(RUN.sessionId)).map((pending) => pending.requestId),
+        [retryRequest.requestId],
+      );
+
+      joinedCaller.abort(new DOMException('Joined caller stopped', 'AbortError'));
+      await joined;
+      assert.deepEqual(cancelledToolCalls, ['browser-call-1', 'browser-call-3']);
+      assert.deepEqual(order, ['accepted', 'accepted', 'accepted']);
+      assert.equal((await store.readInteraction(retryRequest.requestId))?.outcome, undefined);
+
       const answered = await interactions.handlers['interaction.answer'](
         {
           sessionId: RUN.sessionId,
@@ -219,7 +257,7 @@ test('cancels pending managed admission and retries with the canonical provider 
       });
       assert.equal(grant?.providerId, providerId);
       assert.deepEqual(settlement.result, { content: [{ type: 'text', text: 'snapshot' }] });
-      assert.deepEqual(order, ['accepted', 'accepted', 'approved', 'T1', 'admitted']);
+      assert.deepEqual(order, ['accepted', 'accepted', 'accepted', 'approved', 'T1', 'admitted']);
     } finally {
       snapshot?.release();
       await connection.close();
