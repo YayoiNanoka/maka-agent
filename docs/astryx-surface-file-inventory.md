@@ -6,7 +6,7 @@ Generated against `@astryxdesign/core@0.5.0` (194 component exports).
 
 Wiki bar: Design Conventions · API Use-the-System · Theming · Container Padding.
 
-**Totals:** 232 files — blocker 0, reimplementation 0, polish 1, aligned 231.
+**Totals:** 233 files — blocker 0, reimplementation 0, polish 1, aligned 232.
 
 ## Exclusions (explicit)
 
