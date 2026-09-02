@@ -21,11 +21,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildMakaCuManifestEntry } from './prepare-manifest.mjs';
 
-test('the maka-cu manifest producer pins protocol v3 without build side effects', () => {
+test('the maka-cu manifest pins protocol v3 and official source provenance', () => {
   assert.deepEqual(
     buildMakaCuManifestEntry({
-      branch: 'feature/native-target',
       commit: 'a'.repeat(40),
+      tree: 'c'.repeat(40),
       binarySizeBytes: 123,
       binarySha256: 'b'.repeat(64),
       signing: { signature: 'adhoc', hardenedRuntime: false },
@@ -33,13 +33,14 @@ test('the maka-cu manifest producer pins protocol v3 without build side effects'
     }),
     {
       repo: 'maka-agent/maka-cu',
-      branch: 'feature/native-target',
+      branch: 'maka/base',
       commit: 'a'.repeat(40),
+      tree: 'c'.repeat(40),
       expectedProtocolVersion: 'maka.cu/3',
       binaryName: 'maka-cu',
       binarySizeBytes: 123,
       binarySha256: 'b'.repeat(64),
-      buildProvenance: 'local-source-build',
+      buildProvenance: 'isolated-official-source-build',
       signature: 'adhoc',
       hardenedRuntime: false,
       notarization: 'missing',

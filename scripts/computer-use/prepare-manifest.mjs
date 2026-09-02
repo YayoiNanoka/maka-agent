@@ -18,6 +18,9 @@
  */
 
 export const MAKA_CU_PROTOCOL_VERSION = 'maka.cu/3';
+export const MAKA_CU_SOURCE_REPO = 'maka-agent/maka-cu';
+export const MAKA_CU_SOURCE_URL = 'https://github.com/maka-agent/maka-cu.git';
+export const MAKA_CU_SOURCE_BRANCH = 'maka/base';
 
 export function buildMakaCuManifestEntry(input) {
   const distributionReady =
@@ -25,14 +28,15 @@ export function buildMakaCuManifestEntry(input) {
     input.signing.hardenedRuntime === true &&
     input.stapled;
   return {
-    repo: 'maka-agent/maka-cu',
-    branch: input.branch,
+    repo: MAKA_CU_SOURCE_REPO,
+    branch: MAKA_CU_SOURCE_BRANCH,
     commit: input.commit,
+    tree: input.tree,
     expectedProtocolVersion: MAKA_CU_PROTOCOL_VERSION,
     binaryName: 'maka-cu',
     binarySizeBytes: input.binarySizeBytes,
     binarySha256: input.binarySha256,
-    buildProvenance: 'local-source-build',
+    buildProvenance: 'isolated-official-source-build',
     ...input.signing,
     notarization: input.stapled ? 'stapled' : 'missing',
     distributionReady,
