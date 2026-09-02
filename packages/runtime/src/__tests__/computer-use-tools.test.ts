@@ -126,6 +126,33 @@ async function callComputer(
   return (await tool.impl(args as never, ctx(signal))) as { kind: string; text: string };
 }
 
+function withObservation(backend: CuDispatchBackend): CuDispatchBackend {
+  backend.observeApp ??= async () => observation();
+  backend.captureObservation ??= async () => observation({ observationId: 'backend-obs-next' });
+  return backend;
+}
+
+async function invokePresentedClick(
+  tool: ReturnType<typeof buildComputerUseTools>[number],
+  context: MakaToolContext,
+): Promise<unknown> {
+  const observed = (await tool.impl({ action: 'observe', app: 'Fixture' } as never, context)) as {
+    modelText?: string;
+    text?: string;
+  };
+  const observationId = observationIdOf(observed.modelText ?? observed.text);
+  if (!observationId) return observed;
+  return await tool.impl(
+    { action: 'left_click', observation_id: observationId, coordinate: [10, 10] } as never,
+    context,
+  );
+}
+
+async function callBoundComputer(backend: CuDispatchBackend) {
+  const [tool] = buildComputerUseTools({ backend: withObservation(backend) });
+  return (await invokePresentedClick(tool, ctx())) as { text: string };
+}
+
 function observation(over: Partial<CuObservation> = {}): CuObservation {
   return {
     observationId: 'backend-obs-1',
@@ -300,20 +327,119 @@ test('Computer Use preparation resolves and freezes the native application targe
 
 test('targetless wait needs no native startup and a prepared invocation is single-use', async () => {
   let readyCount = 0;
+  let preflightCount = 0;
+  let runCount = 0;
   const backend = fakeBackend();
   backend.ensureReady = async () => {
     readyCount += 1;
   };
+  backend.preflight = async () => {
+    preflightCount += 1;
+    return { accessibility: true, screenRecording: true };
+  };
+  backend.run = async () => {
+    runCount += 1;
+    return { outcome: { ok: true, tier: 'ax', verified: true } };
+  };
   const tools = buildComputerUseTools({ backend });
   const prepared = await tools.prepareInvocation(
-    { action: 'wait' },
+    { action: 'wait', duration: 0.01 },
     { sessionId: 's1', turnId: 't1', toolCallId: 'prepare', signal: ctx().abortSignal },
   );
 
   assert.deepEqual(prepared.admission, { kind: 'duration_wait' });
   assert.equal(readyCount, 0);
-  await prepared.execute(ctx());
+  const result = await prepared.execute(ctx());
+  assert.match(result.result.text, /computer\.wait ok/);
+  assert.equal(preflightCount, 0);
+  assert.equal(runCount, 0);
   await assert.rejects(() => prepared.execute(ctx()), /already consumed/);
+});
+
+test('targetless wait observes provider, caller, and Session cancellation', async () => {
+  const backend = fakeBackend();
+  const tools = buildComputerUseTools({ backend });
+
+  const provider = new AbortController();
+  const providerPrepared = await tools.prepareInvocation(
+    { action: 'wait', duration: 10 },
+    { sessionId: 'provider', turnId: 't1', toolCallId: 'prepare', signal: provider.signal },
+  );
+  const providerPending = providerPrepared.execute(
+    ctx(undefined, { sessionId: 'provider', toolCallId: 'provider' }),
+  );
+  provider.abort(new Error('provider aborted'));
+  await assert.rejects(providerPending, /provider aborted/);
+
+  const caller = new AbortController();
+  const callerPending = Promise.resolve(
+    tools[0].impl(
+      { action: 'wait', duration: 10 } as never,
+      ctx(caller.signal, { sessionId: 'caller', toolCallId: 'caller' }),
+    ),
+  );
+  caller.abort(new Error('caller aborted'));
+  await assert.rejects(callerPending, /caller aborted/);
+
+  const sessionPending = tools[0].impl(
+    { action: 'wait', duration: 10 } as never,
+    ctx(undefined, { sessionId: 'session', toolCallId: 'session' }),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  tools.clearSession('session');
+  const sessionResult = (await sessionPending) as { error?: string };
+  assert.equal(sessionResult.error, 'user_stopped');
+});
+
+test('cancelling a queued targetless wait does not let a later call pass the running call', async () => {
+  let started!: () => void;
+  const running = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const backend = fakeBackend();
+  backend.listApps = async () => {
+    started();
+    await gate;
+    return [];
+  };
+  const tools = buildComputerUseTools({ backend });
+  const [tool] = tools;
+  const first = tool.impl(
+    { action: 'list_apps' } as never,
+    ctx(undefined, { sessionId: 'ordered', toolCallId: 'a' }),
+  );
+  await running;
+
+  const cancelled = new AbortController();
+  const second = Promise.resolve(
+    tool.impl(
+      { action: 'wait', duration: 10 } as never,
+      ctx(cancelled.signal, { sessionId: 'ordered', toolCallId: 'b' }),
+    ),
+  );
+  cancelled.abort(new Error('cancel b'));
+  await assert.rejects(second, /cancel b/);
+
+  let laterFinished = false;
+  const later = Promise.resolve(
+    tool.impl(
+      { action: 'wait' } as never,
+      ctx(undefined, { sessionId: 'ordered', toolCallId: 'd' }),
+    ),
+  ).then(() => {
+    laterFinished = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(laterFinished, false);
+
+  release();
+  await first;
+  await later;
+  assert.equal(laterFinished, true);
 });
 
 test('listing applications prepares an app-catalog admission', async () => {
@@ -340,7 +466,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       ready = resolve;
     });
     const [tool] = buildComputerUseTools({
-      backend: {
+      backend: withObservation({
         ...preparationBackend,
         async preflight() {
           return { accessibility: true, screenRecording: true };
@@ -349,7 +475,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
           events.push('dispatch');
           return { outcome: { ok: true, tier: 'ax', verified: true } };
         },
-      },
+      }),
       overlay: {
         onActionBegin() {
           events.push('presentation');
@@ -365,7 +491,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       presentationReadyTimeoutMs: 10_000,
     });
 
-    const pending = tool.impl({ action: 'wait' } as never, ctx());
+    const pending = invokePresentedClick(tool, ctx());
     while (events.length === 0) {
       await new Promise((resolve) => setImmediate(resolve));
     }
@@ -378,7 +504,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
   test('presentation readiness timeout fails open', async () => {
     const events: string[] = [];
     const [tool] = buildComputerUseTools({
-      backend: {
+      backend: withObservation({
         ...preparationBackend,
         async preflight() {
           return { accessibility: true, screenRecording: true };
@@ -387,7 +513,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
           events.push('dispatch');
           return { outcome: { ok: true, tier: 'ax', verified: true } };
         },
-      },
+      }),
       overlay: {
         onActionBegin() {
           return {
@@ -398,7 +524,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       },
       presentationReadyTimeoutMs: 5,
     });
-    await tool.impl({ action: 'wait' } as never, ctx());
+    await invokePresentedClick(tool, ctx());
     assert.deepEqual(events, ['dispatch']);
   });
 
@@ -458,7 +584,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
     const abortController = new AbortController();
     let dispatchCount = 0;
     const [tool] = buildComputerUseTools({
-      backend: {
+      backend: withObservation({
         ...preparationBackend,
         async preflight() {
           return { accessibility: true, screenRecording: true };
@@ -467,7 +593,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
           dispatchCount += 1;
           return { outcome: { ok: true, tier: 'ax', verified: true } };
         },
-      },
+      }),
       overlay: {
         onActionBegin() {
           return {
@@ -478,7 +604,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       },
       presentationReadyTimeoutMs: 10_000,
     });
-    const pending = tool.impl({ action: 'wait' } as never, ctx(abortController.signal));
+    const pending = invokePresentedClick(tool, ctx(abortController.signal));
     await Promise.resolve();
     abortController.abort(new Error('stopped'));
     await assert.rejects(Promise.resolve(pending), /stopped/);
@@ -576,7 +702,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       ready = resolve;
     });
     const [tool] = buildComputerUseTools({
-      backend: {
+      backend: withObservation({
         ...preparationBackend,
         async preflight() {
           return { accessibility: true, screenRecording: true };
@@ -585,7 +711,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
           events.push('dispatch');
           return { outcome: { ok: true, tier: 'ax', verified: true } };
         },
-      },
+      }),
       overlay: {
         onActionBegin() {
           return {
@@ -597,7 +723,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       },
       presentationReadyTimeoutMs: 5,
     });
-    const pending = tool.impl({ action: 'wait' } as never, ctx());
+    const pending = invokePresentedClick(tool, ctx());
     // Ten times the default the caller configured. Without the fence's own
     // deadline winning, dispatch has already happened by now.
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -662,7 +788,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
 
   test('presentation promise rejections are isolated from execution', async () => {
     const [tool] = buildComputerUseTools({
-      backend: fakeBackend(),
+      backend: withObservation(fakeBackend()),
       overlay: {
         onActionBegin() {
           return {
@@ -675,10 +801,10 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
         },
       },
     });
-    const result = (await tool.impl({ action: 'wait' } as never, ctx())) as {
+    const result = (await invokePresentedClick(tool, ctx())) as {
       text: string;
     };
-    assert.match(result.text, /computer\.wait ok/);
+    assert.match(result.text, /computer\.left_click ok/);
     await new Promise((resolve) => setImmediate(resolve));
   });
 
@@ -686,7 +812,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
     const events: string[] = [];
     const ready = new Map<string, () => void>();
     const finished = new Map<string, () => void>();
-    const backend: CuDispatchBackend = {
+    const backend: CuDispatchBackend = withObservation({
       ...preparationBackend,
       async preflight() {
         return { accessibility: true, screenRecording: true };
@@ -695,7 +821,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
         events.push(`dispatch:${context.sessionId}`);
         return { outcome: { ok: true, tier: 'ax', verified: true } };
       },
-    };
+    });
     const [tool] = buildComputerUseTools({
       backend,
       overlay: {
@@ -714,12 +840,9 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       presentationReadyTimeoutMs: 10_000,
       presentationFinishedTimeoutMs: 10_000,
     });
-    const first = tool.impl(
-      { action: 'wait' } as never,
-      ctx(undefined, { sessionId: 's1', toolCallId: 'a1' }),
-    );
-    const second = tool.impl(
-      { action: 'wait' } as never,
+    const first = invokePresentedClick(tool, ctx(undefined, { sessionId: 's1', toolCallId: 'a1' }));
+    const second = invokePresentedClick(
+      tool,
       ctx(undefined, { sessionId: 's2', toolCallId: 'a2' }),
     );
     while (!ready.has('s1')) {
@@ -753,7 +876,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
     const dispatchGate = new Promise<void>((resolve) => {
       releaseDispatch = resolve;
     });
-    const backend: CuDispatchBackend = {
+    const backend: CuDispatchBackend = withObservation({
       ...preparationBackend,
       async preflight() {
         return { accessibility: true, screenRecording: true };
@@ -765,7 +888,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
         }
         return { outcome: { ok: true, tier: 'ax', verified: true } };
       },
-    };
+    });
     const tools = buildComputerUseTools({
       backend,
       overlay: {
@@ -779,14 +902,11 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       presentationReadyTimeoutMs: 10_000,
     });
     const [tool] = tools;
-    const first = tool.impl(
-      { action: 'wait' } as never,
-      ctx(undefined, { sessionId: 's1', toolCallId: 'a1' }),
-    );
+    const first = invokePresentedClick(tool, ctx(undefined, { sessionId: 's1', toolCallId: 'a1' }));
     releaseFirst();
     await dispatchStarted;
-    const second = tool.impl(
-      { action: 'wait' } as never,
+    const second = invokePresentedClick(
+      tool,
       ctx(undefined, { sessionId: 's2', toolCallId: 'a2' }),
     );
     await Promise.resolve();
@@ -1935,7 +2055,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
   });
 
   test('S12: re-checks TCC and fails closed when Accessibility is not granted', async () => {
-    const r = await callComputer(fakeBackend({ accessibility: false }), { action: 'wait' });
+    const r = await callComputer(fakeBackend({ accessibility: false }), { action: 'list_apps' });
     assert.match(r.text, /permission_missing/);
     assert.match(r.text, /Accessibility/);
   });
@@ -1953,8 +2073,8 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
     };
     const [tool] = buildComputerUseTools({ backend });
 
-    const first = (await tool.impl({ action: 'wait' } as never, ctx())) as { text: string };
-    const second = (await tool.impl({ action: 'wait' } as never, ctx())) as { text: string };
+    const first = (await tool.impl({ action: 'list_apps' } as never, ctx())) as { text: string };
+    const second = (await tool.impl({ action: 'list_apps' } as never, ctx())) as { text: string };
 
     assert.match(first.text, /permission_missing/);
     assert.match(second.text, /permission_missing/);
@@ -1994,12 +2114,23 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
         events.push(`run:${action.type}`);
         return { outcome: { ok: true, tier: 'ax', verified: true } };
       },
+      async listApps() {
+        events.push('run:list_apps');
+        return [];
+      },
     };
     const [tool] = buildComputerUseTools({ backend });
-    const first = tool.impl({ action: 'wait' } as never, { ...ctx(), toolCallId: 'call-wait-1' });
-    const second = tool.impl({ action: 'wait' } as never, { ...ctx(), toolCallId: 'call-wait-2' });
-    await Promise.resolve();
-    await Promise.resolve();
+    const first = tool.impl({ action: 'list_apps' } as never, {
+      ...ctx(),
+      toolCallId: 'call-list-1',
+    });
+    const second = tool.impl({ action: 'list_apps' } as never, {
+      ...ctx(),
+      toolCallId: 'call-list-2',
+    });
+    while (events.length === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
     assert.deepEqual(events, ['preflight:1:start']);
 
     releaseFirstPreflight();
@@ -2007,10 +2138,10 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
     assert.deepEqual(events, [
       'preflight:1:start',
       'preflight:1:end',
-      'run:wait',
+      'run:list_apps',
       'preflight:2:start',
       'preflight:2:end',
-      'run:wait',
+      'run:list_apps',
     ]);
   });
 
@@ -2033,19 +2164,23 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
         events.push(`run:${context.sessionId}:${action.type}`);
         return { outcome: { ok: true, tier: 'ax', verified: true } };
       },
+      async listApps() {
+        events.push('run:list_apps');
+        return [];
+      },
     };
     const [tool] = buildComputerUseTools({ backend });
     const first = tool.impl(
-      { action: 'wait' } as never,
+      { action: 'list_apps' } as never,
       ctx(undefined, { sessionId: 's1', toolCallId: 'call-s1' }),
     );
     const second = tool.impl(
-      { action: 'wait' } as never,
+      { action: 'list_apps' } as never,
       ctx(undefined, { sessionId: 's2', toolCallId: 'call-s2' }),
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.ok(events.includes('preflight:s2:end'), `events=${events.join(',')}`);
-    assert.ok(events.includes('run:s2:wait'), `events=${events.join(',')}`);
+    assert.ok(events.includes('run:list_apps'), `events=${events.join(',')}`);
 
     releaseFirstPreflight();
     await Promise.all([first, second]);
@@ -2495,7 +2630,6 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       { action: 'list_apps' },
       { action: 'screenshot', app: 'Fixture' },
       { action: 'cursor_position' },
-      { action: 'wait', duration: 0.001 },
     ] as const) {
       let release!: () => void;
       let started!: () => void;
@@ -2543,7 +2677,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
   });
 
   test('clearSession fences failed host-reading results that complete after stop', async () => {
-    for (const action of ['cursor_position', 'wait'] as const) {
+    for (const action of ['cursor_position'] as const) {
       let release!: () => void;
       let started!: () => void;
       const gate = new Promise<void>((resolve) => {
@@ -2566,10 +2700,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       };
       const tools = buildComputerUseTools({ backend });
       const [tool] = tools;
-      const pending = tool.impl(
-        action === 'wait' ? ({ action, duration: 0.001 } as never) : ({ action } as never),
-        ctx(),
-      );
+      const pending = tool.impl({ action } as never, ctx());
       await entered;
       tools.clearSession('s1');
       release();
@@ -2581,7 +2712,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
   });
 
   test('ordinary failed host reads preserve their typed backend error', async () => {
-    for (const action of ['cursor_position', 'wait'] as const) {
+    for (const action of ['cursor_position'] as const) {
       const backend = fakeBackend({
         result: {
           outcome: {
@@ -2592,10 +2723,10 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
         },
       });
       const [tool] = buildComputerUseTools({ backend });
-      const result = (await tool.impl(
-        action === 'wait' ? ({ action, duration: 0.001 } as never) : ({ action } as never),
-        ctx(),
-      )) as { text: string; error?: string };
+      const result = (await tool.impl({ action } as never, ctx())) as {
+        text: string;
+        error?: string;
+      };
 
       assert.equal(result.error, 'service_unavailable', action);
       assert.match(result.text, /service_unavailable/, action);
@@ -2681,20 +2812,20 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
         },
       },
     });
-    const r = await callComputer(backend, { action: 'wait' });
+    const r = await callBoundComputer(backend);
     assert.match(r.text, /failed: capture_failed/);
     assert.doesNotMatch(r.text, /AXPress err -25202/);
   });
 
   test('an unverified dispatch tells the model to re-screenshot (no silent success)', async () => {
     const backend = fakeBackend({ result: { outcome: { ok: true, tier: 'ax', verified: false } } });
-    const r = await callComputer(backend, { action: 'wait' });
+    const r = await callBoundComputer(backend);
     assert.match(r.text, /verified=false/);
     assert.match(r.text, /re-screenshot/);
   });
 
   test('a confirmed effect tells the model not to repeat the action', async () => {
-    const r = await callComputer(
+    const r = await callBoundComputer(
       fakeBackend({
         result: {
           outcome: {
@@ -2705,9 +2836,8 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
           },
         },
       }),
-      { action: 'wait' },
     );
-    assert.match(r.text, /effect confirmed/);
+    assert.match(r.text, /effect=confirmed/);
     assert.match(r.text, /do not repeat/);
     assert.doesNotMatch(r.text, /re-screenshot/);
   });
@@ -2727,7 +2857,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
         },
       },
     });
-    const r = await callComputer(backend, { action: 'wait' });
+    const r = await callBoundComputer(backend);
     assert.match(r.text, /path=cgevent/);
     assert.match(r.text, /effect=unverifiable/);
     assert.doesNotMatch(r.text, /Secret Draft/);

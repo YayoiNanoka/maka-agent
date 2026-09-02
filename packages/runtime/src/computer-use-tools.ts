@@ -774,6 +774,7 @@ export function buildComputerUseTools(deps: {
   const presentationFinishedTimeoutMs =
     deps.presentationFinishedTimeoutMs ?? DEFAULT_PRESENTATION_FINISHED_TIMEOUT_MS;
   const invocationQueues = new Map<string, Promise<void>>();
+  const durationWaitControllers = new Map<string, Set<AbortController>>();
   const presentationWaiters = new Map<string, Set<() => void>>();
   const presentationQueueWaiters = new Map<string, Set<() => void>>();
   const presentationGenerations = new Map<string, number>();
@@ -801,7 +802,7 @@ export function buildComputerUseTools(deps: {
         readonly binding: PreparedComputerUseObservationBinding;
       }
     | { readonly kind: 'app_catalog' }
-    | { readonly kind: 'targetless' }
+    | { readonly kind: 'targetless'; readonly preparedSignal: AbortSignal }
     | { readonly kind: 'unresolved' };
   const preparedBindingKey = Symbol('preparedComputerUseBinding');
   type PreparedExecutionArgs = ComputerParams & {
@@ -849,6 +850,24 @@ export function buildComputerUseTools(deps: {
     return () => {
       turns.delete(turnId);
       if (turns.size === 0) pendingInvocationTurns.delete(sessionId);
+    };
+  }
+
+  function registerDurationWait(sessionId: string): {
+    readonly controller: AbortController;
+    release(): void;
+  } {
+    const controller = new AbortController();
+    const controllers = durationWaitControllers.get(sessionId) ?? new Set<AbortController>();
+    controllers.add(controller);
+    durationWaitControllers.set(sessionId, controllers);
+    return {
+      controller,
+      release: () => {
+        if (durationWaitControllers.get(sessionId) !== controllers) return;
+        controllers.delete(controller);
+        if (controllers.size === 0) durationWaitControllers.delete(sessionId);
+      },
     };
   }
 
@@ -1490,6 +1509,53 @@ export function buildComputerUseTools(deps: {
     }
   }
 
+  async function withAbortableInvocationQueue<T>(
+    sessionId: string,
+    signal: AbortSignal,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return await raceWithAbort(withInvocationQueue(sessionId, signal, operation), signal);
+  }
+
+  async function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+    signal.throwIfAborted();
+    return await new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const finish = (outcome: 'resolve' | 'reject', value: T | unknown) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        if (outcome === 'resolve') resolve(value as T);
+        else reject(value);
+      };
+      const onAbort = () => finish('reject', signal.reason ?? new Error('aborted'));
+      signal.addEventListener('abort', onAbort, { once: true });
+      promise.then(
+        (value) => finish('resolve', value),
+        (error) => finish('reject', error),
+      );
+    });
+  }
+
+  async function waitForDuration(milliseconds: number, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    if (milliseconds === 0) return;
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+        if (error !== undefined) reject(error);
+        else resolve();
+      };
+      const timer = setTimeout(() => finish(), milliseconds);
+      const onAbort = () => finish(signal.reason ?? new Error('aborted'));
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
   function presentationScreenPoint(boundAction: CuaBoundAction | undefined): CuPoint | undefined {
     // An element action is aimed at an element, not at a coordinate, so it
     // carries the point directly. Only a coordinate action has a screenshot
@@ -1815,12 +1881,36 @@ export function buildComputerUseTools(deps: {
       // of the record, not a value, and every path below would have typed it.
       const replayed = withheldValueReplayed(input);
       if (replayed) return replayed;
+      const durationOnlyWait =
+        input.action === 'wait' &&
+        input.wait_for_text === undefined &&
+        input.wait_for_text_gone === undefined;
+      const durationWait = durationOnlyWait ? registerDurationWait(sessionId) : undefined;
+      const invocationSignal = durationWait
+        ? AbortSignal.any([
+            abortSignal,
+            durationWait.controller.signal,
+            ...(preparedBinding?.kind === 'targetless' ? [preparedBinding.preparedSignal] : []),
+          ])
+        : abortSignal;
       const invocationGeneration = presentationGenerations.get(sessionId) ?? 0;
       const releasePendingInvocation = trackPendingInvocation(sessionId, turnId);
       try {
-        return await withInvocationQueue<ComputerToolResult>(sessionId, abortSignal, async () => {
+        const runQueued = durationOnlyWait ? withAbortableInvocationQueue : withInvocationQueue;
+        return await runQueued(sessionId, invocationSignal, async () => {
           if ((presentationGenerations.get(sessionId) ?? 0) !== invocationGeneration) {
             return sessionFailure('user_stopped');
+          }
+          if (durationOnlyWait) {
+            const durationMs = Math.round((input.duration ?? 0) * 1000);
+            await waitForDuration(durationMs, invocationSignal);
+            if ((presentationGenerations.get(sessionId) ?? 0) !== invocationGeneration) {
+              return sessionFailure('user_stopped');
+            }
+            invocationSignal.throwIfAborted();
+            return {
+              text: `maka_computer.wait ok — waited ${(durationMs / 1000).toFixed(1)}s`,
+            };
           }
           if (preparedBinding?.kind === 'observation') {
             const current = observations.get(sessionId);
@@ -3080,7 +3170,13 @@ export function buildComputerUseTools(deps: {
                 };
           }
         });
+      } catch (error) {
+        if (durationWait?.controller.signal.aborted) {
+          return sessionFailure('user_stopped');
+        }
+        throw error;
       } finally {
+        durationWait?.release();
         releasePendingInvocation();
       }
     },
@@ -3131,7 +3227,7 @@ export function buildComputerUseTools(deps: {
       projectionInput.wait_for_text === undefined &&
       projectionInput.wait_for_text_gone === undefined
     ) {
-      internalBinding = Object.freeze({ kind: 'targetless' });
+      internalBinding = Object.freeze({ kind: 'targetless', preparedSignal: context.signal });
     } else {
       await deps.backend.ensureReady(context.signal);
       context.signal.throwIfAborted();
@@ -3348,6 +3444,10 @@ export function buildComputerUseTools(deps: {
   }
   tools.clearSession = (sessionId: string) => {
     presentationGenerations.set(sessionId, (presentationGenerations.get(sessionId) ?? 0) + 1);
+    for (const controller of durationWaitControllers.get(sessionId) ?? []) {
+      controller.abort(new Error('Computer Use Session stopped'));
+    }
+    durationWaitControllers.delete(sessionId);
     for (const wake of presentationQueueWaiters.get(sessionId) ?? []) wake();
     for (const wake of presentationWaiters.get(sessionId) ?? []) wake();
     const current = sessionStates.get(sessionId);
