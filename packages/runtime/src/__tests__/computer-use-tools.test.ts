@@ -33,6 +33,37 @@ import {
 } from '../computer-use-tools.js';
 import type { MakaToolContext } from '../tool-runtime.js';
 
+const preparationBackend = {
+  async ensureReady() {},
+  async resolveTarget(input: Parameters<CuDispatchBackend['resolveTarget']>[0]) {
+    if (input.kind === 'application' && input.intent === 'launch') {
+      return {
+        kind: 'resolved' as const,
+        target: {
+          kind: 'installed' as const,
+          identity: {
+            kind: 'bundle_id' as const,
+            bundleId: input.app.includes('.') ? input.app : 'com.example.fixture',
+          },
+        },
+      };
+    }
+    const app = input.kind === 'application' ? input.app : undefined;
+    const windowId = input.kind === 'window' ? input.windowId : 7;
+    return {
+      kind: 'resolved' as const,
+      target: {
+        kind: 'running' as const,
+        identity:
+          app?.includes('.') === true
+            ? { kind: 'bundle_id' as const, bundleId: app }
+            : { kind: 'process' as const, appId: 'pid:42' as const },
+        selector: { pid: 42, processGeneration: 'pst:1', windowId },
+      },
+    };
+  },
+};
+
 /**
  * Pull the observation id out of the model-facing text.
  *
@@ -70,6 +101,7 @@ function fakeBackend(
     last?: CuAction;
     lastContext?: CuRunContext;
   } = {
+    ...preparationBackend,
     async preflight() {
       return {
         accessibility: over.accessibility ?? true,
@@ -100,6 +132,14 @@ function observation(over: Partial<CuObservation> = {}): CuObservation {
     appId: 'Fixture',
     pid: 42,
     windowId: 7,
+    target: {
+      kind: 'running',
+      identity:
+        over.bundleId !== undefined
+          ? { kind: 'bundle_id', bundleId: over.bundleId }
+          : { kind: 'process', appId: 'pid:42' },
+      selector: { pid: 42, processGeneration: 'pst:1', windowId: over.windowId ?? 7 },
+    },
     contentFingerprint: 'ax-structure-1',
     elements: [
       {
@@ -218,6 +258,80 @@ test('computer params reject accessors before policy or execution', () => {
   assert.throws(() => snapshotComputerParams(input as never), /must be a plain data property/);
 });
 
+test('Computer Use preparation resolves and freezes the native application target', async () => {
+  const requests: unknown[] = [];
+  const backend = fakeBackend();
+  backend.resolveTarget = async (request) => {
+    requests.push(request);
+    return {
+      kind: 'resolved',
+      target: {
+        kind: 'running',
+        identity: { kind: 'bundle_id', bundleId: 'com.apple.TextEdit' },
+        selector: { pid: 42, processGeneration: 'pst:7', windowId: 9 },
+      },
+    };
+  };
+  const tools = buildComputerUseTools({ backend });
+  const prepared = await tools.prepareInvocation(
+    { action: 'observe', app: 'TextEdit' },
+    { sessionId: 's1', turnId: 't1', toolCallId: 'prepare', signal: ctx().abortSignal },
+  );
+
+  assert.deepEqual(requests, [{ kind: 'application', app: 'TextEdit', intent: 'operate' }]);
+  assert.deepEqual(prepared.admission, {
+    kind: 'macos_bundle_id',
+    bundleId: 'com.apple.TextEdit',
+  });
+  assert.deepEqual(prepared.projectionInput, {
+    action: 'observe',
+    app: 'com.apple.TextEdit',
+    window_id: 9,
+  });
+  assert.deepEqual(prepared.policyBinding.target, {
+    kind: 'application',
+    resolved: {
+      kind: 'running',
+      identity: { kind: 'bundle_id', bundleId: 'com.apple.TextEdit' },
+      selector: { pid: 42, processGeneration: 'pst:7', windowId: 9 },
+    },
+  });
+});
+
+test('targetless wait needs no native startup and a prepared invocation is single-use', async () => {
+  let readyCount = 0;
+  const backend = fakeBackend();
+  backend.ensureReady = async () => {
+    readyCount += 1;
+  };
+  const tools = buildComputerUseTools({ backend });
+  const prepared = await tools.prepareInvocation(
+    { action: 'wait' },
+    { sessionId: 's1', turnId: 't1', toolCallId: 'prepare', signal: ctx().abortSignal },
+  );
+
+  assert.deepEqual(prepared.admission, { kind: 'duration_wait' });
+  assert.equal(readyCount, 0);
+  await prepared.execute(ctx());
+  await assert.rejects(() => prepared.execute(ctx()), /already consumed/);
+});
+
+test('listing applications prepares an app-catalog admission', async () => {
+  let readyCount = 0;
+  const backend = fakeBackend();
+  backend.ensureReady = async () => {
+    readyCount += 1;
+  };
+  const tools = buildComputerUseTools({ backend });
+  const prepared = await tools.prepareInvocation(
+    { action: 'list_apps' },
+    { sessionId: 's1', turnId: 't1', toolCallId: 'prepare', signal: ctx().abortSignal },
+  );
+
+  assert.deepEqual(prepared.admission, { kind: 'app_catalog' });
+  assert.equal(readyCount, 1);
+});
+
 describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
   test('waits for presentation readiness before dispatch without waiting for finish', async () => {
     const events: string[] = [];
@@ -227,6 +341,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
     });
     const [tool] = buildComputerUseTools({
       backend: {
+        ...preparationBackend,
         async preflight() {
           return { accessibility: true, screenRecording: true };
         },
@@ -264,6 +379,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
     const events: string[] = [];
     const [tool] = buildComputerUseTools({
       backend: {
+        ...preparationBackend,
         async preflight() {
           return { accessibility: true, screenRecording: true };
         },
@@ -343,6 +459,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
     let dispatchCount = 0;
     const [tool] = buildComputerUseTools({
       backend: {
+        ...preparationBackend,
         async preflight() {
           return { accessibility: true, screenRecording: true };
         },
@@ -460,6 +577,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
     });
     const [tool] = buildComputerUseTools({
       backend: {
+        ...preparationBackend,
         async preflight() {
           return { accessibility: true, screenRecording: true };
         },
@@ -569,6 +687,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
     const ready = new Map<string, () => void>();
     const finished = new Map<string, () => void>();
     const backend: CuDispatchBackend = {
+      ...preparationBackend,
       async preflight() {
         return { accessibility: true, screenRecording: true };
       },
@@ -635,6 +754,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       releaseDispatch = resolve;
     });
     const backend: CuDispatchBackend = {
+      ...preparationBackend,
       async preflight() {
         return { accessibility: true, screenRecording: true };
       },
@@ -684,7 +804,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
     const backend = fakeBackend() as CuDispatchBackend & {
       launchApp: NonNullable<CuDispatchBackend['launchApp']>;
     };
-    const seen: Array<{ app: string }> = [];
+    const seen: unknown[] = [];
     backend.launchApp = async (input) => {
       seen.push(input);
       return {
@@ -702,7 +822,15 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       ctx(),
     )) as { text: string; modelText?: string };
 
-    assert.deepEqual(seen, [{ app: 'com.example.fixture' }]);
+    assert.deepEqual(seen, [
+      {
+        app: 'com.example.fixture',
+        target: {
+          kind: 'installed',
+          identity: { kind: 'bundle_id', bundleId: 'com.example.fixture' },
+        },
+      },
+    ]);
     assert.deepEqual(JSON.parse(launched.text), { pid: 5150, window_count: 1 });
     // Window titles are model-facing only, the same split list_apps uses.
     assert.doesNotMatch(launched.text, /Fixture Main/);
@@ -843,6 +971,11 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       {
         app: 'Fixture',
         windowId: 7,
+        target: {
+          kind: 'running',
+          identity: { kind: 'process', appId: 'pid:42' },
+          selector: { pid: 42, processGeneration: 'pst:1', windowId: 7 },
+        },
         includeScreenshot: true,
       },
     ]);
@@ -1848,6 +1981,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
     });
     let preflightCount = 0;
     const backend: CuDispatchBackend = {
+      ...preparationBackend,
       async preflight() {
         preflightCount += 1;
         const call = preflightCount;
@@ -1887,6 +2021,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       releaseFirstPreflight = resolve;
     });
     const backend: CuDispatchBackend = {
+      ...preparationBackend,
       async preflight(_signal) {
         const session = events.includes('preflight:s1:start') ? 's2' : 's1';
         events.push(`preflight:${session}:start`);
@@ -1908,8 +2043,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       { action: 'wait' } as never,
       ctx(undefined, { sessionId: 's2', toolCallId: 'call-s2' }),
     );
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 20));
     assert.ok(events.includes('preflight:s2:end'), `events=${events.join(',')}`);
     assert.ok(events.includes('run:s2:wait'), `events=${events.join(',')}`);
 
@@ -2687,9 +2821,28 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
       { appId: 'com.apple.calculator', pid: 1, name: '计算器', windowCount: 1 },
       { appId: 'com.apple.TextEdit', pid: 2, name: '文本编辑', windowCount: 1 },
     ];
+    let resolvedBundleId = 'com.apple.calculator';
+    backend.resolveTarget = async (request) => {
+      if (request.kind === 'application') {
+        resolvedBundleId =
+          request.app === 'com.example.unheard' ? request.app : 'com.apple.calculator';
+      }
+      return {
+        kind: 'resolved',
+        target: {
+          kind: 'running',
+          identity: { kind: 'bundle_id', bundleId: resolvedBundleId },
+          selector: {
+            pid: 42,
+            processGeneration: 'pst:1',
+            windowId: request.kind === 'window' ? request.windowId : 7,
+          },
+        },
+      };
+    };
     backend.observeApp = async (request) => {
       asked.push(request.app);
-      return observation();
+      return observation({ bundleId: request.app });
     };
     const [tool] = buildComputerUseTools({ backend });
 
@@ -2730,6 +2883,7 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
         windowCount: 2,
       },
     ];
+    backend.resolveTarget = async () => ({ kind: 'ambiguous' });
     backend.observeApp = async () => {
       observed += 1;
       return observation();
@@ -2780,6 +2934,18 @@ describe('buildComputerUseTools — the `maka_computer` MakaTool', () => {
     backend.observeApp = async () => {
       throw new Error('timeout: the operation did not finish in time');
     };
+    backend.resolveTarget = async (request) => ({
+      kind: 'resolved',
+      target: {
+        kind: 'running',
+        identity: { kind: 'bundle_id', bundleId: 'com.apple.TextEdit' },
+        selector: {
+          pid: 42,
+          processGeneration: 'pst:1',
+          windowId: request.kind === 'window' ? request.windowId : 7,
+        },
+      },
+    });
     backend.listApps = async () => [
       { appId: 'com.apple.TextEdit', pid: 1, name: 'TextEdit', windowCount: 1 },
     ];

@@ -53,6 +53,7 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveMakaCuSourceBranch } from './prepare-provenance.mjs';
+import { buildMakaCuManifestEntry } from './prepare-manifest.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const manifestPath = join(repoRoot, 'apps', 'desktop', 'bundled-tools.json');
@@ -224,23 +225,15 @@ const stapled = isStapled(destination);
 // Every condition, or none of it. Distribution is the one place a partial
 // answer is worse than a refusal: an ad-hoc helper inside a notarized app is
 // not a smaller problem than an unsigned one, it fails the same way.
-const distributionReady =
-  signing.signature === 'developer-id' && signing.hardenedRuntime === true && stapled;
-
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-manifest.makaCu = {
-  repo: 'maka-agent/maka-cu',
+manifest.makaCu = buildMakaCuManifestEntry({
   branch: sourceBranch(source),
   commit: git(source, ['rev-parse', 'HEAD']),
-  expectedProtocolVersion: 'maka.cu/2',
-  binaryName: 'maka-cu',
   binarySizeBytes: statSync(destination).size,
   binarySha256,
-  buildProvenance: 'local-source-build',
-  ...signing,
-  notarization: stapled ? 'stapled' : 'missing',
-  distributionReady,
-};
+  signing,
+  stapled,
+});
 writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
 process.stderr.write(
@@ -250,8 +243,8 @@ process.stderr.write(
     `computer-use prepare: signature ${signing.signature}` +
     `${signing.hardenedRuntime ? ' + hardened runtime' : ''}` +
     `, notarization ${manifest.makaCu.notarization}` +
-    `, distributionReady ${distributionReady}\n` +
-    (distributionReady
+    `, distributionReady ${manifest.makaCu.distributionReady}\n` +
+    (manifest.makaCu.distributionReady
       ? ''
       : 'computer-use prepare: development only — a packaged build will refuse this entry.\n') +
     (identity
