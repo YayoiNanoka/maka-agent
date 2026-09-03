@@ -96,6 +96,7 @@ const SESSION_ERROR = process.env.MAKACU_MOCK_SESSION_ERROR || '';
 const MALFORMED = process.env.MAKACU_MOCK_MALFORMED || '';
 const LAUNCH_ERROR = process.env.MAKACU_MOCK_LAUNCH_ERROR || '';
 const HANG_OBSERVE = process.env.MAKACU_MOCK_HANG_OBSERVE === '1';
+const DELAY_OBSERVE_MS = Number(process.env.MAKACU_MOCK_DELAY_OBSERVE_MS || '0');
 const TRUNCATED = process.env.MAKACU_MOCK_TRUNCATED === '1';
 let DIFFERENCE_PRESENTATION = '';
 const LAUNCH_TOOK_FOREGROUND = process.env.MAKACU_MOCK_LAUNCH_FOREGROUND === '1';
@@ -326,6 +327,10 @@ function handle(msg) {
       // Alive, and simply slower than the host's deadline — the shape a real
       // executor takes while walking a file dialog's accessibility tree.
       if (HANG_OBSERVE) return;
+      if (DELAY_OBSERVE_MS > 0) {
+        setTimeout(function () { ok(id, { snapshot: snapshot(params.includeImage !== false) }); }, DELAY_OBSERVE_MS);
+        return;
+      }
       ok(id, { snapshot: snapshot(params.includeImage !== false) });
       return;
     case 'screen.capture':
@@ -425,6 +430,7 @@ function makeBackend(
     malformed?: string;
     launchError?: string;
     hangObserve?: boolean;
+    delayObserveMs?: number;
     truncated?: boolean;
     differencePresentation?: 'no-change' | 'difference' | 'full';
     timeoutMs?: number;
@@ -462,6 +468,7 @@ function makeBackend(
   process.env.MAKACU_MOCK_MALFORMED = opts.malformed ?? '';
   process.env.MAKACU_MOCK_LAUNCH_ERROR = opts.launchError ?? '';
   process.env.MAKACU_MOCK_HANG_OBSERVE = opts.hangObserve ? '1' : '';
+  process.env.MAKACU_MOCK_DELAY_OBSERVE_MS = String(opts.delayObserveMs ?? 0);
   process.env.MAKACU_MOCK_TRUNCATED = opts.truncated ? '1' : '';
   process.env.MAKACU_MOCK_LAUNCH_FOREGROUND = opts.launchTookForeground ? '1' : '';
   process.env.MAKACU_MOCK_WINDOW_ORIGIN_Y = String(opts.windowOriginY ?? 25);
@@ -1275,6 +1282,49 @@ describe('maka-cu backend', () => {
         signal(),
       ),
       { kind: 'missing' },
+    );
+  });
+
+  it('lets a queued target resolution observe its own cancellation', async () => {
+    const { backend, logPath } = makeBackend({ delayObserveMs: 250, timeoutMs: 1000 });
+    const target = await resolveFixtureTarget(backend);
+    const active = backend.observeApp!(
+      { app: FIXTURE_APP_ID, target, includeScreenshot: false },
+      signal(),
+      RUN_CONTEXT,
+    );
+    await waitForRecord(
+      logPath,
+      (record) => record.kind === 'recv' && record.method === 'observe',
+      'the active observation never reached the executor',
+    );
+
+    const controller = new AbortController();
+    const queued = backend.resolveTarget(
+      { kind: 'application', app: FIXTURE_APP_ID, intent: 'operate' },
+      controller.signal,
+    );
+    controller.abort();
+
+    try {
+      await Promise.race([
+        assert.rejects(queued, /aborted/),
+        delay(100).then(() => assert.fail('queued target resolution ignored caller cancellation')),
+      ]);
+      assert.equal(received(await readRecords(logPath), 'target.resolve').length, 1);
+    } finally {
+      await Promise.allSettled([active, queued]);
+    }
+
+    assert.equal(
+      (
+        await backend.resolveTarget(
+          { kind: 'application', app: FIXTURE_APP_ID, intent: 'operate' },
+          signal(),
+        )
+      ).kind,
+      'resolved',
+      'the cancelled FIFO slot must release when its predecessor finishes',
     );
   });
 

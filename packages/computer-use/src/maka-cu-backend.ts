@@ -96,6 +96,7 @@ import {
   type MakaCuReleaseEvent,
   type MakaCuServiceSnapshot,
 } from './maka-cu-service.js';
+import { abortPromise } from './stdio-json-rpc.js';
 
 /**
  * `CuAction.scrollAmount` has no declared unit at the tool boundary ("Amount for
@@ -919,7 +920,21 @@ export function createMakaCuBackend(opts: MakaCuBackendOptions): MakaCuBackend {
     });
     const current = previous.then(() => gate);
     operationQueues.set(queueKey, current);
-    await previous;
+
+    const releaseQueuePosition = () => {
+      release();
+      if (operationQueues.get(queueKey) === current) operationQueues.delete(queueKey);
+    };
+
+    try {
+      await Promise.race([previous, abortPromise(signal)]);
+    } catch (error) {
+      // Keep this cancelled caller's FIFO slot until its predecessor finishes,
+      // otherwise a later request could overtake the operation still in flight.
+      void previous.then(releaseQueuePosition, releaseQueuePosition);
+      throw error;
+    }
+
     try {
       if (disposed) throw new Error('maka-cu backend disposed');
       if (signal.aborted) throw new Error('aborted');
@@ -932,8 +947,7 @@ export function createMakaCuBackend(opts: MakaCuBackendOptions): MakaCuBackend {
       if (!sessionId) return await operation();
       return await service.withSession(sessionId, operation);
     } finally {
-      release();
-      if (operationQueues.get(queueKey) === current) operationQueues.delete(queueKey);
+      releaseQueuePosition();
     }
   }
 
