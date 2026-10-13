@@ -39,12 +39,14 @@ import {
   AlertTriangle,
   Archive,
   FolderOpen,
+  Globe,
   Pencil,
   Pin,
   PinOff,
   Plug,
   Plus,
   SquarePen,
+  SquareTerminal,
   Unarchive,
 } from './icons.js';
 import { RelativeTime } from './relative-time.js';
@@ -168,6 +170,11 @@ export interface SessionHistoryGroup {
   label: string;
   sessions: SessionSummary[];
   project?: ProjectRecord;
+  /** Execution location for groups scoped to a Runtime Host. */
+  host?: {
+    kind: 'local' | 'remote' | 'environment';
+    name: string;
+  };
 }
 
 /**
@@ -400,6 +407,7 @@ export function SessionHistoryList() {
             label: g.label,
             sessions: g.sessions,
             project: g.project,
+            host: g.host,
           }))
         : groupSessionsForHistory(rail.sessions, locale).map((g) => ({
             key: g.id,
@@ -433,6 +441,7 @@ function SessionListGroups(props: {
     label: string;
     sessions: SessionSummary[];
     project?: ProjectRecord;
+    host?: SessionHistoryGroup['host'];
   }>;
 }) {
   const rail = useSessionRailData();
@@ -596,6 +605,7 @@ function SessionListGroups(props: {
           groupKey={group.key}
           label={group.label}
           project={project}
+          host={group.host}
           sessions={sessions}
           streamingSessionIds={rail.streamingSessionIds}
           projectActions={actions}
@@ -707,6 +717,7 @@ function ProjectNavRow(props: {
   groupKey: string;
   label: string;
   project?: ProjectRecord;
+  host?: SessionHistoryGroup['host'];
   sessions: SessionSummary[];
   streamingSessionIds?: ReadonlySet<string>;
   projectActions?: ProjectRowActions;
@@ -727,6 +738,13 @@ function ProjectNavRow(props: {
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const hoverDescriptionId = useId();
+  const copy = getSessionHoverCardCopy(useUiLocale());
+  const executionLocation = props.host
+    ? copy.executionLocation[props.host.kind](props.host.name)
+    : undefined;
+  const icon = props.host?.kind === 'remote'
+    ? Globe
+    : props.host?.kind === 'environment' ? SquareTerminal : FolderOpen;
   // Count only sessions actually under this row; pinned tasks live elsewhere.
   const hoverSummary = useMemo(
     () =>
@@ -750,6 +768,7 @@ function ProjectNavRow(props: {
       data-project-id={props.groupKey}
       data-maka-session-drop-target={props.onDropSession ? 'true' : undefined}
       className="maka-project-row"
+      data-host-kind={props.host?.kind}
       data-drop-target={isDropTarget ? 'true' : undefined}
       onDragOver={(event) => {
         // A drag only lands where the shell says this Session may go, so a row
@@ -776,7 +795,7 @@ function ProjectNavRow(props: {
         key="navigation"
         label={props.label}
         aria-describedby={hoverDescriptionId}
-        icon={FolderOpen}
+        icon={icon}
         collapsible={hasSessions ? { defaultIsCollapsed: false } : undefined}
         endContent={hasMeta ? (
           <ProjectItemMeta
@@ -806,11 +825,14 @@ function ProjectNavRow(props: {
       <ProjectHoverCardDescription
         id={hoverDescriptionId}
         summary={hoverSummary}
-      />      <ProjectHoverCardLayer
+        executionLocation={executionLocation}
+      />
+      <ProjectHoverCardLayer
         containerRef={containerRef}
         label={props.label}
         project={props.project}
         summary={hoverSummary}
+        executionLocation={executionLocation}
       />
     </div>
   );
@@ -821,6 +843,7 @@ const ProjectHoverCardLayer = memo(function ProjectHoverCardLayer(props: {
   label: string;
   project?: ProjectRecord;
   summary: ProjectHoverCardSummary;
+  executionLocation?: string;
 }) {
   const locale = useUiLocale();
   const copy = getSessionHoverCardCopy(locale);
@@ -840,6 +863,7 @@ const ProjectHoverCardLayer = memo(function ProjectHoverCardLayer(props: {
     <ProjectHoverCardContent
       label={props.label}
       summary={props.summary}
+      executionLocation={props.executionLocation}
       locale={locale}
     />,
   );
@@ -1198,11 +1222,13 @@ function SessionHoverCardContent(props: {
 function ProjectHoverCardDescription(props: {
   id: string;
   summary: ProjectHoverCardSummary;
+  executionLocation?: string;
 }) {
   const locale = useUiLocale();
   const copy = getSessionHoverCardCopy(locale);
   const summary = props.summary;
   const description = [
+    props.executionLocation,
     summary.path,
     copy.taskCount(summary.taskCount),
     summary.runningCount > 0 ? copy.runningTaskCount(summary.runningCount) : undefined,
@@ -1227,6 +1253,7 @@ function ProjectHoverCardDescription(props: {
 function ProjectHoverCardContent(props: {
   label: string;
   summary: ProjectHoverCardSummary;
+  executionLocation?: string;
   locale: UiLocale;
 }) {
   const copy = getSessionHoverCardCopy(props.locale);
@@ -1235,6 +1262,9 @@ function ProjectHoverCardContent(props: {
   return (
     <span className="maka-sidebar-hover-card" data-kind="project">
       <span className="maka-sidebar-hover-card-title">{props.label}</span>
+      {props.executionLocation ? (
+        <span className="maka-sidebar-hover-card-location">{props.executionLocation}</span>
+      ) : null}
       {summary.path ? (
         <span className="maka-sidebar-hover-card-path" title={summary.path}>
           {summary.path}
