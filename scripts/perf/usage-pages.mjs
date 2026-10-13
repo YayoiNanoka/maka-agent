@@ -192,7 +192,12 @@ for (const [count, mixed, tied] of [
       { name: 'before', db: oldLease.database, read: (input) => oldStores.readUsageScreen(input) },
       { name: 'after', db: lease.database, read: (input) => stores.readUsageScreen(input) },
     ];
-    const query = { range: { from: 0, to: count }, search: '', status: 'all' };
+    const query = {
+      range: { from: 0, to: count },
+      search: '',
+      status: 'all',
+      heatmap: { dayStarts: [0], to: count },
+    };
     const screens = [];
     for (const version of versions) {
       const start = performance.now();

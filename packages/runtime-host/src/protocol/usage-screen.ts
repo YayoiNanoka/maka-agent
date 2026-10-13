@@ -18,12 +18,14 @@
  */
 
 import {
+  isUsageHeatmapRange,
   isUsageScreenSearch,
   isUsageTimestamp,
   type UsageScreenRequest,
   type UsageScreenResult,
   type UsageScreenQuery,
   type UsageScreenFailure,
+  type UsageHeatmapRange,
 } from '@maka/core/settings';
 import { requireExactRecord, requireRecord, requireShapedRecord, requireCount } from './codec.js';
 import { invalidProtocolFrame } from './errors.js';
@@ -53,18 +55,51 @@ function timestamp(value: unknown): number {
   return value;
 }
 function query(value: unknown): UsageScreenQuery {
-  const v = requireExactRecord(value, 'Usage screen query', ['range', 'search', 'status']);
+  const v = requireExactRecord(value, 'Usage screen query', [
+    'range',
+    'search',
+    'status',
+    'heatmap',
+  ]);
   const range = requireExactRecord(v.range, 'Usage range', ['from', 'to']);
   const from = timestamp(range.from);
   const to = timestamp(range.to);
   if (from > to || !['all', 'success', 'error', 'aborted'].includes(String(v.status)))
     return fail();
   if (!isUsageScreenSearch(v.search)) return fail();
+  const heatmap = requireExactRecord(v.heatmap, 'Usage heatmap range', ['dayStarts', 'to']);
+  if (!isUsageHeatmapRange(heatmap)) return fail();
   return {
     range: { from, to },
     search: v.search,
     status: v.status as UsageScreenQuery['status'],
+    heatmap: { dayStarts: [...heatmap.dayStarts], to: heatmap.to },
   };
+}
+
+function assertHeatmap(value: unknown, range: UsageHeatmapRange): void {
+  const heatmap = requireExactRecord(value, 'Usage heatmap', [
+    'days',
+    'through',
+    'hasIncompleteUsage',
+  ]);
+  if (
+    !Array.isArray(heatmap.days) ||
+    heatmap.days.length !== range.dayStarts.length ||
+    timestamp(heatmap.through) !== range.to ||
+    typeof heatmap.hasIncompleteUsage !== 'boolean'
+  )
+    return fail();
+  for (const [index, value] of heatmap.days.entries()) {
+    const day = requireExactRecord(value, 'Usage heatmap day', [
+      'start',
+      'tokens',
+      'successfulRequests',
+    ]);
+    if (timestamp(day.start) !== range.dayStarts[index]) return fail();
+    requireCount(day.tokens, 'Usage heatmap tokens');
+    requireCount(day.successfulRequests, 'Usage heatmap successful requests');
+  }
 }
 export function decodeUsageScreenRequest(value: unknown): UsageScreenRequest {
   const v = requireRecord(value, 'Usage screen request');
@@ -131,6 +166,10 @@ function measureResult(value: UsageScreenResult): number | UsageScreenFailure {
   ): UsageScreenFailure => ({ kind: 'screen_response_too_large', section });
   let collectionBytes = 0;
   if (value.kind === 'screen') {
+    const heatmapBytes = bytes(value.screen.heatmap);
+    if (value.screen.heatmap.days.length > 366 || heatmapBytes > USAGE_SCREEN_SECTION_MAX_BYTES)
+      return tooLarge('heatmap');
+    collectionBytes += heatmapBytes - 4;
     for (const [key, section, limit] of [
       ['byProvider', 'provider_breakdown', 100],
       ['byModel', 'model_breakdown', 100],
@@ -166,6 +205,7 @@ function measureResult(value: UsageScreenResult): number | UsageScreenFailure {
             byModel: [],
             byTool: [],
             pricing: [],
+            heatmap: null,
             logs: [],
           },
         }) +
@@ -189,6 +229,7 @@ export function decodeUsageScreenResult(value: unknown): UsageScreenResult {
         'model_breakdown',
         'tool_breakdown',
         'pricing',
+        'heatmap',
         'activity_page',
         'screen',
         'message',
@@ -210,6 +251,7 @@ export function decodeUsageScreenResult(value: unknown): UsageScreenResult {
           'query',
           'activityTotal',
           'summary',
+          'heatmap',
           'byProvider',
           'byModel',
           'byTool',
@@ -265,7 +307,8 @@ export function decodeUsageScreenResult(value: unknown): UsageScreenResult {
       return fail();
   }
   if (isScreen) {
-    query(p.query);
+    const screenQuery = query(p.query);
+    assertHeatmap(p.heatmap, screenQuery.heatmap);
     requireCount(p.activityTotal, 'Usage activity total');
     const summary = requireExactRecord(p.summary, 'Usage summary', [
       'totalRequests',
@@ -312,6 +355,7 @@ export function assertUsageScreenResult(
       JSON.stringify(output.screen.query) !== JSON.stringify(input.query)
     )
       return fail();
+    assertHeatmap(output.screen.heatmap, input.query.heatmap);
   } else if (output.kind !== 'revision_changed') {
     if (
       output.kind !== 'activity' ||

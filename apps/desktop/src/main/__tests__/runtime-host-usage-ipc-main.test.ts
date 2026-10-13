@@ -26,9 +26,10 @@ import type { IpcHandler } from '../ipc-reconnect-policy.js';
 import type { DesktopRuntimeHostClient } from '../runtime-host-client.js';
 import { registerRuntimeHostUsageIpc } from '../runtime-host-usage-ipc-main.js';
 
-const query: UsageScreenQuery = { range: { from: 0, to: 100 }, search: '', status: 'all' };
+const query: UsageScreenQuery = { heatmap: {dayStarts:[0],to:100}, range: { from: 0, to: 100 }, search: '', status: 'all' };
 function screen(): UsageScreen {
   return {
+    heatmap: {days: [{start:0,tokens:30,successfulRequests:1}], through:100, hasIncompleteUsage:false},
     activityTotal: 151,
     revision: 'revision',
     queryIdentity: 'query',
@@ -93,6 +94,7 @@ test('one screen call atomically supplies totals, complete groups, pricing, and 
   const stats = (await h.get('settings:usageStats')!(event, 'all', query)) as UsageStats;
   assert.deepEqual(calls, [{ kind: 'screen', query }]);
   assert.equal(stats.summary.totalRequests, 151);
+  assert.deepEqual(stats.heatmap, fixture.heatmap);
   assert.equal(stats.logs.length, 1, 'does not drain activity');
   assert.deepEqual(
     stats.byProvider,
@@ -113,6 +115,8 @@ test('initial All load fixes its time bound before dispatch', async () => {
   await h.get('settings:usageStats')!(event, 'all');
   assert.ok(sent?.kind === 'screen');
   assert.equal(sent.query.range.from, 0);
+  assert.ok(sent.query.heatmap.dayStarts.length >= 365);
+  assert.equal(sent.query.heatmap.to, sent.query.range.to);
   assert.ok(sent.query.range.to >= before && sent.query.range.to <= Date.now());
 });
 test('capacity failure is surfaced without retry, fallback, or partial reads', async () => {

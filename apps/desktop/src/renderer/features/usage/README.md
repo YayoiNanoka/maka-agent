@@ -111,3 +111,17 @@ original labels; revision changes disable continuation until Refresh. Capacity
 failures stay typed across IPC/preload and do not enter the generic error/retry
 path. Successful installation resets table pagination without remounting the
 search input. See [the implementation contract](../../../../../../docs/architecture/usage-screen-revision-consistency.md).
+
+## Annual activity
+
+The overview includes a rolling twelve-month activity chart, independent of the
+headline range and activity filters. Desktop supplies local midnight boundaries
+in the screen query, so remote Hosts use the user's calendar (including DST).
+Storage returns every day's Token total and successful model request count in the
+same read transaction as the rest of the screen. Weekly columns sum those days
+locally; switching granularity never loads activity pages or refetches. Daily
+colour intensity and weekly column height always represent Token totals. Hover
+and keyboard details show both Tokens and requests. The chart follows the active
+palette and retains the snapshot's own time labels on a failed refresh. Request
+counts include only successful model attempts; Token totals retain the existing
+accounting, including reported usage from failed calls.

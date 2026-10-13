@@ -19,7 +19,7 @@
 
 import { resolveUsageRange } from "@maka/core/model-call-usage-projection";
 import { tryResult } from "@maka/core/result";
-import type { UsageRange, UsageStats, UsageScreenQuery, UsageScreenFailure } from "@maka/core/settings";
+import { resolveUsageHeatmapRange, type UsageRange, type UsageStats, type UsageScreenQuery, type UsageScreenFailure } from "@maka/core/settings";
 import {
   normalizePricingConfig,
   normalizePricingModelKey,
@@ -165,8 +165,9 @@ async function loadUsageStats(
   range: UsageRange,
   query?: UsageScreenQuery,
 ): Promise<UsageStats | Extract<UsageScreenFailure, {kind: 'screen_response_too_large'}>> {
+  const now = Date.now();
   const result = await client.queryUsage({kind: "screen", query: query ?? {
-    range: resolveUsageRange(range, Date.now()), search: "", status: "all",
+    range: resolveUsageRange(range, now), heatmap: resolveUsageHeatmapRange(now), search: "", status: "all",
   }});
   if (result.kind === "screen_response_too_large") return result;
   if (result.kind !== "screen") throw invalidUsageProjection();

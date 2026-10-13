@@ -30,6 +30,7 @@ import {
 } from 'react';
 import { useMountedRef, useToast } from '@maka/ui';
 import { resolveUsageRange } from '@maka/core/model-call-usage-projection';
+import { resolveUsageHeatmapRange } from '@maka/core/settings';
 import type {
   UsageRange,
   UsageStats,
@@ -122,11 +123,15 @@ export const UsageFeatureScope = forwardRef<
       setFailure(null);
       setPaging(false);
       setPagingProgress(null);
+      const now = Date.now();
       const query: UsageScreenQuery = {
+        heatmap: preserveRange && resolvedRef.current
+          ? resolvedRef.current.query.heatmap
+          : resolveUsageHeatmapRange(now),
         range:
           preserveRange && resolvedRef.current?.range === range
             ? resolvedRef.current.query.range
-            : resolveUsageRange(range, Date.now()),
+            : resolveUsageRange(range, now),
         search: filters.search.trim().toLowerCase(),
         status: filters.status,
       };

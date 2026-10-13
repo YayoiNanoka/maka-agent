@@ -30,6 +30,12 @@ export type UsageSettingsCopy = {
   paginationAria: string; previousPage: string; nextPage: string; goToPage(page: number): string; pageProgress(loadedPage: number, targetPage: number): string;
   summaryOnly: string; showDetails: string; filteredEmpty: string; filteredEmptyHelp: string; requestEmpty: string;
   costUnavailable: string; incompleteTitle: string; incompleteBody: string;
+  heatmap: {
+    title: string; period: string; viewAria: string;
+    tokens: string; requests: string; daily: string; weekly: string;
+    loading: string; unavailable: string; less: string; more: string; weeklyScale: string;
+    keyboardHelp: string; incomplete: string; currentWeek(date: string): string;
+  };
   tables: {
     providersAria: string; modelsAria: string; toolsAria: string; pricingAria: string; requestsAria: string;
     providerHeaders: string[]; modelHeaders: string[]; toolHeaders: string[]; pricingHeaders: string[]; requestHeaders: string[];
@@ -39,6 +45,14 @@ export type UsageSettingsCopy = {
   };
 };
 const settingsUsageCopyZhCn: UsageSettingsCopy = {
+    heatmap: {
+      title: 'Token 活动', period: '最近 12 个月', viewAria: '活动统计粒度',
+      tokens: 'Token', requests: '请求数', daily: '每天', weekly: '每周',
+      loading: '正在加载使用活动', unavailable: '暂无使用活动数据', less: '少', more: '多', weeklyScale: '每列为一周，按 Token 总量显示高度',
+      keyboardHelp: '使用方向键查看日期或周，Home 跳到开头，End 跳到末尾。',
+      incomplete: '部分记录的用量不完整，实际用量可能更高。', currentWeek: (date) => `当周截至 ${date}`,
+    },
+
     staleTitle: "统计已更新", staleBody: "当前显示的是之前的完整结果。请刷新后继续浏览。", loadFailed: "无法加载使用统计", capacityBody: "统计结果超出显示容量，请求未返回任何部分数据。", retainedBody: "当前仍显示上次成功加载的结果，新查询尚未生效。",
     saveFailed: '保存使用统计设置失败', toolbarAria: '使用统计范围与刷新', rangeAria: '使用统计时间范围', ranges: ['24h', '7天', '30天', '全部'],
     refreshingAria: '正在刷新使用统计', refreshAria: '刷新使用统计', summaryAria: '使用统计汇总指标', totalRequests: '模型调用', totalCost: '总费用', costHelp: '以模型供应商最终结算为准',
@@ -64,6 +78,14 @@ const settingsUsageCopyZhCn: UsageSettingsCopy = {
     },
   };
 const settingsUsageCopyZhTw: UsageSettingsCopy = {
+    heatmap: {
+      title: 'Token 活動', period: '最近 12 個月', viewAria: '活動統計粒度',
+      tokens: 'Token', requests: '請求數', daily: '每天', weekly: '每週',
+      loading: '正在載入使用活動', unavailable: '暫無使用活動資料', less: '少', more: '多', weeklyScale: '每欄為一週，按 Token 總量顯示高度',
+      keyboardHelp: '使用方向鍵查看日期或週，Home 跳到開頭，End 跳到末尾。',
+      incomplete: '部分記錄的用量不完整，實際用量可能更高。', currentWeek: (date) => `當週截至 ${date}`,
+    },
+
     staleTitle: "統計已更新", staleBody: "目前顯示先前的完整結果。請重新整理後繼續瀏覽。", loadFailed: "無法載入使用統計", capacityBody: "統計結果超出顯示容量，請求未傳回任何部分資料。", retainedBody: "目前仍顯示上次成功載入的結果，新查詢尚未生效。",
     tokenTooltip: { total: '總計', input: '輸入', output: '輸出', cached: '快取', new: '新', hit: '命中', created: '建立' },
     saveFailed: '儲存使用統計設定失敗', toolbarAria: '使用統計範圍與重新整理', rangeAria: '使用統計時間範圍', ranges: ['24h', '7天', '30天', '全部'],
@@ -89,6 +111,14 @@ const settingsUsageCopyZhTw: UsageSettingsCopy = {
     },
   };
 const settingsUsageCopyEn: UsageSettingsCopy = {
+    heatmap: {
+      title: 'Token activity', period: 'Last 12 months', viewAria: 'Activity interval',
+      tokens: 'Tokens', requests: 'Requests', daily: 'Daily', weekly: 'Weekly',
+      loading: 'Loading usage activity', unavailable: 'No usage activity data', less: 'Less', more: 'More', weeklyScale: 'Each column is a week; height shows its token total',
+      keyboardHelp: 'Use arrow keys to explore days or weeks, Home for the beginning, and End for the end.',
+      incomplete: 'Some records have incomplete usage, so actual usage may be higher.', currentWeek: (date) => `Week through ${date}`,
+    },
+
     staleTitle: 'Usage has changed', staleBody: 'The previous complete result is still shown. Refresh to continue browsing.', loadFailed: 'Unable to load Usage', capacityBody: 'This complete result exceeds the display capacity. No partial result was loaded.', retainedBody: 'The last successfully loaded result is still shown; the new query has not taken effect.',
     saveFailed: 'Failed to save usage settings', toolbarAria: 'Usage range and refresh', rangeAria: 'Usage time range', ranges: ['24h', '7 days', '30 days', 'All'],
     refreshingAria: 'Refreshing usage', refreshAria: 'Refresh usage', summaryAria: 'Usage summary metrics', totalRequests: 'Model calls', totalCost: 'Total cost', costHelp: 'Final billing is determined by the model provider',

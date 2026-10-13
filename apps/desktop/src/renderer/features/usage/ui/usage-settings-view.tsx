@@ -57,6 +57,7 @@ import {
   type UsageSettingsCopy,
 } from '../../../locales/settings-usage-copy.js';
 import { MetricCard } from './metric-card.js';
+import { UsageActivityHeatmap } from './usage-activity-heatmap.js';
 import { UsageStatsTable } from './usage-stats-table.js';
 import { useActionGuard } from '../controller/action-guard.js';
 import { useOptimisticSettingsDraft } from '../controller/optimistic-settings-draft.js';
@@ -372,6 +373,8 @@ export function UsageSettingsView(props: {
           />
         </div>
       </div>
+
+      <UsageActivityHeatmap heatmap={stats?.heatmap ?? null} />
 
       <div className="settingsUsageBreakdown">
         <div className="settingsUsageTabsBar">

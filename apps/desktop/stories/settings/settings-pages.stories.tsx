@@ -18,6 +18,7 @@
  */
 
 
+import { resolveUsageHeatmapRange } from '@maka/core/settings';
 import { useRef, useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
@@ -346,7 +347,19 @@ const STORY_USAGE_PROVENANCE = {
   },
 };
 
+const heatmapRange = resolveUsageHeatmapRange(NOW);
+const usageHeatmap: UsageStats['heatmap'] = {
+  through: NOW,
+  hasIncompleteUsage: false,
+  days: heatmapRange.dayStarts.map((start, index) => {
+    const active = index > 210 && index % 11 !== 0;
+    const successfulRequests = active ? 12 + (index * 37) % 275 : 0;
+    return {start, successfulRequests, tokens: successfulRequests * (1800 + (index % 9) * 4700)};
+  }),
+};
+
 const usageStats: UsageStats = {
+  heatmap: usageHeatmap,
   summary: {
     totalRequests: 420,
     totalCostUsd: 2.34,
@@ -385,6 +398,7 @@ const usageStats: UsageStats = {
 };
 
 const emptyUsageStats: UsageStats = {
+  heatmap: {...usageHeatmap, days: usageHeatmap.days.map(day => ({...day, tokens:0, successfulRequests:0}))},
   summary: {
     totalRequests: 0,
     totalCostUsd: 0,
@@ -1761,7 +1775,7 @@ function withUsageConsistencyBridge(outcome: 'stale' | 'capacity' | 'page' = 'st
         : {kind: 'revision_changed'};
       if (outcome === 'capacity' && query?.search) return {kind: 'screen_response_too_large', section: 'pricing'};
       return {...usageStats, logs: usageLogs.slice(0, 50), navigation: {activityTotal: usageLogs.length, revision: 'revision-A', queryIdentity: 'query-A', nextCursor: 'next-page',
-        query: query ?? {range: {from: 0, to: Date.now()}, search: '', status: 'all'}}};
+        query: query ?? {range: {from: 0, to: NOW}, heatmap: heatmapRange, search: '', status: 'all'}}};
     },
   }} satisfies Record<string, unknown>);
 }
@@ -2692,6 +2706,28 @@ export const UsagePagedActivity: Story = {
     await userEvent.click(pageTwo!);
     await expect(await canvas.findByText(USAGE_PAGINATION_SENTINEL)).toBeVisible();
     await expect(await canvas.findByRole('button', {name: /next page|下一页|下一頁/i})).toBeDisabled();
+
+    // A keyboard tooltip near the top of the calendar must leave its view controls reachable.
+    const chart = canvasElement.querySelector<HTMLElement>('.settingsUsageActivity');
+    expect(chart).not.toBeNull();
+    expect(within(chart!).getAllByRole('radiogroup')).toHaveLength(1);
+    chart!.scrollIntoView({block: 'center'});
+    const points = chart!.querySelectorAll<HTMLElement>('[data-activity-index]');
+    points[points.length - 1]!.focus();
+    await userEvent.keyboard('{ArrowLeft}');
+    const weekly = within(chart!).getByRole('radio', {name: copy.heatmap.weekly});
+    await waitFor(() => {
+      const tip = within(document.body).getAllByRole('tooltip').at(-1);
+      expect(tip).toBeVisible();
+      expect(within(tip!).getByText(copy.heatmap.tokens)).toBeVisible();
+      expect(within(tip!).getByText(copy.heatmap.requests)).toBeVisible();
+      const box = weekly.getBoundingClientRect();
+      expect(weekly.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))).toBe(true);
+    });
+    await userEvent.click(weekly);
+    expect(chart!.querySelectorAll('[data-activity-index]').length).toBeLessThanOrEqual(54);
+    await userEvent.click(within(chart!).getByRole('radio', {name: copy.heatmap.daily}));
+    expect(chart!.querySelectorAll('[data-activity-index]')).toHaveLength(points.length);
   },
 };
 // Real path: Settings → Usage → Next page after a Usage write changes the revision.

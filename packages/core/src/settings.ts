@@ -46,6 +46,10 @@ import {
 import { normalizeSubagentSettings, type SubagentSettings } from './subagent-settings.js';
 import { isPetPackId } from './pet.js';
 
+export { resolveUsageHeatmapRange, isUsageHeatmapRange } from './usage-heatmap.js';
+export type { UsageHeatmapRange, UsageHeatmap } from './usage-heatmap.js';
+import type { UsageHeatmapRange, UsageHeatmap } from './usage-heatmap.js';
+
 export { UI_LOCALE_PREFERENCES, isUiLocalePreference } from './ui-locale.js';
 export type { UiLocalePreference } from './ui-locale.js';
 export type {
@@ -654,6 +658,7 @@ export interface UsageSummary {
 }
 
 export interface UsageStats {
+  heatmap: UsageHeatmap;
   navigation?: {
     activityTotal: number;
     revision: string;
@@ -705,6 +710,7 @@ export interface UsageStats {
 
 /** A fixed query; activity filters never change headline accounting. */
 export interface UsageScreenQuery {
+  heatmap: UsageHeatmapRange;
   range: { from: number; to: number };
   search: string;
   status: 'all' | 'success' | 'error' | 'aborted';
@@ -731,6 +737,7 @@ export type UsageScreenFailure =
         | 'model_breakdown'
         | 'tool_breakdown'
         | 'pricing'
+        | 'heatmap'
         | 'activity_page'
         | 'screen'
         | 'message';

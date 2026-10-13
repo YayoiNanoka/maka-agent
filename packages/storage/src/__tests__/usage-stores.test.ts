@@ -979,6 +979,7 @@ function appendModelCallAuthorityEvent(
 
 const screenQuery = {
   range: { from: 0, to: Date.UTC(2030, 0, 1) },
+  heatmap: { dayStarts: [Date.UTC(2026, 0, 1)], to: Date.UTC(2026, 0, 2) - 1 },
   search: '',
   status: 'all' as const,
 };
@@ -1380,7 +1381,7 @@ describe('revision-consistent Usage screen', () => {
                   field.toLowerCase().includes(search),
                 ),
             );
-            const screen = await initialScreen(stores, { range, search, status });
+            const screen = await initialScreen(stores, { ...screenQuery, range, search, status });
             assert.equal(screen.activityTotal, matching.length);
             assert.deepEqual(screen.summary, unfiltered.summary);
             assert.deepEqual(screen.byProvider, unfiltered.byProvider);
@@ -1489,7 +1490,7 @@ describe('revision-consistent Usage screen', () => {
         if (!committed) {
           committed = true;
           external.exec(
-            "UPDATE usage_llm_calls SET record_json = json_set(record_json, '$.costUsd', 99)",
+            "UPDATE usage_llm_calls SET record_json = json_set(record_json, '$.costUsd', 99, '$.totalTokens', 999)",
           );
         }
         return String(value).toLowerCase();
@@ -1498,11 +1499,14 @@ describe('revision-consistent Usage screen', () => {
         const screen = await initialScreen(stores, { ...screenQuery, search: 'gpt' });
         assert.ok(committed);
         assert.ok(screen.summary.totalCostUsd < 1);
+        assert.equal(screen.heatmap.days[0]?.tokens, 61 * 30);
         assert.ok(screen.logs.every((row) => row.costUsd === 0.001));
         assert.deepEqual(await stores.readUsageScreen(continuation(screen)), {
           kind: 'revision_changed',
         });
-        assert.equal((await initialScreen(stores)).summary.totalCostUsd, 61 * 99);
+        const refreshed = await initialScreen(stores);
+        assert.equal(refreshed.summary.totalCostUsd, 61 * 99);
+        assert.equal(refreshed.heatmap.days[0]?.tokens, 61 * 999);
       } finally {
         external.close();
         lease.close();
@@ -1613,6 +1617,10 @@ describe('Usage range statistics reuse', () => {
       first.pricing[0]!.inputPerMTokUsd = 999;
       first.provenance.coverage.attempts = 999;
       first.provenance.pendingRepairs = 999;
+      first.heatmap.days[0]!.tokens = 999;
+      first.heatmap.days[0]!.successfulRequests = 999;
+      first.heatmap.hasIncompleteUsage = true;
+      first.query.heatmap.dayStarts[0] = 0;
       first.query.range.to = 0;
       const freeze = (value: unknown): void => {
         if (!value || typeof value !== 'object') return;
@@ -1633,6 +1641,7 @@ describe('Usage range statistics reuse', () => {
   test('failed transaction commits cannot publish statistics under a reusable revision', async () => {
     await withScreenStores(async (stores, root) => {
       await stores.telemetry.recordToolInvocation(toolRecord({ toolName: 'Original' }));
+      await stores.telemetry.recordLlmCall(llmRecord());
       const lease = acquireOperationalStateDatabase(await realpath(root));
       const exec = lease.database.exec;
       const prepare = lease.database.prepare;
@@ -1647,6 +1656,10 @@ describe('Usage range statistics reuse', () => {
           exec.call(
             this,
             "UPDATE usage_tool_invocations SET record_json = json_set(record_json, '$.toolName', 'Rolled back')",
+          );
+          exec.call(
+            this,
+            "UPDATE usage_llm_calls SET record_json = json_set(record_json, '$.totalTokens', 90)",
           );
           rolledBackRevision = String(
             prepare.call(this, 'SELECT revision FROM usage_screen_revision').get()?.revision,
@@ -1667,6 +1680,9 @@ describe('Usage range statistics reuse', () => {
           lease.database.exec(
             "UPDATE usage_tool_invocations SET record_json = json_set(record_json, '$.toolName', 'Committed')",
           );
+          lease.database.exec(
+            "UPDATE usage_llm_calls SET record_json = json_set(record_json, '$.totalTokens', 60)",
+          );
         });
         assert.equal(
           String(
@@ -1682,6 +1698,7 @@ describe('Usage range statistics reuse', () => {
         const committed = await initialScreen(stores);
         assert.equal(committed.byTool[0]?.tool, 'Committed');
         assert.equal(committed.logs[0]?.toolName, 'Committed');
+        assert.equal(committed.heatmap.days[0]?.tokens, 60);
         assert.ok(aggregateQueries >= 4, 'rolled-back statistics are recomputed');
         aggregateQueries = 0;
         assert.deepEqual(
@@ -1800,7 +1817,7 @@ describe('Usage range statistics reuse', () => {
         if (!committed) {
           committed = true;
           external.exec(
-            "UPDATE usage_llm_calls SET record_json = json_set(record_json, '$.costUsd', 2)",
+            "UPDATE usage_llm_calls SET record_json = json_set(record_json, '$.costUsd', 2, '$.totalTokens', 90)",
           );
         }
         return String(value ?? '').toLowerCase();
@@ -1817,6 +1834,7 @@ describe('Usage range statistics reuse', () => {
         const refreshed = await initialScreen(stores);
         assert.notEqual(refreshed.revision, first.revision);
         assert.equal(refreshed.summary.totalCostUsd, 122);
+        assert.equal(refreshed.heatmap.days[0]?.tokens, 61 * 90);
         assert.ok(refreshed.logs.every((row) => row.costUsd === 2));
       } finally {
         lease.database.function('usage_screen_lower', { deterministic: true }, (value) =>
@@ -1852,7 +1870,254 @@ describe('Usage range statistics reuse', () => {
   });
 });
 
+describe('Usage heatmap accounting', () => {
+  test('client day boundaries include successful model requests and all reported tokens across DST', async () => {
+    await withScreenStores(async (stores, root) => {
+      // New York local midnights: March 8 has 23 hours. The storage process's
+      // timezone must not change which day owns a completion.
+      const dayStarts = [
+        Date.parse('2026-03-07T05:00:00Z'),
+        Date.parse('2026-03-08T05:00:00Z'),
+        Date.parse('2026-03-09T04:00:00Z'),
+        Date.parse('2026-03-10T04:00:00Z'),
+        Date.parse('2026-03-11T04:00:00Z'),
+      ];
+      const to = Date.parse('2026-03-11T16:00:00Z');
+      for (const [index, ts] of [
+        dayStarts[0]! - 1,
+        dayStarts[0]!,
+        dayStarts[1]! - 0.25,
+        dayStarts[1]!,
+        dayStarts[2]! - 0.25,
+        dayStarts[2]!,
+        to,
+        to + 1,
+      ].entries()) {
+        await stores.telemetry.recordLlmCall(llmRecord({ id: `boundary-${index}`, ts }));
+      }
+      for (const status of ['error', 'aborted']) {
+        await stores.telemetry.recordLlmCall(
+          llmRecord({ id: status, status, ts: dayStarts[2]! + 1 }),
+        );
+      }
+      await stores.telemetry.recordToolInvocation(toolRecord({ ts: dayStarts[2] }));
+      const lease = acquireOperationalStateDatabase(await realpath(root));
+      try {
+        const insert = lease.database.prepare(`INSERT INTO usage_model_call_attempts
+          (attempt_id, completed_at, logical_call_id, session_id, turn_id, call_kind,
+           provider_id, model_id, latency_ms, status, usage_basis, input_tokens, output_tokens,
+           cost_basis, cost_usd)
+          VALUES (?, ?, 'call', 'session', 'turn', 'main', 'openai', 'gpt-5', 1, ?,
+            'reported', 7, 5, 'priced', 0)`);
+        lease.transaction('write', () => {
+          for (const status of ['completed', 'failed', 'aborted', 'interrupted']) {
+            insert.run(`canonical-${status}`, dayStarts[2]! + 2, status);
+          }
+        });
+      } finally {
+        lease.close();
+      }
+      const screen = await initialScreen(stores, {
+        ...screenQuery,
+        heatmap: { dayStarts, to },
+      });
+      assert.deepEqual(screen.heatmap, {
+        days: dayStarts.map((start, index) => ({
+          start,
+          tokens: [60, 60, 138, 0, 30][index],
+          successfulRequests: [2, 2, 2, 0, 1][index],
+        })),
+        through: to,
+        hasIncompleteUsage: false,
+      });
+    });
+  });
+
+  test('daily totals cover all pages and stay independent of screen range, search and status', async () => {
+    await withScreenStores(async (stores) => {
+      await seedScreen(stores);
+      await stores.telemetry.recordLlmCall(llmRecord({ id: 'failed', status: 'error' }));
+      await stores.telemetry.recordLlmCall(llmRecord({ id: 'aborted', status: 'aborted' }));
+      await stores.telemetry.recordToolInvocation(toolRecord());
+      const first = await initialScreen(stores);
+      assert.equal(first.logs.length, 50);
+      assert.ok(first.nextCursor);
+      assert.equal(first.heatmap.days[0]?.successfulRequests, 61);
+      assert.equal(first.heatmap.days[0]?.tokens, 63 * 30);
+      const filtered = await initialScreen(stores, {
+        ...screenQuery,
+        range: { from: 1, to: 2 },
+        status: 'error',
+        search: 'absent',
+      });
+      assert.equal(filtered.summary.totalRequests, 0);
+      assert.deepEqual(filtered.logs, []);
+      assert.deepEqual(filtered.heatmap, first.heatmap);
+    });
+  });
+
+  test('each source seeks daily timestamp ranges instead of rescanning a materialized year', async () => {
+    await withScreenStores(async (stores, root) => {
+      const lease = acquireOperationalStateDatabase(await realpath(root));
+      const prepare = lease.database.prepare;
+      const plans: string[] = [];
+      lease.database.prepare = function (sql) {
+        if (sql.startsWith('WITH days AS')) {
+          const plan = prepare
+            .call(this, `EXPLAIN QUERY PLAN ${sql}`)
+            .all(screenQuery.heatmap.to, JSON.stringify(screenQuery.heatmap.dayStarts));
+          plans.push(...plan.map((row) => String(row.detail)));
+        }
+        return prepare.call(this, sql);
+      };
+      try {
+        await initialScreen(stores);
+        assert.ok(
+          plans.some((detail) => /SEARCH usage_model_call_attempts USING INDEX/.test(detail)),
+        );
+        assert.ok(plans.some((detail) => /SEARCH usage_llm_calls USING INDEX/.test(detail)));
+        assert.ok(plans.every((detail) => !/MATERIALIZE rows|SCAN usage_/.test(detail)));
+      } finally {
+        lease.database.prepare = prepare;
+        lease.close();
+      }
+    });
+  });
+
+  test('heatmap cache follows its own window and invalidates on accounting writes', async () => {
+    await withScreenStores(async (stores, root) => {
+      const start = screenQuery.heatmap.dayStarts[0]!;
+      await stores.telemetry.recordLlmCall(llmRecord({ id: 'early', ts: start, totalTokens: 40 }));
+      await stores.telemetry.recordLlmCall(
+        llmRecord({ id: 'late', ts: start + 100, totalTokens: 60 }),
+      );
+      const lease = acquireOperationalStateDatabase(await realpath(root));
+      const prepare = lease.database.prepare;
+      let dailyAggregations = 0;
+      lease.database.prepare = function (sql) {
+        if (sql.startsWith('WITH days AS')) dailyAggregations++;
+        return prepare.call(this, sql);
+      };
+      try {
+        const first = await initialScreen(stores);
+        assert.equal(first.heatmap.days[0]?.tokens, 100);
+        assert.equal(dailyAggregations, 1);
+        for (const query of [
+          { ...screenQuery, search: 'absent' },
+          { ...screenQuery, status: 'error' as const },
+          { ...screenQuery, range: { from: 1, to: 2 } },
+        ]) {
+          assert.deepEqual((await initialScreen(stores, query)).heatmap, first.heatmap);
+        }
+        assert.equal(dailyAggregations, 1);
+        const earlier = {
+          ...screenQuery,
+          heatmap: { dayStarts: [start], to: start + 99 },
+        };
+        assert.equal((await initialScreen(stores, earlier)).heatmap.days[0]?.tokens, 40);
+        assert.equal(dailyAggregations, 2);
+        await stores.telemetry.recordLlmCall(
+          llmRecord({ id: 'early', ts: start, totalTokens: 70, status: 'error' }),
+        );
+        const refreshed = await initialScreen(stores, earlier);
+        assert.equal(refreshed.heatmap.days[0]?.tokens, 70);
+        assert.equal(refreshed.heatmap.days[0]?.successfulRequests, 0);
+        assert.equal(dailyAggregations, 3);
+        assert.notEqual(refreshed.revision, first.revision);
+        lease.transaction('write', () => lease.database.exec('DELETE FROM usage_llm_calls'));
+        assert.deepEqual((await initialScreen(stores, earlier)).heatmap.days, [
+          { start, tokens: 0, successfulRequests: 0 },
+        ]);
+        assert.equal(dailyAggregations, 4);
+      } finally {
+        lease.database.prepare = prepare;
+        lease.close();
+      }
+    });
+  });
+
+  test('incomplete, missing, pending and unreadable usage remain visible alongside known totals', async () => {
+    await withScreenStores(async (stores, root) => {
+      const start = screenQuery.heatmap.dayStarts[0]!;
+      const lease = acquireOperationalStateDatabase(await realpath(root));
+      try {
+        assert.equal((await initialScreen(stores)).heatmap.hasIncompleteUsage, false);
+        appendModelCallAuthorityEvent(root, {
+          ...modelCallAttempt('heatmap-source'),
+          startedAt: start,
+          completedAt: start + 1,
+        });
+        const pending = await initialScreen(stores);
+        assert.equal(pending.heatmap.hasIncompleteUsage, true);
+        assert.equal(pending.heatmap.days[0]?.tokens, 0);
+        await stores.modelCalls.catchUpModelCallProjection();
+        const repaired = await initialScreen(stores);
+        assert.equal(repaired.heatmap.hasIncompleteUsage, false);
+        assert.equal(repaired.heatmap.days[0]?.tokens, 2);
+        assert.equal(repaired.heatmap.days[0]?.successfulRequests, 1);
+        lease.database.exec("UPDATE usage_model_call_attempts SET usage_basis = 'partial'");
+        assert.equal((await initialScreen(stores)).heatmap.hasIncompleteUsage, true);
+        lease.database.exec(`UPDATE usage_model_call_attempts SET usage_basis = 'missing',
+          input_tokens = NULL, output_tokens = NULL`);
+        const missing = await initialScreen(stores);
+        assert.equal(missing.heatmap.hasIncompleteUsage, true);
+        assert.equal(missing.heatmap.days[0]?.tokens, 0);
+        assert.equal(missing.heatmap.days[0]?.successfulRequests, 1);
+        lease.database.exec(`UPDATE usage_model_call_attempts SET usage_basis = 'reported',
+          input_tokens = 1, output_tokens = 1`);
+        assert.equal((await initialScreen(stores)).heatmap.hasIncompleteUsage, false);
+        lease.database.exec('UPDATE usage_model_call_attempts SET output_tokens = NULL');
+        assert.equal((await initialScreen(stores)).heatmap.hasIncompleteUsage, true);
+        lease.database.exec('UPDATE usage_model_call_attempts SET output_tokens = 1');
+        lease.database
+          .prepare('INSERT INTO usage_model_call_attempts(attempt_id, completed_at) VALUES (?, ?)')
+          .run('unreadable', start + 2);
+        const unreadable = await initialScreen(stores);
+        assert.equal(unreadable.heatmap.hasIncompleteUsage, true);
+        assert.equal(unreadable.heatmap.days[0]?.tokens, 2);
+        lease.database.exec(
+          "DELETE FROM usage_model_call_attempts WHERE attempt_id = 'unreadable'",
+        );
+        lease.database.exec(
+          'UPDATE usage_model_call_projection_checkpoints SET unreadable_events = 1',
+        );
+        assert.equal((await initialScreen(stores)).heatmap.hasIncompleteUsage, true);
+        lease.database.exec(
+          'UPDATE usage_model_call_projection_checkpoints SET unreadable_events = 0',
+        );
+        assert.equal((await initialScreen(stores)).heatmap.hasIncompleteUsage, false);
+        await stores.telemetry.recordLlmCall(llmRecord());
+        lease.database.exec(
+          "UPDATE usage_llm_calls SET record_json = json_remove(record_json, '$.totalTokens')",
+        );
+        assert.equal((await initialScreen(stores)).heatmap.hasIncompleteUsage, true);
+      } finally {
+        lease.close();
+      }
+    });
+  });
+
+  test('heatmap bounds are validated before reading accounting data', async () => {
+    await withScreenStores(async (stores) => {
+      for (const heatmap of [
+        undefined,
+        { dayStarts: [], to: 0 },
+        { dayStarts: [Date.UTC(2026, 0, 1)], to: Date.UTC(2025, 11, 31) },
+        { dayStarts: [Date.UTC(2026, 0, 2), Date.UTC(2026, 0, 1)], to: Date.UTC(2026, 0, 2) },
+      ]) {
+        await assert.rejects(
+          stores.readUsageScreen({
+            kind: 'screen',
+            query: { ...screenQuery, heatmap } as UsageScreenQuery,
+          }),
+          TelemetryQueryValidationError,
+        );
+      }
+    });
+  });
+});
+
 function rangeStatistics(screen: UsageScreen) {
-  const { summary, byProvider, byModel, byTool, pricing, provenance } = screen;
-  return { summary, byProvider, byModel, byTool, pricing, provenance };
+  const { summary, byProvider, byModel, byTool, pricing, provenance, heatmap } = screen;
+  return { summary, byProvider, byModel, byTool, pricing, provenance, heatmap };
 }

@@ -20,6 +20,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import {
+  isUsageHeatmapRange,
   isUsageScreenSearch,
   isUsageTimestamp,
   type UsageScreen,
@@ -43,6 +44,7 @@ const SOURCES = [
     table: 'usage_model_call_attempts',
     time: 'completed_at',
     identity: 'attempt_id',
+    incompleteUsage: `usage_basis IN ('partial', 'missing') OR input_tokens IS NULL OR output_tokens IS NULL`,
     filters: `provider_id AS provider, model_id AS model, NULL AS toolName,
       CASE status WHEN 'completed' THEN 'success' WHEN 'failed' THEN 'error' ELSE 'aborted' END AS status`,
     columns: `completed_at AS ts, 'canonical' AS source, attempt_id AS identity,
@@ -60,6 +62,7 @@ const SOURCES = [
     table: 'usage_llm_calls',
     time: 'ts',
     identity: 'storage_key',
+    incompleteUsage: `${json('totalTokens')} IS NULL`,
     filters: `${json('providerId')} AS provider, ${json('modelId')} AS model,
       NULL AS toolName, ${json('status')} AS status`,
     columns: `ts, 'legacy' AS source, storage_key AS identity, id, 'model' AS kind,
@@ -77,6 +80,7 @@ const SOURCES = [
     table: 'usage_tool_invocations',
     time: 'ts',
     identity: 'storage_key',
+    incompleteUsage: '0',
     filters: `COALESCE(${json('providerId')}, '') AS provider,
       COALESCE(${json('modelId')}, '') AS model, ${json('toolName')} AS toolName,
       ${json('status')} AS status`,
@@ -95,9 +99,12 @@ interface Position {
   identity: string;
 }
 
-function rangeRows(source: Source): string {
-  return `SELECT ${source.columns}, ${source.filters} FROM ${source.table}
-    WHERE ${source.time} >= ? AND ${source.time} <= ?${source.name === 'canonical' ? ' AND cost_basis IS NOT NULL' : ''}`;
+function rangeRows(source: Source, perDay = false): string {
+  return `SELECT ${perDay ? `days.start AS dayStart, ${source.incompleteUsage} AS incompleteUsage,` : ''}
+    ${source.columns}, ${source.filters} FROM ${perDay ? 'days CROSS JOIN ' : ''}${source.table}
+    WHERE ${source.time} >= ${perDay ? 'days.start' : '?'}
+      AND ${source.time} <= ${perDay ? 'days.through' : '?'}
+      ${perDay ? `AND (days.isLast OR ${source.time} < days.through)` : ''}${source.name === 'canonical' ? ' AND cost_basis IS NOT NULL' : ''}`;
 }
 const MODEL_ROWS = `${rangeRows(SOURCES[0])} UNION ALL ${rangeRows(SOURCES[1])}`;
 const TOOL_ROWS = rangeRows(SOURCES[2]);
@@ -117,6 +124,11 @@ interface CachedRangeStatistics {
   to: number;
   statistics: RangeStatistics;
 }
+interface CachedHeatmap {
+  revision: string;
+  identity: string;
+  heatmap: UsageScreen['heatmap'];
+}
 
 export function createUsageScreenReader(root: string) {
   const lease = acquireOperationalStateDatabase(root);
@@ -127,11 +139,13 @@ export function createUsageScreenReader(root: string) {
   // One complete range per reader; changing filters does not retain history or
   // grow the cache. Revision includes the database incarnation and lifecycle.
   let cached: CachedRangeStatistics | undefined;
+  let cachedHeatmap: CachedHeatmap | undefined;
   let closed = false;
   return {
     close: () => {
       closed = true;
       cached = undefined;
+      cachedHeatmap = undefined;
       lease.close();
     },
     read: (input: UsageScreenRequest): UsageScreenResult =>
@@ -162,6 +176,12 @@ export function createUsageScreenReader(root: string) {
             : undefined;
         const statistics = hit?.statistics ?? readRangeStatistics(db, input.query.range);
         if ('kind' in statistics) return statistics;
+        const heatmapIdentity = hash(input.query.heatmap);
+        const heatmapHit =
+          cachedHeatmap?.revision === revision && cachedHeatmap.identity === heatmapIdentity
+            ? cachedHeatmap
+            : undefined;
+        const heatmap = heatmapHit?.heatmap ?? readHeatmap(db, input.query.heatmap);
         // Complete range statistics already counted every readable model/tool
         // row. Only activity filters need a separate exact count.
         const activityTotal =
@@ -177,6 +197,7 @@ export function createUsageScreenReader(root: string) {
           // Host projects identities and freezes replies; returned objects must
           // never share mutable rows or arrays with another cached response.
           ...structuredClone(statistics),
+          heatmap: structuredClone(heatmap),
           // Count and page share this read snapshot: zero proves there is no
           // matching activity, so an empty search needs only one range scan.
           ...(activityTotal === 0 ? { logs: [], nextCursor: null } : activity(db, input.query)),
@@ -186,6 +207,12 @@ export function createUsageScreenReader(root: string) {
           // same revision counter. Publish only after the outermost commit.
           lease.onTransactionSettled((committed) => {
             if (committed && !closed) cached = { revision, from, to, statistics };
+          });
+        }
+        if (!heatmapHit) {
+          lease.onTransactionSettled((committed) => {
+            if (committed && !closed)
+              cachedHeatmap = { revision, identity: heatmapIdentity, heatmap };
           });
         }
         return { kind: 'screen', screen };
@@ -245,28 +272,7 @@ function readRangeStatistics(
       };
     });
   if (pricing.length > 128) return { kind: 'screen_response_too_large', section: 'pricing' };
-  const unreadable =
-    n(
-      db
-        .prepare(`SELECT COUNT(*) AS count FROM usage_model_call_attempts
-  WHERE completed_at >= ? AND completed_at <= ? AND cost_basis IS NULL`)
-        .get(...rangeArgs)?.count,
-    ) +
-    n(
-      db
-        .prepare(
-          'SELECT SUM(unreadable_events) AS count FROM usage_model_call_projection_checkpoints',
-        )
-        .get()?.count,
-    );
-  const pending = n(
-    db
-      .prepare(`SELECT COUNT(*) AS count FROM core_agent_runs AS source
-  LEFT JOIN usage_model_call_projection_checkpoints AS checkpoint
-    ON checkpoint.session_id = source.session_id AND checkpoint.run_id = source.run_id
-  WHERE source.latest_model_call_sequence > COALESCE(checkpoint.applied_through_sequence, -1)`)
-      .get()?.count,
-  );
+  const { unreadable, pending } = readProjectionCoverage(db, range);
   return {
     summary: {
       totalRequests: n(aggregate.totalRequests),
@@ -316,11 +322,70 @@ function readRangeStatistics(
   };
 }
 
+function readProjectionCoverage(db: DatabaseSync, range: UsageScreenQuery['range']) {
+  const rangeArgs = [range.from, range.to];
+  const unreadable =
+    n(
+      db
+        .prepare(`SELECT COUNT(*) AS count FROM usage_model_call_attempts
+  WHERE completed_at >= ? AND completed_at <= ? AND cost_basis IS NULL`)
+        .get(...rangeArgs)?.count,
+    ) +
+    n(
+      db
+        .prepare(
+          'SELECT SUM(unreadable_events) AS count FROM usage_model_call_projection_checkpoints',
+        )
+        .get()?.count,
+    );
+  const pending = n(
+    db
+      .prepare(`SELECT COUNT(*) AS count FROM core_agent_runs AS source
+  LEFT JOIN usage_model_call_projection_checkpoints AS checkpoint
+    ON checkpoint.session_id = source.session_id AND checkpoint.run_id = source.run_id
+  WHERE source.latest_model_call_sequence > COALESCE(checkpoint.applied_through_sequence, -1)`)
+      .get()?.count,
+  );
+  return { unreadable, pending };
+}
+
+function readHeatmap(db: DatabaseSync, range: UsageScreenQuery['heatmap']): UsageScreen['heatmap'] {
+  // Reuse the model accounting projections. Joining each source to the small
+  // day table before UNION lets SQLite seek its timestamp index once per day;
+  // joining days to MODEL_ROWS would materialize and rescan the entire year.
+  const rows = db
+    .prepare(`WITH days AS (
+      SELECT value AS start, COALESCE(LEAD(value) OVER (ORDER BY key), ?) AS through,
+        LEAD(value) OVER (ORDER BY key) IS NULL AS isLast
+      FROM json_each(?)
+    ), rows AS (${[SOURCES[0], SOURCES[1]].map((source) => rangeRows(source, true)).join(' UNION ALL ')})
+    SELECT dayStart AS start, SUM(totalTokens) AS tokens,
+      SUM(status = 'success') AS successfulRequests, MAX(incompleteUsage) AS incompleteUsage
+    FROM rows GROUP BY dayStart`)
+    .all(range.to, JSON.stringify(range.dayStarts)) as Row[];
+  const byDay = new Map(rows.map((row) => [n(row.start), row]));
+  const { unreadable, pending } = readProjectionCoverage(db, {
+    from: range.dayStarts[0]!,
+    to: range.to,
+  });
+  return {
+    days: range.dayStarts.map((start) => ({
+      start,
+      tokens: n(byDay.get(start)?.tokens),
+      successfulRequests: n(byDay.get(start)?.successfulRequests),
+    })),
+    through: range.to,
+    hasIncompleteUsage:
+      unreadable > 0 || pending > 0 || rows.some((row) => n(row.incompleteUsage) > 0),
+  };
+}
+
 function validateQuery(query: UsageScreenQuery): void {
   if (
     !isUsageTimestamp(query.range.from) ||
     !isUsageTimestamp(query.range.to) ||
     query.range.to < query.range.from ||
+    !isUsageHeatmapRange(query.heatmap) ||
     !isUsageScreenSearch(query.search) ||
     !['all', 'success', 'error', 'aborted'].includes(query.status)
   ) {

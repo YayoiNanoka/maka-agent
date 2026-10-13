@@ -46,6 +46,7 @@ import {
 
 function statsWithRequests(totalRequests: number): UsageStats {
   return {
+    heatmap: {days: [{start:0,tokens:0,successfulRequests:totalRequests}], through:1, hasIncompleteUsage:false},
     summary: {
       totalRequests,
       totalCostUsd: 0,
@@ -901,6 +902,7 @@ it('debounces search edits, refreshes immediately, and cancels pending queries o
   await tick(1);
   assert.deepEqual(queries.map((query) => query.search), ['', 'ab']);
   assert.deepEqual(queries[1]!.range, queries[0]!.range, 'typing preserves time bounds');
+  assert.deepEqual(queries[1]!.heatmap, queries[0]!.heatmap, 'typing preserves the annual snapshot bounds');
 
   await render(' AB  ');
   await tick(250);

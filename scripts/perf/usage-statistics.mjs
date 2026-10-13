@@ -180,7 +180,12 @@ for (const [count, mixed] of [
       { name: 'after', read: (input) => stores.readUsageScreen(input), db: lease.database },
     ];
     const scenario = `${count}/${mixed ? 'mixed' : 'tools'}`;
-    const query = { range: { from: 0, to: count }, search: '', status: 'all' };
+    const query = {
+      range: { from: 0, to: count },
+      search: '',
+      status: 'all',
+      heatmap: { dayStarts: [0], to: count },
+    };
     const inputs = [
       { name: 'matching-search', query: { ...query, search: 'model' } },
       { name: 'no-match-search', query: { ...query, search: 'absentword' } },
