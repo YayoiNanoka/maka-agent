@@ -670,6 +670,7 @@ export const ProjectGroups: Story = {
     const action = within(projectRow).getByRole('button', {
       name: 'maka-agent 项目操作',
     });
+    const newTask = within(projectRow).getByRole('button', { name: 'maka-agent 新建任务' });
     const groupId = navigation.getAttribute('aria-controls');
     if (!groupId) throw new Error('project navigation does not own a group');
     const group = canvasElement.ownerDocument.getElementById(groupId);
@@ -690,10 +691,24 @@ export const ProjectGroups: Story = {
     expect(Math.abs(
       projectTitle.getBoundingClientRect().x - taskTitle.getBoundingClientRect().x,
     )).toBeLessThanOrEqual(2);
+    const chevron = navigation.querySelector(':scope > .astryx-icon:last-child');
+    if (!chevron) throw new Error('project collapse decoration is missing');
+    await expect(chevron).not.toBeVisible();
+    expect(projectTitle.getBoundingClientRect().right).toBeLessThanOrEqual(
+      action.getBoundingClientRect().left,
+    );
+    expect(action.getBoundingClientRect().right).toBeLessThanOrEqual(
+      newTask.getBoundingClientRect().left,
+    );
+    expect(newTask.getBoundingClientRect().right).toBeLessThanOrEqual(projectBox.right);
 
     navigation.focus();
     await userEvent.tab();
     await expect(action).toHaveFocus();
+    await userEvent.tab();
+    await expect(newTask).toHaveFocus();
+    await userEvent.keyboard('{Enter}');
+    await expect(navigation).toHaveAttribute('aria-expanded', 'true');
     await userEvent.tab();
     await expect(taskControl).toHaveFocus();
 

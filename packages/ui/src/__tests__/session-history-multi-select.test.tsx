@@ -30,6 +30,7 @@ import test from 'node:test';
 import { act, useMemo, useState, type Dispatch, type SetStateAction } from 'react';
 import { createRoot } from 'react-dom/client';
 import { parseHTML } from 'linkedom';
+import type { ProjectRecord } from '@maka/core/project';
 import type { SessionSummary } from '@maka/core/session';
 import { LocaleProvider } from '../locale-context.js';
 import { SessionHistoryList } from '../session-history-list.js';
@@ -116,6 +117,17 @@ const ROW_ACTIONS = {
   onRename: () => undefined,
 };
 
+const PROJECT_ACTIONS = {
+  onNew: () => undefined,
+  onRename: () => undefined,
+  onArchive: () => undefined,
+  onRestore: () => undefined,
+};
+
+function projectRecord(id: string): ProjectRecord {
+  return { id, name: id, available: true, locations: [] };
+}
+
 type PickCall = Parameters<SessionRailSelectionCommands['pick']>[0];
 
 interface Harness {
@@ -127,10 +139,12 @@ interface Harness {
   clears: number;
   archives: number;
   document: Document;
+  click(element: Element): Promise<void>;
   clickRow(sessionId: string, modifiers?: Record<string, unknown>): Promise<void>;
   beginRightClickRow(sessionId: string): Promise<boolean>;
   endRightClickRow(sessionId: string): Promise<void>;
   rightClickRow(sessionId: string): Promise<boolean>;
+  rightClickProject(projectId: string): Promise<boolean>;
   openRowMenu(sessionId: string): Promise<void>;
   clickMenuItem(index: number): Promise<void>;
   menuLabels(): string[];
@@ -149,6 +163,8 @@ async function mount(
     sessions?: SessionSummary[];
     activeId?: string;
     rowActions?: SessionRailData['rowActions'];
+    projectActions?: SessionRailData['projectActions'];
+    selectionEnabled?: boolean;
     groupVariant?: SessionRailData['groupVariant'];
     groups?: SessionRailData['groups'];
   } = {},
@@ -203,7 +219,7 @@ async function mount(
       selectedIds,
     ]);
     return (
-      <SessionRailProvider data={data} selection={selection}>
+      <SessionRailProvider data={data} selection={options.selectionEnabled === false ? undefined : selection}>
         <SessionHistoryList />
       </SessionRailProvider>
     );
@@ -215,6 +231,7 @@ async function mount(
     groups: options.groups ?? [{ id: 'recent', label: 'Recent', sessions: [...sessions] }],
     onSelectSession: (sessionId) => opened.push(sessionId),
     rowActions: options.rowActions ?? ROW_ACTIONS,
+    projectActions: options.projectActions,
   };
 
   const container = document.querySelector('#root');
@@ -260,6 +277,11 @@ async function mount(
       return archives;
     },
     document: document as unknown as Document,
+    click: async (element) => {
+      await act(async () => {
+        element.dispatchEvent(pointerEvent(window, 'click'));
+      });
+    },
     clickRow: async (sessionId, modifiers = {}) => {
       await act(() => {
         rowButton(sessionId).dispatchEvent(pointerEvent(window, 'click', modifiers));
@@ -282,15 +304,16 @@ async function mount(
       });
     },
     rightClickRow: async (sessionId) => {
-      const event = pointerEvent(window, 'contextmenu');
-      await act(async () => {
-        rowButton(sessionId).dispatchEvent(pointerEvent(window, 'pointerdown'));
-        rowButton(sessionId).dispatchEvent(event);
-        rowButton(sessionId).dispatchEvent(pointerEvent(window, 'pointerup'));
-        await new Promise((resolve) => window.setTimeout(resolve, 0));
-      });
-      if (event.defaultPrevented) openedMenuRow = sessionId;
-      return event.defaultPrevented;
+      const prevented = await rightClick(rowButton(sessionId));
+      if (prevented) openedMenuRow = sessionId;
+      return prevented;
+    },
+    rightClickProject: async (projectId) => {
+      const header = document.querySelector(
+        `[data-project-id="${projectId}"] > div > button.astryx-side-nav-item`,
+      );
+      assert.ok(header, `no header for project ${projectId}`);
+      return rightClick(header);
     },
     openRowMenu: async (sessionId) => {
       const trigger = document.querySelector(
@@ -356,6 +379,17 @@ async function mount(
       Object.assign(globalThis, original);
     },
   };
+
+  async function rightClick(element: Element): Promise<boolean> {
+    const event = pointerEvent(window, 'contextmenu');
+    await act(async () => {
+      element.dispatchEvent(pointerEvent(window, 'pointerdown'));
+      element.dispatchEvent(event);
+      element.dispatchEvent(pointerEvent(window, 'pointerup'));
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+    return event.defaultPrevented;
+  }
 
   async function pressEscapeWith(focused: Element): Promise<boolean> {
     Object.defineProperty(document, 'activeElement', {
@@ -674,6 +708,149 @@ test('a mixed set pins, including the rows already pinned', async () => {
     await harness.clickMenuItem(0);
     assert.deepEqual(harness.flags, [true]);
   } finally {
+    await harness.dispose();
+  }
+});
+
+for (const selectionEnabled of [true, false]) {
+  test(`a project context menu preserves collapse and selection (selection enabled: ${selectionEnabled})`, async () => {
+    const sessions = [summary('a'), summary('b')];
+    const harness = await mount({
+      sessions,
+      selectedIds: ['a', 'b'],
+      selectionEnabled,
+      groupVariant: 'project',
+      groups: [{ id: 'p', label: 'p', project: projectRecord('p'), sessions }],
+      projectActions: PROJECT_ACTIONS,
+    });
+    try {
+      await harness.collapseProject('p');
+      assert.equal(await harness.rightClickProject('p'), true);
+      const header = harness.document.querySelector('[data-project-id="p"] > div > button');
+      assert.equal(header?.getAttribute('aria-expanded'), 'false');
+      const menu = harness.document.querySelector('.maka-project-row-actions .maka-session-row-action');
+      assert.ok(menu);
+      const trigger = menu.querySelector('button[aria-haspopup="menu"]');
+      assert.equal(trigger?.getAttribute('aria-expanded'), 'true');
+      const menuId = trigger?.getAttribute('aria-controls');
+      assert.ok(menuId);
+      const menuContent = harness.document.getElementById(menuId);
+      assert.ok(menuContent);
+      assert.deepEqual(
+        [...menuContent.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent?.trim()),
+        ['New task', 'Rename', 'Archive'],
+      );
+      assert.deepEqual(harness.picks, []);
+      assert.deepEqual(harness.retains, []);
+      assert.equal(harness.clears, 0);
+      assert.deepEqual(harness.opened, []);
+      assert.equal(
+        harness.document.querySelectorAll('[data-picked="true"]').length,
+        selectionEnabled ? 2 : 0,
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+}
+
+for (const shared of [false, true]) {
+  test(`right-clicking a nested ${shared ? 'shared' : 'actionable'} task does not open its project menu`, async () => {
+    const sessions = [shared ? { ...summary('a'), shared: true } as SessionSummary : summary('a')];
+    const harness = await mount({
+      sessions,
+      selectedIds: shared ? [] : ['a'],
+      groupVariant: 'project',
+      groups: [{ id: 'p', label: 'p', project: projectRecord('p'), sessions }],
+      projectActions: PROJECT_ACTIONS,
+    });
+    try {
+      assert.equal(await harness.rightClickRow('a'), !shared);
+      const projectMenuTrigger = harness.document.querySelector('button[aria-label="p project actions"]');
+      assert.equal(projectMenuTrigger?.getAttribute('aria-expanded'), 'false');
+      assert.equal(
+        harness.document.querySelector('[data-session-id="a"] .maka-session-row-action')
+          ?.getAttribute('data-menu-open') ?? null,
+        shared ? null : 'true',
+      );
+      assert.equal(
+        harness.document.querySelector('[data-project-id="p"] > div > button')
+          ?.getAttribute('aria-expanded'),
+        'true',
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+}
+
+for (const project of [undefined, projectRecord('p')]) {
+  test(`a ${project ? 'project without actions' : 'group without a project'} keeps its native context menu`, async () => {
+    const sessions = [summary('a')];
+    const harness = await mount({
+      sessions,
+      groupVariant: 'project',
+      groups: [{ id: 'p', label: 'p', project, sessions }],
+      projectActions: project ? undefined : PROJECT_ACTIONS,
+    });
+    try {
+      assert.equal(await harness.rightClickProject('p'), false);
+      assert.equal(harness.document.querySelector('[data-menu-open="true"]'), null);
+      assert.deepEqual(harness.picks, []);
+      assert.equal(harness.clears, 0);
+    } finally {
+      await harness.dispose();
+    }
+  });
+}
+
+test('creating a project task uses its project id, preserves collapse and shares the pending guard', async () => {
+  const sessions = [summary('a')];
+  const created: string[] = [];
+  let finishCreation!: () => void;
+  const pending = new Promise<void>((resolve) => { finishCreation = resolve; });
+  const harness = await mount({
+    sessions,
+    selectedIds: ['a'],
+    groupVariant: 'project',
+    groups: [{ id: 'host:project', label: 'p', project: projectRecord('p'), sessions }],
+    projectActions: {
+      ...PROJECT_ACTIONS,
+      onNew: (projectId) => {
+        created.push(projectId);
+        return pending;
+      },
+    },
+  });
+  try {
+    await harness.collapseProject('host:project');
+    const header = harness.document.querySelector('[data-project-id="host:project"] > div > button');
+    const create = harness.document.querySelector('.maka-project-row-actions button[aria-label="p New task"]');
+    const menuTrigger = harness.document.querySelector('.maka-project-row-actions button[aria-haspopup="menu"]');
+    assert.ok(create);
+    assert.ok(menuTrigger);
+    await harness.click(create);
+    await harness.click(create);
+    assert.deepEqual(created, ['p'], 'the action receives the project id, not its group key');
+    assert.equal(header?.getAttribute('aria-expanded'), 'false');
+    assert.equal(create.getAttribute('aria-disabled'), 'true');
+    assert.equal(menuTrigger.getAttribute('aria-disabled'), 'true');
+    assert.equal(harness.clears, 0);
+    assert.deepEqual(harness.picks, []);
+
+    await act(async () => { finishCreation(); });
+    assert.equal(create.getAttribute('aria-disabled'), null);
+    assert.equal(menuTrigger.getAttribute('aria-disabled'), null);
+    assert.equal(await harness.rightClickProject('host:project'), true);
+    const menuId = menuTrigger.getAttribute('aria-controls');
+    assert.ok(menuId);
+    const newTaskItem = harness.document.getElementById(menuId)?.querySelector('[role="menuitem"]');
+    assert.ok(newTaskItem);
+    await harness.click(newTaskItem);
+    assert.deepEqual(created, ['p', 'p'], 'the menu and shortcut route to the same project action');
+    assert.equal(header?.getAttribute('aria-expanded'), 'false');
+  } finally {
+    await act(async () => { finishCreation(); });
     await harness.dispose();
   }
 });
