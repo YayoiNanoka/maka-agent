@@ -52,6 +52,32 @@ test('preserves the Session revision in Owner Desktop Host summaries', () => {
   assert.equal(toDesktopHostSessionSummary(projection({ revision: 7 })).revision, 7);
 });
 
+test('manual read state updates only the targeted Session and publishes successful writes', async () => {
+  const ipc = ipcHarness();
+  const deps = createDeps([]);
+  const updates: unknown[] = [];
+  const changes: unknown[] = [];
+  deps.client.updateSessionMetadata = async (sessionId, patch) => {
+    updates.push([sessionId, patch]);
+    if (sessionId === 'unavailable') throw new Error('Host unavailable');
+    return projection({ id: sessionId, ...patch });
+  };
+  deps.emitSessionsChanged = (reason, sessionId) => { changes.push([reason, sessionId]); };
+  registerRuntimeHostSessionCatalogIpc(deps, ipc as unknown as IpcMain);
+
+  await ipc.invoke('sessions:setUnread', 'session-1', true);
+  await ipc.invoke('sessions:setUnread', 'session-1', false);
+  await assert.rejects(ipc.invoke('sessions:setUnread', 'session-1', 'false'), /Invalid unread state/);
+  await assert.rejects(ipc.invoke('sessions:setUnread', 'unavailable', true), /Host unavailable/);
+
+  assert.deepEqual(updates, [
+    ['session-1', { hasUnread: true }],
+    ['session-1', { hasUnread: false }],
+    ['unavailable', { hasUnread: true }],
+  ]);
+  assert.deepEqual(changes, [['updated', 'session-1'], ['updated', 'session-1']]);
+});
+
 test('preserves Host background activity separately from the Session own running turns', () => {
   assert.equal(Object.hasOwn(toDesktopHostSessionSummary(projection()), 'backgroundActivity'), false);
   for (const backgroundActivity of ['idle', 'running', 'waiting_for_user', 'blocked'] as const) {

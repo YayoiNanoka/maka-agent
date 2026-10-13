@@ -1302,6 +1302,40 @@ test('reports each tail watermark the reader reaches once', async () => {
   await controller.close();
 });
 
+test('a manual unread mark survives same-tail updates until the transcript is reopened', async () => {
+  const identity = { sessionId: 'session-1', generation: 'generation-1', hostEpoch: 'host-1' };
+  const store = transcriptStore();
+  const acknowledgements: number[] = [];
+  const open = async () => transcriptHandle(identity, {
+    async acknowledgeTail(through) { acknowledgements.push(through); },
+  });
+  const controller = createDesktopTranscriptRangeController(store, open, { onError() {} });
+  const snapshot = () => {
+    for (const batch of encodeDesktopTranscriptSnapshot({
+      beginsAtTurnBoundary: true,
+      ...identity, durableThrough: 1, hasOlder: false,
+      durable: [{ sequence: 1, message: assistantMessage('read before marking unread') }],
+    })) store.accept(batch);
+  };
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+  snapshot();
+  await settle();
+  assert.deepEqual(acknowledgements, [1]);
+
+  // Updating the catalog's hasUnread does not alter the transcript watermark.
+  // Even a refreshed snapshot of that transcript must not clear the manual mark.
+  snapshot();
+  await settle();
+  assert.deepEqual(acknowledgements, [1]);
+  await controller.close();
+
+  const reopened = createDesktopTranscriptRangeController(store, open, { onError() {} });
+  snapshot();
+  await settle();
+  assert.deepEqual(acknowledgements, [1, 1], 'a new visit marks the existing tail read again');
+  await reopened.close();
+});
+
 test('cancels a transcript open that is still waiting for a Host', async () => {
   const store = transcriptStore();
   let openSignal: AbortSignal | undefined;

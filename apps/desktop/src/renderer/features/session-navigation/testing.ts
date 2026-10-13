@@ -83,6 +83,7 @@ export function createFakeSessionNavigationServices(
   return {
     sessions: {
       list: async () => [],
+      setUnread: async () => undefined,
       setFlagged: async () => undefined,
       archive: async () => undefined,
       unarchive: async () => undefined,

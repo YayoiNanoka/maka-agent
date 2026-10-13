@@ -439,6 +439,19 @@ test('two Clients share stable Session creation, CAS configuration, and catalog 
       assert.equal(readFromTui.hasUnread, false);
       assert.equal(readFromTui.lastReadMessageId, 'message-2');
 
+      for (const hasUnread of [true, false, true]) {
+        const current = await querySession(desktop, unreadSessionId);
+        const updated = await desktop.request('session.metadata.update', {
+          sessionId: unreadSessionId,
+          expectedRevision: current.revision,
+          patch: { hasUnread },
+        });
+        assert.equal(updated.kind, 'committed');
+        const otherClient = await querySession(tui, unreadSessionId);
+        assert.equal(otherClient.hasUnread, hasUnread);
+        assert.equal(otherClient.lastReadMessageId, 'message-2');
+      }
+
       const catalogBeforeBulk = await desktop.request('session.catalog.query', {
         kind: 'list_start',
       });
@@ -659,6 +672,16 @@ test('two Clients share stable Session creation, CAS configuration, and catalog 
     }
     await stopHost(host);
     host = undefined;
+    const owner = await tryAcquireInteractiveRootOwner(capability);
+    assert.ok(owner);
+    try {
+      const execution = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const persisted = await execution.sessionStore.readHeaderSnapshot(unreadSessionId);
+      assert.equal(persisted.hasUnread, true, 'manual unread state survives Host shutdown');
+      assert.equal(persisted.lastReadMessageId, 'message-2');
+    } finally {
+      await owner.close();
+    }
     await assertRetirementCleanup(root, capability, [retirementSessionId, recoverySessionId]);
   } finally {
     await terminateHost(host);

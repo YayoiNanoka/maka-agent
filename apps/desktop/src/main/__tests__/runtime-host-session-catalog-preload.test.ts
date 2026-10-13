@@ -18,8 +18,12 @@
  */
 
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import test from 'node:test';
-import type { DesktopSessionSummary } from '../../preload/bridge-contract.js';
+import { build } from 'esbuild';
+import type { DesktopSessionSummary, MakaBridge } from '../../preload/bridge-contract.js';
 import {
   collectRuntimeHostSessionCatalogsWithCoverage,
   createRuntimeHostSessionCatalogRefresher,
@@ -27,6 +31,53 @@ import {
   reconcileRuntimeHostSessionCatalog,
   resolveRuntimeHostSessionCatalog,
 } from '../../preload/runtime-host-session-catalog.js';
+
+test('manual read-state writes use the target Session Host instead of the default Host', async () => {
+  const hosts = ['local', 'remote', 'environment'].map((kind) => ({
+    hostId: `${kind}-host`, epoch: `${kind}-epoch`, profileId: `${kind}-profile`,
+    profileName: kind, profileKind: kind, profileAccess: 'owner', readiness: 'ready',
+    isDefault: kind === 'local',
+  }));
+  const writes: unknown[][] = [];
+  const ipcRenderer = {
+    on() {}, off() {}, send() {},
+    async invoke(channel: string, ...args: unknown[]) {
+      if (channel === 'runtime-host:identities') return hosts;
+      if (channel === 'runtime-host:awaitReady') return { ready: true };
+      if (channel === 'sessions:setUnread') {
+        writes.push(args);
+        return;
+      }
+      throw new Error(`Unexpected channel: ${channel}`);
+    },
+  };
+  const bundle = await build({
+    entryPoints: [fileURLToPath(new URL('../../../src/preload/preload.ts', import.meta.url))],
+    bundle: true, write: false, platform: 'node', format: 'cjs', external: ['electron'],
+  });
+  let bridge: MakaBridge | undefined;
+  const require = createRequire(import.meta.url);
+  runInNewContext(bundle.outputFiles[0]!.text, {
+    require: (id: string) => id === 'electron' ? {
+      ipcRenderer,
+      contextBridge: { exposeInMainWorld(name: string, value: MakaBridge) {
+        if (name === 'maka') bridge = value;
+      } },
+    } : require(id),
+    process: { env: {} }, Buffer, console, setTimeout, clearTimeout, TextEncoder, TextDecoder,
+    crypto: globalThis.crypto,
+  });
+  assert.ok(bridge);
+  for (const host of hosts) {
+    const key = JSON.stringify([host.hostId, 'same-session-id']);
+    await bridge.sessions.setUnread(key, true);
+    await bridge.sessions.setUnread(key, false);
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(writes)), hosts.flatMap((host) => [
+    [{ hostId: host.hostId, targetEpoch: host.epoch }, 'same-session-id', true],
+    [{ hostId: host.hostId, targetEpoch: host.epoch }, 'same-session-id', false],
+  ]));
+});
 
 function session(id: string, activityAt: number): DesktopSessionSummary {
   return { id, activityAt } as DesktopSessionSummary;

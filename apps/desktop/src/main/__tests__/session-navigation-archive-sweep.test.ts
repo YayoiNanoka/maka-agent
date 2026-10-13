@@ -50,6 +50,7 @@ function harness(): Harness {
 function installService(h: Harness): SessionNavigationSessionService {
   return {
     list: async () => [],
+    setUnread: async () => undefined,
     setFlagged: async () => undefined,
     archive: async (sessionId: string) => {
       h.archives.push(sessionId);

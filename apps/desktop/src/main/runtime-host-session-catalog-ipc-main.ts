@@ -190,6 +190,14 @@ export function registerRuntimeHostSessionCatalogIpc(
     },
   );
   ipcMain.handle(
+    'sessions:setUnread',
+    async (_event, sessionId: string, hasUnread: unknown) => {
+      if (typeof hasUnread !== 'boolean') throw new Error('Invalid unread state');
+      await deps.client.updateSessionMetadata(sessionId, { hasUnread });
+      deps.emitSessionsChanged('updated', sessionId);
+    },
+  );
+  ipcMain.handle(
     'sessions:rename',
     async (_event, sessionId: string, name: unknown, options?: unknown) => {
       if (typeof name !== 'string') throw new Error('Invalid Session name');

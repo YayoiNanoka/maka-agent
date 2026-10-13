@@ -2670,6 +2670,9 @@ const makaBridge = {
     setFlagged(sessionId: string, isFlagged: boolean, options?: { revisionFamily?: boolean }): Promise<void> {
       return invokeSessionRuntimeHost('sessions:setFlagged', sessionId, isFlagged, options);
     },
+    setUnread(sessionId: string, unread: boolean): Promise<void> {
+      return invokeSessionRuntimeHost('sessions:setUnread', sessionId, unread);
+    },
     rename(sessionId: string, name: string, options?: { revisionFamily?: boolean }): Promise<void> {
       return invokeSessionRuntimeHost('sessions:rename', sessionId, name, options);
     },

@@ -165,6 +165,9 @@ export function SessionNavigationProvider(props: SessionNavigationProviderProps)
       onToggleFlag: (sessionId, next) => {
         void controller.commands.flagSession(sessionId, next);
       },
+      onSetUnread: (sessionId, unread) => {
+        return controller.commands.setSessionUnread(sessionId, unread);
+      },
       onArchive: (sessionId) => {
         void controller.commands.archiveSession(sessionId);
       },

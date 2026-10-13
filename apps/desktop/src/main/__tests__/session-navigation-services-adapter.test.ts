@@ -38,6 +38,7 @@ describe('createDesktopSessionNavigationServices', () => {
     } as unknown as MakaBridge);
 
     await services.sessions.list();
+    await services.sessions.setUnread('s', true);
     await services.sessions.setFlagged('s', true, { revisionFamily: true });
     await services.sessions.archive('s', { revisionFamily: true });
     await services.sessions.unarchive('s', { revisionFamily: true });
@@ -50,6 +51,7 @@ describe('createDesktopSessionNavigationServices', () => {
     assert.equal(disposition, 'removed');
     assert.deepEqual(calls, [
       { name: 'list', args: [] },
+      { name: 'setUnread', args: ['s', true] },
       { name: 'setFlagged', args: ['s', true, { revisionFamily: true }] },
       { name: 'archive', args: ['s', { revisionFamily: true }] },
       { name: 'unarchive', args: ['s', { revisionFamily: true }] },

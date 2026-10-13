@@ -284,6 +284,7 @@ const shell: Record<string, CSSProperties> = {
 
 const NOOP_ROW_ACTIONS = {
   onToggleFlag() {},
+  onSetUnread() {},
   onArchive() {},
   onRename() {},
   onDelete() {},

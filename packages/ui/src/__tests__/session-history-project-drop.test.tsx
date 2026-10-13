@@ -138,6 +138,7 @@ async function mountRail(
   const moves: Array<{ sessionId: string; projectId: string | null }> = [];
   const rowActions: SessionRowActions = {
     onToggleFlag: () => undefined,
+    onSetUnread: () => undefined,
     onArchive: () => undefined,
     onRename: () => undefined,
     onMoveToProject: (sessionId, projectId) => {

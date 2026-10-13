@@ -27,7 +27,7 @@
  * real `SessionListPanel`, through the same harness the other rail stories use.
  */
 
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import type { SessionSummary } from '@maka/core/session';
 import { SessionRail } from '../../../packages/ui/stories/session-rail-harness.js';
@@ -131,7 +131,16 @@ function StoryFrame(props: { children: ReactNode }) {
  * the story mounts is a set the reducer produced, not one a fixture asserted.
  */
 function MultiSelectRail() {
-  const selection = useSessionSelection({ sessions: SESSIONS, commands: SWEEPS });
+  const [sessions, setSessions] = useState(SESSIONS);
+  const setUnread = useCallback((sessionId: string, unread: boolean) => {
+    setSessions((current) => current.map((session) =>
+      session.id === sessionId ? { ...session, hasUnread: unread } : session));
+  }, []);
+  const rowActions = useMemo(() => ({
+    ...ROW_ACTIONS,
+    onSetUnread: setUnread,
+  }), [setUnread]);
+  const selection = useSessionSelection({ sessions, commands: SWEEPS });
   const commands = selection.commands;
   const seeded = useRef(false);
 
@@ -147,7 +156,7 @@ function MultiSelectRail() {
     <SessionRail
       selection={{ section: 'sessions' }}
       railSelection={selection}
-      sessions={SESSIONS}
+      sessions={sessions}
       activeId={OPEN_SESSION_ID}
       width={260}
       onSelectSession={noop}
@@ -156,7 +165,7 @@ function MultiSelectRail() {
       onNew={noop}
       viewMode="conversation"
       onViewModeChange={noop}
-      rowActions={ROW_ACTIONS}
+      rowActions={rowActions}
     />
   );
 }

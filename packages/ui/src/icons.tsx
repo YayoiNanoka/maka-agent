@@ -132,6 +132,8 @@ export {
   ListTodo,
   Loader2,
   Loader2Icon,
+  Mail,
+  MailOpen,
   MessageCircleQuestion,
   MessagesSquare,
   MessageSquare,

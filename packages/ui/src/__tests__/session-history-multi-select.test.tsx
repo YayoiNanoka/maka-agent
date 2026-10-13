@@ -32,6 +32,7 @@ import { createRoot } from 'react-dom/client';
 import { parseHTML } from 'linkedom';
 import type { ProjectRecord } from '@maka/core/project';
 import type { SessionSummary } from '@maka/core/session';
+import type { UiLocale } from '@maka/core/ui-locale';
 import { LocaleProvider } from '../locale-context.js';
 import { SessionHistoryList } from '../session-history-list.js';
 import {
@@ -113,6 +114,7 @@ function summary(id: string, overrides: Partial<SessionSummary> = {}): SessionSu
 
 const ROW_ACTIONS = {
   onToggleFlag: () => undefined,
+  onSetUnread: () => undefined,
   onArchive: () => undefined,
   onRename: () => undefined,
 };
@@ -147,6 +149,7 @@ interface Harness {
   rightClickProject(projectId: string): Promise<boolean>;
   openRowMenu(sessionId: string): Promise<void>;
   clickMenuItem(index: number): Promise<void>;
+  replaceSessions(sessions: SessionSummary[]): Promise<void>;
   menuLabels(): string[];
   /** What the row says to assistive tech and nowhere else. */
   rowDescription(sessionId: string): string;
@@ -162,6 +165,7 @@ async function mount(
     selectedIds?: readonly string[];
     sessions?: SessionSummary[];
     activeId?: string;
+    locale?: UiLocale;
     rowActions?: SessionRailData['rowActions'];
     projectActions?: SessionRailData['projectActions'];
     selectionEnabled?: boolean;
@@ -185,6 +189,7 @@ async function mount(
   const picks: PickCall[] = [];
   const retains: string[][] = [];
   const flags: boolean[] = [];
+  let updateData: Dispatch<SetStateAction<SessionRailData>> | undefined;
   let clears = 0;
   let archives = 0;
   // `pick` only records, because what the app's reducer makes of a click is
@@ -211,6 +216,8 @@ async function mount(
   };
 
   function Rail() {
+    const [railData, setRailData] = useState(data);
+    updateData = setRailData;
     const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(
       () => new Set(options.selectedIds ?? []),
     );
@@ -219,7 +226,7 @@ async function mount(
       selectedIds,
     ]);
     return (
-      <SessionRailProvider data={data} selection={options.selectionEnabled === false ? undefined : selection}>
+      <SessionRailProvider data={railData} selection={options.selectionEnabled === false ? undefined : selection}>
         <SessionHistoryList />
       </SessionRailProvider>
     );
@@ -239,7 +246,7 @@ async function mount(
   const root = createRoot(container);
   await act(() =>
     root.render(
-      <LocaleProvider locale="en">
+      <LocaleProvider locale={options.locale ?? 'en'}>
         <Rail />
       </LocaleProvider>,
     ),
@@ -339,6 +346,19 @@ async function mount(
       assert.ok(item, `no menu item at ${index}`);
       await act(async () => {
         item.dispatchEvent(pointerEvent(window, 'click'));
+      });
+    },
+    replaceSessions: async (nextSessions) => {
+      await act(() => {
+        updateData?.((current) => ({
+          ...current,
+          sessions: nextSessions,
+          groups: current.groups?.map((group) => ({
+            ...group,
+            sessions: group.sessions.map((session) =>
+              nextSessions.find((next) => next.id === session.id) ?? session),
+          })),
+        }));
       });
     },
     menuLabels: () => menuItems().map((item) => (item.textContent ?? '').trim()),
@@ -623,8 +643,8 @@ for (const openMenu of ['rightClickRow', 'openRowMenu'] as const) {
             ?.getAttribute('aria-current'),
           'page',
         );
-        assert.deepEqual(harness.menuLabels(), ['Pin', 'Rename', 'Archive']);
-        await harness.clickMenuItem(2);
+        assert.deepEqual(harness.menuLabels(), ['Pin', 'Mark as unread', 'Rename', 'Archive']);
+        await harness.clickMenuItem(3);
         assert.deepEqual(archived, ['d'], 'the single-row action still owns its menu target');
         assert.equal(harness.archives, 0, 'the old picked set must not be swept');
         assert.equal(
@@ -639,6 +659,142 @@ for (const openMenu of ['rightClickRow', 'openRowMenu'] as const) {
     });
   }
 }
+
+for (const [locale, markRead, markUnread] of [
+  ['en', 'Mark as read', 'Mark as unread'],
+  ['zh-CN', '标记为已读', '标记为未读'],
+  ['zh-TW', '標記為已讀', '標記為未讀'],
+] as const) {
+  test(`read-state menu labels follow the session summary in ${locale}`, async () => {
+    const harness = await mount({ locale, sessions: [summary('a'), summary('b', { hasUnread: true })] });
+    try {
+      await harness.rightClickRow('a');
+      assert.equal(harness.menuLabels()[1], markUnread);
+      assert.ok(!harness.menuLabels().includes(markRead), 'the menu offers only the opposite read state');
+      await harness.rightClickRow('b');
+      assert.equal(harness.menuLabels()[1], markRead);
+      assert.ok(!harness.menuLabels().includes(markUnread), 'the menu offers only the opposite read state');
+    } finally {
+      await harness.dispose();
+    }
+  });
+}
+
+for (const active of [false, true]) {
+  test(`read-state menu toggles from the current summary without opening the task (active: ${active})`, async () => {
+    const changes: Array<{ sessionId: string; unread: boolean }> = [];
+    const harness = await mount({
+      activeId: active ? 'b' : 'a',
+      rowActions: {
+        ...ROW_ACTIONS,
+        onSetUnread: (sessionId, unread) => { changes.push({ sessionId, unread }); },
+      },
+    });
+    try {
+      await harness.rightClickRow('b');
+      assert.equal(harness.menuLabels()[1], 'Mark as unread');
+      await harness.clickMenuItem(1);
+      assert.deepEqual(changes, [{ sessionId: 'b', unread: true }]);
+      await harness.replaceSessions(['a', 'b', 'c', 'd'].map((id) =>
+        summary(id, { hasUnread: id === 'b' })));
+      const signal = harness.document.querySelector('[data-session-id="b"] .maka-session-row-signal');
+      assert.ok(signal?.querySelector('.astryx-status-dot'), 'manual unread is visible even on the active task');
+      assert.match(harness.rowDescription('b'), /Unread messages/);
+      await harness.openRowMenu('b');
+      assert.equal(harness.menuLabels()[1], 'Mark as read');
+      await harness.clickMenuItem(1);
+      assert.deepEqual(changes, [
+        { sessionId: 'b', unread: true },
+        { sessionId: 'b', unread: false },
+      ]);
+      await harness.replaceSessions(['a', 'b', 'c', 'd'].map((id) => summary(id)));
+      assert.equal(signal?.querySelector('.astryx-status-dot'), null);
+      assert.doesNotMatch(harness.rowDescription('b'), /Unread messages/);
+      assert.deepEqual(harness.opened, []);
+      assert.equal(
+        harness.document.querySelector(`[data-session-id="${active ? 'b' : 'a'}"] button.astryx-side-nav-item`)
+          ?.getAttribute('aria-current'),
+        'page',
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+}
+
+test('read-state action prevents duplicate requests and unlocks the menu after a failure', async () => {
+  let rejectChange: ((error: Error) => void) | undefined;
+  const pending = new Promise<void>((_resolve, reject) => { rejectChange = reject; });
+  let changes = 0;
+  const harness = await mount({
+    rowActions: {
+      ...ROW_ACTIONS,
+      onSetUnread: () => { changes += 1; return changes === 1 ? pending : undefined; },
+    },
+  });
+  try {
+    await harness.rightClickRow('b');
+    await harness.clickMenuItem(1);
+    const trigger = harness.document.querySelector('[data-session-id="b"] .maka-session-row-action button');
+    assert.equal(trigger?.getAttribute('aria-disabled'), 'true');
+    await harness.clickMenuItem(1);
+    assert.equal(changes, 1);
+    await act(async () => { rejectChange?.(new Error('offline')); });
+    assert.equal(trigger?.getAttribute('aria-disabled'), null);
+    await harness.openRowMenu('b');
+    assert.equal(harness.menuLabels()[1], 'Mark as unread', 'a failed request must not change the summary');
+    await harness.clickMenuItem(1);
+    assert.equal(changes, 2);
+  } finally {
+    await harness.dispose();
+  }
+});
+
+for (const states of [[false, false], [true, true], [false, true]]) {
+  test(`multi-selection has no read-state actions (${states.join(', ')})`, async () => {
+    const changes: Array<{ sessionId: string; unread: boolean }> = [];
+    const harness = await mount({
+      sessions: [summary('a', { hasUnread: states[0] }), summary('b', { hasUnread: states[1] })],
+      selectedIds: ['a', 'b'],
+      rowActions: {
+        ...ROW_ACTIONS,
+        onSetUnread: (sessionId, unread) => { changes.push({ sessionId, unread }); },
+      },
+    });
+    try {
+      await harness.rightClickRow('a');
+      assert.deepEqual(harness.menuLabels(), ['Pin 2 tasks', 'Archive 2 tasks']);
+      await harness.openRowMenu('b');
+      assert.deepEqual(harness.menuLabels(), ['Pin 2 tasks', 'Archive 2 tasks']);
+      assert.equal(harness.document.querySelectorAll('[data-picked="true"]').length, 2);
+      assert.deepEqual(changes, []);
+      assert.deepEqual(harness.opened, []);
+    } finally {
+      await harness.dispose();
+    }
+  });
+}
+
+test('marking a row outside the picked set affects only its context-menu target', async () => {
+  const changes: Array<{ sessionId: string; unread: boolean }> = [];
+  const harness = await mount({
+    selectedIds: ['a', 'b'],
+    sessions: [summary('a'), summary('b'), summary('c', { hasUnread: true })],
+    rowActions: {
+      ...ROW_ACTIONS,
+      onSetUnread: (sessionId, unread) => { changes.push({ sessionId, unread }); },
+    },
+  });
+  try {
+    await harness.rightClickRow('c');
+    assert.equal(harness.menuLabels()[1], 'Mark as read');
+    await harness.clickMenuItem(1);
+    assert.deepEqual(changes, [{ sessionId: 'c', unread: false }]);
+    assert.equal(harness.document.querySelector('[data-picked="true"]'), null);
+  } finally {
+    await harness.dispose();
+  }
+});
 
 test('right-clicking inside the set keeps it', async () => {
   // A run built by dragging has to survive the gesture that asks what to do
@@ -670,15 +826,19 @@ test('the menu counts the set once more than one row is picked', async () => {
   }
 });
 
-test('the menu is about the one row when only that row is picked', async () => {
-  const harness = await mount({ selectedIds: ['b'] });
-  try {
-    await harness.openRowMenu('b');
-    assert.deepEqual(harness.menuLabels(), ['Pin', 'Rename', 'Archive']);
-  } finally {
-    await harness.dispose();
-  }
-});
+for (const hasUnread of [false, true]) {
+  test(`a single picked row offers only the opposite read state (unread: ${hasUnread})`, async () => {
+    const harness = await mount({ selectedIds: ['b'], sessions: [summary('b', { hasUnread })] });
+    try {
+      await harness.openRowMenu('b');
+      assert.deepEqual(harness.menuLabels(), [
+        'Pin', hasUnread ? 'Mark as read' : 'Mark as unread', 'Rename', 'Archive',
+      ]);
+    } finally {
+      await harness.dispose();
+    }
+  });
+}
 
 test('a set that is pinned throughout offers to unpin it', async () => {
   // Every row pinned means the verb unpins; a mixed set pins. Without that rule
@@ -929,7 +1089,7 @@ test('a menu sweeps only the picked rows still on screen', async () => {
     // so it leaves the set here, and stays out of it.
     assert.deepEqual(harness.retains.at(-1), ['a1', 'a2']);
     // And the menu says so: one row, with the single-row wording.
-    assert.deepEqual(harness.menuLabels(), ['Pin', 'Rename', 'Archive']);
+    assert.deepEqual(harness.menuLabels(), ['Pin', 'Mark as unread', 'Rename', 'Archive']);
   } finally {
     await harness.dispose();
   }

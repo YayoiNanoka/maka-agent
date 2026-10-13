@@ -51,6 +51,7 @@ function createService(
   const { disposition = 'removed', archivedSubtaskCount = 0, preview = {} } = opts;
   return {
     list: async () => [],
+    setUnread: async () => undefined,
     setFlagged: async (id: string, value: boolean, options: { revisionFamily: true }) => {
       calls.push(`flag:${id}:${value}:${options.revisionFamily}`);
     },

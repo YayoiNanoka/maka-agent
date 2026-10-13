@@ -50,6 +50,7 @@ import {
 } from '../protocol/index.js';
 import { HOST_BOOTSTRAP_OPERATION_SPECS } from '../protocol/host-status.js';
 import { composeOperationSpecMaps } from '../protocol/operation-spec.js';
+import { connectRuntimeHostMessageTransport } from '../client/connection.js';
 import {
   RUNTIME_HOST_DIAGNOSTIC_LOG_MAX_BYTES,
   runtimeHostLogBuffer,
@@ -132,6 +133,48 @@ describe('Runtime Host bootstrap protocol', () => {
     // Epoch 22 predates the live-run projection and rejects its added catalog
     // field, so mixed-version peers must fail during the handshake instead.
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 22);
+  });
+
+  test('rejects an epoch-220 Host before manual read-state commands can be admitted', async () => {
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 220);
+    const rootId = 'a'.repeat(64);
+    const writes: unknown[] = [];
+    let aborted = false;
+    const result = await connectRuntimeHostMessageTransport({
+      expectedRootId: rootId,
+      compositionId: 'maka.interactive',
+      protocol: { min: RUNTIME_HOST_PROTOCOL_VERSION, max: RUNTIME_HOST_PROTOCOL_VERSION },
+      clientInstanceId: 'manual-read-state-client',
+      transport: {
+        closed: Promise.resolve(),
+        async read() {
+          return {
+            kind: 'accepted',
+            rootId,
+            hostEpoch: 'epoch-220-host',
+            connectionId: 'connection-1',
+            selectedProtocol: RUNTIME_HOST_PROTOCOL_VERSION,
+            compatibilityEpoch: 220,
+            compositionId: 'maka.interactive',
+            compositionRevision: '1',
+            state: 'ready',
+          };
+        },
+        async write(message) {
+          writes.push(JSON.parse(message.toString('utf8')));
+        },
+        closeAfterFlush() {},
+        abort() {
+          aborted = true;
+        },
+      },
+    });
+    assert.deepEqual(result, { kind: 'unavailable', reason: 'handshake_failed' });
+    assert.equal(aborted, true);
+    assert.equal(writes.length, 1, 'only the hello may be sent before the compatibility check');
+    const hello = decodeClientFrame(writes[0]);
+    assert.ok('kind' in hello && hello.kind === 'hello');
+    assert.equal(hello.compatibilityEpoch, RUNTIME_HOST_COMPATIBILITY_EPOCH);
   });
 
   test('publishes a new compatibility epoch for Artifact invalidation frames', () => {

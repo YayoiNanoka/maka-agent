@@ -1375,6 +1375,7 @@ export interface MakaBridge {
     archive(sessionId: string, options?: { revisionFamily?: boolean }): Promise<void>;
     unarchive(sessionId: string, options?: { revisionFamily?: boolean }): Promise<void>;
     setFlagged(sessionId: string, isFlagged: boolean, options?: { revisionFamily?: boolean }): Promise<void>;
+    setUnread(sessionId: string, unread: boolean): Promise<void>;
     rename(sessionId: string, name: string, options?: { revisionFamily?: boolean }): Promise<void>;
     /**
      * Re-file an existing Session into another Project, or out of every Project

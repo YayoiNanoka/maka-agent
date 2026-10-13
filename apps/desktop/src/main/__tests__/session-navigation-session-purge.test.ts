@@ -112,6 +112,7 @@ function installService(
       if (!options.surviving) throw new Error('catalog unavailable');
       return [...options.surviving];
     },
+    setUnread: async () => undefined,
     setFlagged: async () => undefined,
     archive: async (id) => {
       harness.archived.push(id);

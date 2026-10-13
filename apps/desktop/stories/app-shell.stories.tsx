@@ -186,6 +186,7 @@ const catalogProjects: ProjectRecord[] = [
 
 const sidebarRowActions: NonNullable<SessionListPanelProps['rowActions']> = {
   onToggleFlag: noop,
+  onSetUnread: noop,
   onArchive: noop,
   onRename: noop,
 };

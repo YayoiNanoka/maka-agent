@@ -33,6 +33,20 @@ import {
 } from '../protocol/index.js';
 
 describe('Session catalog protocol', () => {
+  test('accepts explicit read states and rejects non-boolean metadata patches', () => {
+    const decode = HOST_OPERATION_SPECS['session.metadata.update'].decodeInput;
+    for (const hasUnread of [true, false]) {
+      const input = { sessionId: 'session-1', expectedRevision: 1, patch: { hasUnread } };
+      assert.deepEqual(decode(input), input);
+    }
+    for (const hasUnread of [undefined, null, 'false', 0, {}, []]) {
+      assert.throws(
+        () => decode({ sessionId: 'session-1', expectedRevision: 1, patch: { hasUnread } }),
+        isProtocolError,
+      );
+    }
+  });
+
   test('preserves unknown and authoritative background activity for Owner and Guest catalogs', () => {
     const shared = {
       kind: 'shared_session',

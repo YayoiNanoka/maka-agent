@@ -769,6 +769,7 @@ export class HostSessionCatalogCoordinator {
           ...(input.patch.name === undefined ? {} : normalizeSessionNamePatch(input.patch.name)),
           ...(labels === undefined ? {} : { labels }),
           ...(input.patch.isFlagged === undefined ? {} : { isFlagged: input.patch.isFlagged }),
+          ...(input.patch.hasUnread === undefined ? {} : { hasUnread: input.patch.hasUnread }),
         };
         await this.#stores.updateHeaderVersioned(input.sessionId, patch, input.expectedRevision);
         return updateSuccess(await this.#committedUpdate(input.sessionId, lease));

@@ -261,6 +261,8 @@ type ShellCopy = {
     actionFallback: string;
     flagFailedTitle: string;
     unflagFailedTitle: string;
+    markUnreadFailedTitle: string;
+    markReadFailedTitle: string;
     archiveFailedTitle: string;
     unarchiveFailedTitle: string;
     renameFailedTitle: string;
@@ -894,6 +896,8 @@ const SHELL_COPY_BY_LOCALE = {
       actionFallback: '任务操作失败，请稍后重试。',
       flagFailedTitle: '标记任务失败',
       unflagFailedTitle: '取消标记失败',
+      markUnreadFailedTitle: '标记为未读失败',
+      markReadFailedTitle: '标记为已读失败',
       archiveFailedTitle: '归档任务失败',
       unarchiveFailedTitle: '恢复任务失败',
       renameFailedTitle: '重命名任务失败',
@@ -1431,6 +1435,8 @@ const SHELL_COPY_BY_LOCALE = {
       actionFallback: '任務操作失敗，請稍後重試。',
       flagFailedTitle: '標記任務失敗',
       unflagFailedTitle: '取消標記失敗',
+      markUnreadFailedTitle: '標記為未讀失敗',
+      markReadFailedTitle: '標記為已讀失敗',
       archiveFailedTitle: '歸檔任務失敗',
       unarchiveFailedTitle: '恢復任務失敗',
       renameFailedTitle: '重新命名任務失敗',
@@ -1970,6 +1976,8 @@ const SHELL_COPY_BY_LOCALE = {
       actionFallback: 'The task action failed. Try again later.',
       flagFailedTitle: 'Could not flag task',
       unflagFailedTitle: 'Could not remove flag',
+      markUnreadFailedTitle: 'Could not mark as unread',
+      markReadFailedTitle: 'Could not mark as read',
       archiveFailedTitle: 'Could not archive task',
       unarchiveFailedTitle: 'Could not restore task',
       renameFailedTitle: 'Could not rename task',

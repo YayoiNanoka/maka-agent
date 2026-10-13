@@ -80,6 +80,7 @@ export interface SessionNavigationProjectScope {
 /** The minimum catalog mutation capability needed by Session Navigation. */
 export interface SessionNavigationSessionService {
   list(): Promise<SessionSummary[]>;
+  setUnread(sessionId: string, unread: boolean): Promise<void>;
   setFlagged(
     sessionId: string,
     flagged: boolean,

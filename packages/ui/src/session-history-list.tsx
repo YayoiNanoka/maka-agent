@@ -40,6 +40,8 @@ import {
   Archive,
   FolderOpen,
   Globe,
+  Mail,
+  MailOpen,
   Pencil,
   Pin,
   PinOff,
@@ -78,7 +80,7 @@ import { getConversationCopy } from './conversation-copy.js';
 import { getSessionHoverCardCopy } from './session-hover-card-copy.js';
 import { deriveTitlebarProjectName } from './titlebar-session-identity.js';
 
-type SessionRowActionId = 'flag' | 'archive' | 'rename' | 'move';
+type SessionRowActionId = 'flag' | 'unread' | 'archive' | 'rename' | 'move';
 
 /**
  * The drag payload for "move this task to that project".
@@ -147,6 +149,7 @@ function useSidebarHoverCardTrigger(
 
 export interface SessionRowActions {
   onToggleFlag(sessionId: string, next: boolean): void | Promise<void>;
+  onSetUnread(sessionId: string, unread: boolean): void | Promise<void>;
   onArchive(sessionId: string): void | Promise<void>;
   onRename(sessionId: string, name: string): void | Promise<void>;
   /**
@@ -905,7 +908,7 @@ const SessionNavRow = memo(function SessionNavRow(props: {
   );
   const signals = sessionRowSignals(
     props.session,
-    { streaming: props.streaming, stale: props.stale, active: props.active },
+    { streaming: props.streaming, stale: props.stale },
     locale,
   );
   const signal = signals[0];
@@ -1597,6 +1600,14 @@ function SessionItemActions(props: {
                     ),
                 },
                 {
+                  label: props.session.hasUnread ? copy.markRead : copy.markUnread,
+                  icon: props.session.hasUnread ? MailOpen : Mail,
+                  onClick: () =>
+                    runRowAction('unread', () =>
+                      actions.onSetUnread(props.session.id, !props.session.hasUnread),
+                    ),
+                },
+                {
                   label: copy.rename,
                   icon: Pencil,
                   onClick: () => {
@@ -1672,7 +1683,7 @@ interface SessionRowSignal {
  */
 function sessionRowSignals(
   session: SessionSummary,
-  options: { streaming: boolean; stale: boolean; active: boolean },
+  options: { streaming: boolean; stale: boolean },
   locale: UiLocale,
 ): SessionRowSignal[] {
   const copy = getConversationCopy(locale).sessions;
@@ -1727,7 +1738,7 @@ function sessionRowSignals(
   // specific about the same unread text. `active` and not `attention`: unread
   // text is "something happened here", not a question waiting on the user —
   // that distinction is the whole point of the two semantics.
-  if (!options.active && session.hasUnread) {
+  if (session.hasUnread) {
     signals.push({ variant: dotForStatus('active'), label: copy.unreadAriaLabel });
   }
 

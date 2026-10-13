@@ -189,6 +189,7 @@ export interface SessionMetadataPatch {
   readonly name?: string;
   readonly labels?: readonly string[];
   readonly isFlagged?: boolean;
+  readonly hasUnread?: boolean;
 }
 
 export interface SessionMetadataUpdateInput {
@@ -671,7 +672,7 @@ export function decodeSessionMetadataUpdateInput(value: unknown): SessionMetadat
     input.patch,
     'Session metadata patch',
     [],
-    ['name', 'labels', 'isFlagged'],
+    ['name', 'labels', 'isFlagged', 'hasUnread'],
   );
   if (Object.keys(patch).length === 0) {
     throw invalidProtocolFrame('Session metadata patch is empty');
@@ -684,6 +685,9 @@ export function decodeSessionMetadataUpdateInput(value: unknown): SessionMetadat
       ...(Object.hasOwn(patch, 'labels') ? { labels: labels(patch.labels) } : {}),
       ...(Object.hasOwn(patch, 'isFlagged')
         ? { isFlagged: boolean(patch.isFlagged, 'Session flagged state') }
+        : {}),
+      ...(Object.hasOwn(patch, 'hasUnread')
+        ? { hasUnread: boolean(patch.hasUnread, 'Session unread state') }
         : {}),
     },
   };

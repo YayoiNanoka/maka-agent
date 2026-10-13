@@ -93,6 +93,7 @@ export interface ArchivedPurgeRequest {
 
 export interface SessionNavigationRowActions {
   flagSession(sessionId: string, flagged: boolean): Promise<void>;
+  setSessionUnread(sessionId: string, unread: boolean): Promise<void>;
   archiveSession(sessionId: string): Promise<void>;
   unarchiveSession(sessionId: string): Promise<void>;
   renameSession(sessionId: string, name: string): Promise<void>;
@@ -162,7 +163,7 @@ export function createSessionNavigationRowActions(deps: {
 
   async function runSessionRowAction(
     sessionId: string,
-    actionId: 'flag' | 'archive' | 'rename' | 'delete' | 'move',
+    actionId: 'flag' | 'unread' | 'archive' | 'rename' | 'delete' | 'move',
     errorTitle: string,
     action: () => Promise<void>,
     describeError?: (error: unknown) => string | undefined,
@@ -205,6 +206,14 @@ export function createSessionNavigationRowActions(deps: {
   async function flagSession(sessionId: string, flagged: boolean) {
     return runSessionRowAction(sessionId, 'flag', flagged ? copy.flagFailedTitle : copy.unflagFailedTitle, async () => {
       await service.setFlagged(sessionId, flagged, { revisionFamily: true });
+      await refreshSessions();
+    });
+  }
+
+  /** Read state belongs to this session, not its revision family. */
+  async function setSessionUnread(sessionId: string, unread: boolean): Promise<void> {
+    return runSessionRowAction(sessionId, 'unread', unread ? copy.markUnreadFailedTitle : copy.markReadFailedTitle, async () => {
+      await service.setUnread(sessionId, unread);
       await refreshSessions();
     });
   }
@@ -680,6 +689,7 @@ export function createSessionNavigationRowActions(deps: {
 
   return {
     flagSession,
+    setSessionUnread,
     archiveSession,
     unarchiveSession,
     renameSession,

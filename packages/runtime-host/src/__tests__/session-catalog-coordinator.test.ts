@@ -210,6 +210,96 @@ test('read marker clears unread only at the ledger transcript tail', async () =>
   assert.equal(caughtUp.lastReadMessageId, 'message-2');
 });
 
+test('manual read state persists through catalog reads and the next transcript visit clears it', async () => {
+  const refreshed: string[] = [];
+  const fixture = createFixture({
+    header: { hasUnread: false, lastReadMessageId: 'message-1' },
+    continuity: {
+      refreshCanonical: async (sessionId) => {
+        refreshed.push(sessionId);
+      },
+    },
+    turnIndex: {
+      readDurableRecords: async () => ({
+        throughSequence: 0,
+        records: [
+          {
+            sequence: 0,
+            cluster: 1,
+            message: { type: 'user', id: 'message-1', turnId: 'turn-1', ts: 1, text: 'Read me' },
+          },
+        ],
+        nextPosition: null,
+      }),
+    },
+  });
+  for (const hasUnread of [true, false, true]) {
+    const outcome = await fixture.coordinator.handlers['session.metadata.update'](
+      {
+        sessionId: fixture.sessionId,
+        expectedRevision: fixture.revision(),
+        patch: { hasUnread },
+      },
+      context,
+    );
+    assert.equal(outcome.ok, true);
+    assert.equal(fixture.header().hasUnread, hasUnread);
+    assert.equal(fixture.header().lastReadMessageId, 'message-1');
+    const catalog = await fixture.coordinator.handlers['session.catalog.query'](
+      {
+        kind: 'get',
+        sessionId: fixture.sessionId,
+      },
+      context,
+    );
+    assert.ok(catalog.ok && catalog.result.kind === 'session');
+    assert.ok(catalog.result.session && 'hasUnread' in catalog.result.session);
+    assert.equal(catalog.result.session.hasUnread, hasUnread);
+  }
+  assert.deepEqual(refreshed, [fixture.sessionId, fixture.sessionId, fixture.sessionId]);
+  const reread = await fixture.coordinator.handlers['session.read_marker.set'](
+    {
+      sessionId: fixture.sessionId,
+      readThroughMessageId: 'message-1',
+    },
+    context,
+  );
+  assert.ok(reread.ok && 'hasUnread' in reread.result);
+  assert.equal(reread.result.hasUnread, false);
+});
+
+test('manual read state rejects stale revisions and WorkHub authority targets', async () => {
+  const fixture = createFixture();
+  const conflict = await fixture.coordinator.handlers['session.metadata.update'](
+    {
+      sessionId: fixture.sessionId,
+      expectedRevision: fixture.revision() - 1,
+      patch: { hasUnread: true },
+    },
+    context,
+  );
+  assert.ok(conflict.ok && conflict.result.kind === 'revision_conflict');
+  assert.equal(fixture.header().hasUnread, false);
+  for (const target of [
+    { fixture, sessionId: WORKHUB_COORDINATION_SESSION_ID },
+    {
+      fixture: createFixture({ header: { role: WORKHUB_COORDINATION_SESSION_ROLE } }),
+      sessionId: 'session-1',
+    },
+  ]) {
+    const outcome = await target.fixture.coordinator.handlers['session.metadata.update'](
+      {
+        sessionId: target.sessionId,
+        expectedRevision: target.fixture.revision(),
+        patch: { hasUnread: true },
+      },
+      context,
+    );
+    assert.ok(!outcome.ok && outcome.error.code === 'operation_unavailable');
+    assert.equal(target.fixture.header().hasUnread, false);
+  }
+});
+
 test('read marker pages past a hidden tail to reach the newest visible message', async () => {
   // A Turn that ends on tool traffic can put more hidden records at the tail
   // than one page holds. Stopping at the page boundary would read the Session

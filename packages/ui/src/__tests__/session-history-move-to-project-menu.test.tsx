@@ -105,6 +105,7 @@ async function mountRail(
     onSelectSession: () => undefined,
     rowActions: {
       onToggleFlag: () => undefined,
+      onSetUnread: () => undefined,
       onArchive: () => undefined,
       onRename: () => undefined,
       onMoveToProject: (sessionId, projectId) => {
