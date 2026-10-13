@@ -41,7 +41,7 @@ export interface ConversationPublication {
 }
 
 /** One publication authority. Fixed projections notify only their actual readers. */
-export function createConversationWorkspace(catalog: SessionCatalogController, services: ConversationObservationServices) {
+export function createConversationWorkspace(catalog: SessionCatalogController, services: ConversationObservationServices, automaticSelection = true) {
   const ui = createAppShellSessionUiStateController();
   const activeIdRef = { current: undefined as string | undefined };
   const messagesRef = { current: [] as StoredMessage[] };
@@ -123,7 +123,7 @@ export function createConversationWorkspace(catalog: SessionCatalogController, s
     readSelectionRevision: raw.readSelectionRevision,
     select: commands.setActiveId,
   });
-  if (hasNewTaskReloadIntent()) bootstrapSelectionLease.release();
+  if (!automaticSelection || hasNewTaskReloadIntent()) bootstrapSelectionLease.release();
   return {
     ui, activeIdRef, transcriptRangeRef, observationRef, bootstrapSelectionLease, commands,
     publishedSession: Object.freeze({ get current() { return activeIdRef.current; } }),

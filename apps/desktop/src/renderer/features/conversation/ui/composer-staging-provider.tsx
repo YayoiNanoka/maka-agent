@@ -47,6 +47,10 @@ export function ComposerStagingProvider(props: {
     const binding = stagingBindings.get(props.commands);
     if (!binding) throw new Error('Unknown Composer staging commands');
     const commands: ComposerStagingCommands = {
+      flushImports: staging.flushImports,
+      captureDrafts: (keys) => staging.captureDrafts(keys).map((draft) => ({ ...draft, quotes: structuredClone(staging.quotesForSend(draft.draftKey) ?? []) })),
+      replaceDrafts: staging.replaceDrafts,
+      clearDrafts: (keys) => { staging.clearDrafts(keys); for (const key of keys) staging.clearQuotes(key); },
       captureSubmission: () => captureComposerStaging(staging, props.draftKey),
       stagedContext: staging.stagedContext,
       addQuote: staging.addQuote,

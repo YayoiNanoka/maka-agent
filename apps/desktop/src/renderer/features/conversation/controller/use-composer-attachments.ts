@@ -24,6 +24,7 @@ import { localizedShellErrorMessage } from '../../../locales/shell-copy.js';
 import { useConversationServices } from '../services.js';
 import { useComposerQuotes } from './use-composer-quotes.js';
 import type { RestoredDraftContent } from '../../../application/contracts/transient-message-projection.js';
+import type { ComposerStagingCommands } from '../model/composer-staging-contract.js';
 
 /** Desktop staging surface for everything the composer carries into a send:
  * attachments, directory picks, and staged transcript quotes. Called only by
@@ -47,6 +48,16 @@ export function useComposerAttachments(options: Omit<Parameters<typeof useShared
     });
     if (draft.quotes?.length) quotes.restoreQuotes(ownerKey, draft.quotes);
   };
+  const replaceDrafts: ComposerStagingCommands['replaceDrafts'] = (drafts) => {
+    attachments.replaceDrafts(drafts.map(({ draftKey, context }) => ({ draftKey, context: {
+      attachments: context.attachments ?? [], stagedAttachments: context.stagedAttachments ?? [],
+      directoryReferences: context.directoryReferences ?? [],
+    } })));
+    for (const { draftKey, context } of drafts) {
+      quotes.clearQuotes(draftKey);
+      quotes.restoreQuotes(draftKey, context.quotes ?? []);
+    }
+  };
   // The revision lifecycle reads its staged plates through this getter (see
   // RevisionStagedContext). It is assembled here, beside the hooks that own
   // the buckets, so the frozen shell only forwards one member.
@@ -56,6 +67,6 @@ export function useComposerAttachments(options: Omit<Parameters<typeof useShared
     restoreQuotes: quotes.restoreQuotes,
     clearQuotes: quotes.clearQuotes,
   });
-  return { ...attachments, ...quotes, restoreQueuedDraftContext, stagedContext,
+  return { ...attachments, ...quotes, restoreQueuedDraftContext, replaceDrafts, stagedContext,
     captureContext: mutations.capture, markDraftChanged: mutations.changed };
 }

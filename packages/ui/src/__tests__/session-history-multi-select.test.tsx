@@ -148,6 +148,7 @@ async function mount(
     selectedIds?: readonly string[];
     sessions?: SessionSummary[];
     activeId?: string;
+    rowActions?: SessionRailData['rowActions'];
     groupVariant?: SessionRailData['groupVariant'];
     groups?: SessionRailData['groups'];
   } = {},
@@ -214,7 +215,7 @@ async function mount(
     groupVariant: options.groupVariant ?? 'conversation',
     groups: options.groups ?? [{ id: 'recent', label: 'Recent', sessions: [...sessions] }],
     onSelectSession: (sessionId) => opened.push(sessionId),
-    rowActions: ROW_ACTIONS,
+    rowActions: options.rowActions ?? ROW_ACTIONS,
   };
 
   const container = document.querySelector('#root');
@@ -289,6 +290,7 @@ async function mount(
         rowButton(sessionId).dispatchEvent(pointerEvent(window, 'pointerup'));
         await new Promise((resolve) => window.setTimeout(resolve, 0));
       });
+      if (event.defaultPrevented) openedMenuRow = sessionId;
       return event.defaultPrevented;
     },
     openRowMenu: async (sessionId) => {
@@ -788,4 +790,32 @@ test('Escape inside a layer above the rail is not the rail\'s to take', async ()
   } finally {
     await harness.dispose();
   }
+});
+
+for (const menu of ['context', 'more'] as const) {
+  test(`${menu} menu opens its task in a new window without selecting it in the current window`, async () => {
+    const windowTasks: string[] = [];
+    const harness = await mount({ activeId: 'a', rowActions: {
+      ...ROW_ACTIONS, onOpenInNewWindow: (id) => { windowTasks.push(id); },
+    } });
+    try {
+      if (menu === 'context') await harness.rightClickRow('b');
+      else await harness.openRowMenu('b');
+      const index = harness.menuLabels().indexOf('Open in new window');
+      assert.ok(index >= 0);
+      await harness.clickMenuItem(index);
+      assert.deepEqual(windowTasks, ['b']);
+      assert.deepEqual(harness.opened, []);
+    } finally { await harness.dispose(); }
+  });
+}
+
+test('bulk task selection does not offer opening multiple windows', async () => {
+  const harness = await mount({ selectedIds: ['a', 'b'], rowActions: {
+    ...ROW_ACTIONS, onOpenInNewWindow: () => undefined,
+  } });
+  try {
+    await harness.rightClickRow('a');
+    assert.ok(!harness.menuLabels().includes('Open in new window'));
+  } finally { await harness.dispose(); }
 });

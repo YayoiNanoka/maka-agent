@@ -75,6 +75,7 @@ export interface PipWindowLike {
    * the controls cannot be driven by any other renderer in the app.
    */
   onMessage(cb: (channel: string, payload: unknown) => void): void;
+  setParentWindow(parent: ParentWindowLike | undefined): void;
   setBounds(bounds: Rectangle): void;
   getBounds(): Rectangle;
   showInactive(): void;
@@ -262,6 +263,7 @@ export function defaultCreateWindow(
         w.webContents.ipc.on(channel, (_event, payload) => cb(channel, payload));
       }
     },
+    setParentWindow: (parent) => w.setParentWindow(parent as import('electron').BrowserWindow ?? null),
     setBounds: (bounds) => w.setBounds(bounds),
     getBounds: () => w.getBounds(),
     showInactive: () => auxiliaryWindowRegistry.show('pip', w, revealMode),

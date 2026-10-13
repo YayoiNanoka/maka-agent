@@ -584,3 +584,21 @@ dialog:modal {
   color: var(--muted-foreground);
   text-align: center;
 }
+
+/* Session windows keep the native controls' safe area, but have no rail track. */
+.appFrame[data-window-kind='session'] .maka-window-titlebar {
+  grid-template-columns: 0px minmax(0, 1fr) auto auto;
+}
+.maka-open-main-window {
+  grid-column: 4;
+  grid-row: 1;
+  display: flex;
+  -webkit-app-region: no-drag;
+}
+
+.maka-session-window-empty {
+  display: grid;
+  place-items: center;
+  min-height: 16rem;
+  color: var(--muted-foreground);
+}

@@ -452,6 +452,7 @@ type ShellCopy = {
     searchConversations: string;
     expandSidebar: string;
     collapseSidebar: string;
+    openInMainWindow: string;
     newTask: string;
     expandWorkbar: string;
     collapseWorkbar: string;
@@ -1204,6 +1205,7 @@ const SHELL_COPY_BY_LOCALE = {
       searchConversations: '搜索任务',
       expandSidebar: '展开侧边栏',
       collapseSidebar: '收起侧边栏',
+      openInMainWindow: '在主窗口打开',
       newTask: '新任务',
       expandWorkbar: '展开任务工作栏',
       collapseWorkbar: '收起任务工作栏',
@@ -1741,6 +1743,7 @@ const SHELL_COPY_BY_LOCALE = {
       searchConversations: '搜尋任務',
       expandSidebar: '展開側邊欄',
       collapseSidebar: '收起側邊欄',
+      openInMainWindow: '在主視窗開啟',
       newTask: '新任務',
       expandWorkbar: '展開任務工作欄',
       collapseWorkbar: '收起任務工作欄',
@@ -2326,6 +2329,7 @@ const SHELL_COPY_BY_LOCALE = {
       searchConversations: 'Search tasks',
       expandSidebar: 'Expand sidebar',
       collapseSidebar: 'Collapse sidebar',
+      openInMainWindow: 'Open in main window',
       newTask: 'New task',
       expandWorkbar: 'Expand task workbar',
       collapseWorkbar: 'Collapse task workbar',

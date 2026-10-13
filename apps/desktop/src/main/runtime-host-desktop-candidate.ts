@@ -129,6 +129,7 @@ import {
 type CandidateIpcMain = ReconnectableReadIpcMain & Pick<IpcMain, "removeHandler">;
 
 export interface DesktopRuntimeHostCandidateDeps {
+  readonly canUseSession?: (senderId: number, scope: DesktopTargetScope, sessionId: string) => boolean;
   readonly terminalCloses?: import('./terminal-close-intents.js').TerminalCloseIntents;
   readonly retireCancelledMessages?: (scope: DesktopTargetScope, sessionId: string, messageIds: readonly string[]) => void;
   readonly failNotAdmittedMessages?: (scope: DesktopTargetScope, sessionId: string, messageIds: readonly string[]) => void;
@@ -136,6 +137,8 @@ export interface DesktopRuntimeHostCandidateDeps {
   readonly ipcMain: RuntimeHostTargetIpcMain;
   readonly workspaceRoot: string;
   readonly attachmentApprovals: AttachmentApprovalRegistry;
+  readonly recoverAttachmentItems?: (senderId: number, scope: DesktopTargetScope, sessionId: string, items: unknown) => { items: unknown[]; validate(): void; dispose(): void };
+  readonly transferRecoveryAttachments?: (senderId: number, scope: DesktopTargetScope, sourceSessionId: string, targetSessionId: string, ids: unknown) => void;
   readonly stat: (path: string) => Promise<{ size: number }>;
   readonly resizeImage: (bytes: Uint8Array) => Promise<Uint8Array>;
   /** Native file dialogs for moving a Session in or out as a bundle. */
@@ -780,6 +783,7 @@ export async function createDesktopRuntimeHostCandidate(
         {
           client,
           terminalCloses,
+          canUseSession: deps.canUseSession ? (sender, id) => deps.canUseSession!(sender.id, scope, id) : undefined,
           sessionObserver,
           emitModeChanged,
           ...(deps.renderer ? { sendToRenderer } : {}),
@@ -994,6 +998,8 @@ export async function createDesktopRuntimeHostCandidate(
             observer: sessionObserver,
             retireCancelledMessages,
             attachmentApprovals: deps.attachmentApprovals,
+            ...(deps.recoverAttachmentItems ? { recoverAttachmentItems: (senderId: number, sessionId: string, items: unknown) => deps.recoverAttachmentItems!(senderId, scope, sessionId, items) } : {}),
+            ...(deps.transferRecoveryAttachments ? { transferRecoveryAttachments: (senderId: number, source: string, target: string, ids: unknown) => deps.transferRecoveryAttachments!(senderId, scope, source, target, ids) } : {}),
             emitSessionsChanged,
             stat: deps.stat,
             resizeImage: deps.resizeImage,

@@ -165,6 +165,7 @@ export interface WorkbarArtifactsService {
 }
 
 export interface WorkbarAttachmentsService {
+  releaseRecoveryAttachments(approvalIds: readonly string[]): Promise<void>;
   readBytes(sessionId: string, artifactId: string): Promise<ArtifactBinaryReadResult>;
   pickFiles(): Promise<
     | {
@@ -225,6 +226,7 @@ export interface SideChatSessionPort {
       name?: string;
       copyId: string;
       sideConversation: true;
+      recoveryAttachmentIds?: readonly string[];
     },
   ): Promise<
     | { ok: true; session: SessionSummary }

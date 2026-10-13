@@ -71,19 +71,6 @@ export function deriveComposerModelSwitchAvailability(input: {
 }
 
 /**
- * Maximum number of characters retained for an ordinary draft. Drafts
- * that grow past this limit keep only the trailing window so the
- * user's most recent typing survives an accidental tab close.
- */
-const COMPOSER_DRAFT_MAX_CHARS = 120_000;
-
-/**
- * Maximum number of distinct draft keys retained. Oldest entries
- * are evicted in insertion order when this is exceeded.
- */
-const COMPOSER_DRAFT_MAX_ENTRIES = 32;
-
-/**
  * Maximum number of history entries retained in the
  * up-arrow / down-arrow recall list.
  */
@@ -103,32 +90,13 @@ export function appendPromptContextDraft(current: string, fragment: string): str
   return `${base}\n\n${next}`;
 }
 
+/** Keep unsent content until its owner explicitly clears or transfers it. */
 export function rememberComposerDraft(
   store: Map<string, string>, key: string | undefined, value: string,
-  options?: { preserveFullText?: boolean },
 ): void {
   if (!key) return;
-  const trimmed = value.trim();
-  if (!trimmed) {
-    store.delete(key);
-    return;
-  }
-
-  // Replacement drafts must stay lossless: sending them can delete the durable
-  // original. They still share the entry limit and whole-draft eviction below.
-  // For ordinary drafts, detach the tail from its oversized backing.
-  const bounded = !options?.preserveFullText && value.length > COMPOSER_DRAFT_MAX_CHARS
-    ? structuredClone(value.slice(value.length - COMPOSER_DRAFT_MAX_CHARS))
-    : value;
-  store.delete(key);
-  store.set(key, bounded);
-
-  while (store.size > COMPOSER_DRAFT_MAX_ENTRIES) {
-    const oldest = store.keys().next().value;
-    if (typeof oldest !== 'string') break;
-    if (oldest === key && store.size === 1) break;
-    store.delete(oldest);
-  }
+  if (!value) store.delete(key);
+  else store.set(key, value);
 }
 
 export function readComposerDraft(store: Map<string, string>, key: string | undefined): string {

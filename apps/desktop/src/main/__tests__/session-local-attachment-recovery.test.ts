@@ -130,6 +130,49 @@ test('two prepared submissions cannot consume the same recovery approval twice',
   concurrent.dispose();
 });
 
+test('closing a sender releases its unleased drafts but preserves another window and acquired send leases', () => {
+  const recovery = new SessionLocalAttachmentRecovery();
+  const [draft, sending, cancelled] = recovery.issue(owner, [attachment(), attachment(), attachment()]);
+  const other = { ...owner, senderId: owner.senderId + 1 };
+  const [otherDraft] = recovery.issue(other, [attachment()]);
+  const send = recovery.prepare(owner, [sending]);
+  const cancel = recovery.prepare(owner, [cancelled]);
+  recovery.releaseSender(owner.senderId);
+  assert.throws(() => recovery.prepare(owner, [draft]), blocked('source_expired'));
+  assert.throws(() => recovery.prepare(owner, [sending]), blocked('source_expired'));
+  assert.equal(send.commit(() => 'admitted'), 'admitted');
+  send.dispose();
+  cancel.dispose();
+  assert.throws(() => recovery.prepare(owner, [cancelled]), blocked('source_expired'));
+  assert.equal(recovery.prepare(other, [otherDraft]).commit(() => 'other window'), 'other window');
+});
+
+test('a side draft transfers only its exact source authority to the newly created fork, without duplicating bytes or extending expiry', () => {
+  let now = 0;
+  const recovery = new SessionLocalAttachmentRecovery(() => now);
+  const [approval] = recovery.issue(owner, [attachment()]);
+  const fork = { ...owner, sessionId: 'side-fork' };
+  for (const foreign of [
+    { ...owner, senderId: 999 }, { ...owner, sessionId: 'unrelated' },
+    { ...owner, partition: 'other' }, { ...owner, scope: { ...owner.scope, targetEpoch: 'other' } },
+  ]) assert.throws(() => recovery.transfer(foreign, fork.sessionId, [approval.approvalId]), blocked('source_expired'));
+  const pendingSend = recovery.prepare(owner, [approval]);
+  assert.throws(() => recovery.transfer(owner, fork.sessionId, [approval.approvalId]), blocked('source_expired'));
+  pendingSend.dispose();
+  assert.throws(() => recovery.transfer(owner, fork.sessionId, [approval.approvalId, 'local-recovery:forged']), blocked('source_expired'));
+  assert.equal(recovery.snapshot(owner, approval.approvalId).content.byteLength, 4, 'a partially invalid batch never moves the first attachment');
+  now = ATTACHMENT_APPROVAL_TTL_MS - 1;
+  recovery.transfer(owner, fork.sessionId, [approval.approvalId]);
+  recovery.transfer(owner, fork.sessionId, [approval.approvalId]);
+  assert.throws(() => recovery.prepare(owner, [approval]), blocked('source_expired'));
+  assert.deepEqual(recovery.snapshot(fork, approval.approvalId).content, attachment().content);
+  const send = recovery.prepare(fork, [approval]);
+  send.validate();
+  now += 2;
+  assert.throws(() => send.validate(), blocked('source_expired'));
+  send.dispose();
+});
+
 test('a synchronous admission failure preserves every recovery approval for a retry', () => {
   const recovery = new SessionLocalAttachmentRecovery();
   const approvals = recovery.issue(owner, [attachment(), attachment()]);

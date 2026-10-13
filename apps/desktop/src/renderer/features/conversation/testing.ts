@@ -36,6 +36,7 @@ export function createAppShellSessionUiStateController(initialState?: AppShellSe
 
 export {
   createTranscriptRestoreLifecycle,
+  replaceWorkspaceReadingAnchors,
   prepareTranscriptForSend,
   restoreSessionTranscriptRange,
 } from './controller/transcript-reading-position.js';

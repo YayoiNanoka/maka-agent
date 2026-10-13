@@ -86,7 +86,7 @@ app.whenReady().then(async () => {
 
   pip = createComputerUsePipController({
     resolveAnchorRect: () => parent.getBounds(),
-    subscribeAnchorChanges: (cb) => {
+    subscribeAnchorChanges: (_sessionId, cb) => {
       parent.on('move', cb);
       parent.on('resize', cb);
       return () => {

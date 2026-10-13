@@ -301,6 +301,7 @@ function ShellFrame(props: {
   height?: number | string;
   motionEnabled?: boolean;
   sidebarCollapsed?: boolean;
+  standalone?: boolean;
   workbarWidth?: number;
 }) {
   return (
@@ -312,6 +313,7 @@ function ShellFrame(props: {
          does not have — the collapsed rail kept its footer hairline in
          Storybook while the app dropped it — and these stories are the pixel
          review surface, so the drift lands exactly where it is trusted. */
+      data-window-kind={props.standalone ? 'session' : 'main'}
       data-sidebar-state={props.sidebarCollapsed ? 'collapsed' : 'expanded'}
       style={
         {
@@ -341,6 +343,8 @@ function ShellFrame(props: {
 // Production-faithful shell composition: Astryx AppShell owns the columns;
 // window chrome is a transparent frame-level drag overlay (not topNav).
 function ComposedShell(props: {
+  standalone?: boolean;
+  onOpenInMainWindow?: () => void;
   sidebarCollapsed?: boolean;
   initialViewMode?: SessionViewMode;
   /**
@@ -423,11 +427,14 @@ function ComposedShell(props: {
     <ShellFrame
       height={props.frameHeight}
       motionEnabled={props.motionEnabled}
-      sidebarCollapsed={collapsed}
+      sidebarCollapsed={props.standalone || collapsed}
+      standalone={props.standalone}
       workbarWidth={props.workbarWidth}
     >
       <AppShellTitlebar
         obscured={false} modalOpen={false} settingsOpen={false}
+        standalone={props.standalone}
+        onOpenInMainWindow={props.onOpenInMainWindow}
         sidebarCollapsed={collapsed}
         onToggleSidebar={() => setCollapsed((current) => !current)}
         onOpenSearchModal={noop}
@@ -473,7 +480,7 @@ function ComposedShell(props: {
         height="fill"
         contentPadding={0}
         mobileNav={{ breakpoint: 'none', hasToggle: false }}
-        sideNav={
+        sideNav={props.standalone ? undefined :
           <SessionRail
             collapsed={collapsed}
             onCollapsedChange={setCollapsed}
@@ -572,6 +579,25 @@ export const DefaultLayout: Story = {
     expect(box('.maka-message-meta time').right).toBeLessThanOrEqual(box('.maka-message-meta [data-message-id]').left);
     expect(box('.maka-turn-footer time').left).toBeGreaterThanOrEqual(box('.maka-turn-footer [data-action="copy"]').right);
     await expect(canvasElement.querySelector('.maka-turn-footer')).not.toHaveTextContent('claude-sonnet-4-5');
+  },
+};
+
+// Real path: session row context menu → Open in new window; the fixed task window retains chat and workbar chrome without a navigation rail.
+export const StandaloneSessionWindow: Story = {
+  render: () => <ComposedShell standalone onOpenInMainWindow={fn()} workbarToggle={{ collapsed: true, onToggle: noop }} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const returnButton = canvas.getByRole('button', { name: '在主窗口打开' });
+    await expect(canvas.queryByRole('button', { name: '搜索任务' })).toBeNull();
+    await expect(canvas.queryByRole('button', { name: '展开侧边栏' })).toBeNull();
+    await expect(canvas.queryByRole('button', { name: '收起侧边栏' })).toBeNull();
+    await expect(canvasElement.querySelector('.maka-session-list')).toBeNull();
+    const titlebar = canvasElement.querySelector<HTMLElement>('.maka-window-titlebar')!;
+    const bounds = returnButton.getBoundingClientRect();
+    const safeRight = titlebar.getBoundingClientRect().right - Number.parseFloat(getComputedStyle(titlebar).paddingRight);
+    await expect(bounds.right).toBeLessThanOrEqual(safeRight + 1);
+    await expect(bounds.width).toBeGreaterThan(20);
+    await userEvent.click(returnButton);
   },
 };
 
