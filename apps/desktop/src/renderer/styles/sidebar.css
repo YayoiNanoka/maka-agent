@@ -230,6 +230,10 @@
   -webkit-app-region: no-drag;
 }
 
+.maka-project-row[data-host-kind="remote"] > div > .astryx-side-nav-item .lucide-globe {
+  color: var(--color-text-blue);
+}
+
 /*
  * A project row receiving a dragged task. Drawn on the row's own box rather
  * than on the nested SideNavItem so the whole target — the heading and any

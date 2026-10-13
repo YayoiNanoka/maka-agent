@@ -554,7 +554,7 @@ export const PinnedAndRecentSections: Story = {
 
 // Real path: group-by-project — collapsible project rows, sessions on the
 // project row's left edge so both titles and hover fills share one x, worktree
-// mark + project actions.
+// mark + project actions, with local, remote and WSL execution locations.
 export const ProjectGroups: Story = {
   render: () => {
     const maka = makeProject({
@@ -575,6 +575,11 @@ export const ProjectGroups: Story = {
       id: 'project-missing',
       name: '旧版桌面端',
       available: false,
+    });
+    const environment = makeProject({
+      id: 'project-environment',
+      name: 'Linux 工具',
+      preferredPath: '/home/user/linux-tools',
     });
     const sessions = [
       makeSession({
@@ -624,23 +629,34 @@ export const ProjectGroups: Story = {
                 id: `project:${maka.id}`,
                 label: maka.name,
                 project: maka,
+                host: { kind: 'local', name: 'Local' },
                 sessions: [sessions[0]!, sessions[1]!],
               },
               {
                 id: `project:${docs.id}`,
                 label: docs.name,
                 project: docs,
+                host: { kind: 'remote', name: '开发服务器' },
                 sessions: [sessions[2]!],
               },
               {
                 id: `project:${missing.id}`,
                 label: missing.name,
                 project: missing,
+                host: { kind: 'local', name: 'Local' },
+                sessions: [],
+              },
+              {
+                id: `project:${environment.id}`,
+                label: environment.name,
+                project: environment,
+                host: { kind: 'environment', name: 'Ubuntu' },
                 sessions: [],
               },
               {
                 id: '__ungrouped__',
                 label: '未归属项目',
+                host: { kind: 'local', name: 'Local' },
                 sessions: [sessions[3]!],
               },
             ],
