@@ -148,6 +148,7 @@ async function mount(
     selectedIds?: readonly string[];
     sessions?: SessionSummary[];
     activeId?: string;
+    rowActions?: SessionRailData['rowActions'];
     groupVariant?: SessionRailData['groupVariant'];
     groups?: SessionRailData['groups'];
   } = {},
@@ -171,20 +172,19 @@ async function mount(
   let clears = 0;
   let archives = 0;
   // `pick` only records, because what the app's reducer makes of a click is
-  // that reducer's own test. `retain` also applies, because the menu's wording
-  // and its sweep are read from the set it narrows — a stub that recorded and
-  // left the set alone would let an assertion about the menu pass over rows
-  // the narrowing was supposed to have removed.
-  let narrow: Dispatch<SetStateAction<ReadonlySet<string>>> | undefined;
+  // that reducer's own test. `retain` and `clear` also apply, because menu
+  // wording and row highlights must reflect the set those commands leave.
+  let updateSelection: Dispatch<SetStateAction<ReadonlySet<string>>> | undefined;
   const commands: SessionRailSelectionCommands = {
     pick: (request) => picks.push(request),
     clear: () => {
       clears += 1;
+      updateSelection?.(new Set());
     },
     retain: (sessionIds) => {
       retains.push([...sessionIds]);
       const keep = new Set(sessionIds);
-      narrow?.((current) => new Set([...current].filter((sessionId) => keep.has(sessionId))));
+      updateSelection?.((current) => new Set([...current].filter((sessionId) => keep.has(sessionId))));
     },
     archiveSelected: () => {
       archives += 1;
@@ -198,7 +198,7 @@ async function mount(
     const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(
       () => new Set(options.selectedIds ?? []),
     );
-    narrow = setSelectedIds;
+    updateSelection = setSelectedIds;
     const selection = useMemo<SessionRailSelection>(() => ({ selectedIds, commands }), [
       selectedIds,
     ]);
@@ -214,7 +214,7 @@ async function mount(
     groupVariant: options.groupVariant ?? 'conversation',
     groups: options.groups ?? [{ id: 'recent', label: 'Recent', sessions: [...sessions] }],
     onSelectSession: (sessionId) => opened.push(sessionId),
-    rowActions: ROW_ACTIONS,
+    rowActions: options.rowActions ?? ROW_ACTIONS,
   };
 
   const container = document.querySelector('#root');
@@ -289,6 +289,7 @@ async function mount(
         rowButton(sessionId).dispatchEvent(pointerEvent(window, 'pointerup'));
         await new Promise((resolve) => window.setTimeout(resolve, 0));
       });
+      if (event.defaultPrevented) openedMenuRow = sessionId;
       return event.defaultPrevented;
     },
     openRowMenu: async (sessionId) => {
@@ -313,7 +314,7 @@ async function mount(
     clickMenuItem: async (index) => {
       const item = menuItems()[index];
       assert.ok(item, `no menu item at ${index}`);
-      await act(() => {
+      await act(async () => {
         item.dispatchEvent(pointerEvent(window, 'click'));
       });
     },
@@ -559,19 +560,51 @@ test('right-clicking a pickable row opens its menu', async () => {
   }
 });
 
-test('right-clicking a row outside the set replaces it', async () => {
-  // A menu is about a set, and one opened on a row the user never picked must
-  // not silently be about the rows they did.
-  const harness = await mount({ selectedIds: ['a', 'b'] });
-  try {
-    await harness.rightClickRow('d');
-    assert.equal(harness.picks[0]?.pick, 'replace');
-    assert.equal(harness.picks[0]?.sessionId, 'd');
-    assert.deepEqual(harness.opened, []);
-  } finally {
-    await harness.dispose();
+for (const openMenu of ['rightClickRow', 'openRowMenu'] as const) {
+  for (const selectedIds of [[], ['a', 'b']]) {
+    const initialSelection = selectedIds.length ? 'a picked set' : 'an empty set';
+    test(`${openMenu} outside ${initialSelection} keeps its target out of selection`, async () => {
+      const archived: string[] = [];
+      const harness = await mount({
+        selectedIds,
+        activeId: 'a',
+        rowActions: {
+          ...ROW_ACTIONS,
+          onArchive: (sessionId) => { archived.push(sessionId); },
+        },
+      });
+      try {
+        await harness[openMenu]('d');
+        assert.equal(
+          harness.document.querySelector('[data-session-id="d"] .maka-session-row-action')
+            ?.getAttribute('data-menu-open'),
+          'true',
+        );
+        assert.deepEqual(harness.picks, [], 'opening a menu must not create a lasting pick');
+        assert.ok(harness.clears > 0);
+        assert.equal(harness.document.querySelector('[data-picked="true"]'), null);
+        assert.deepEqual(harness.opened, []);
+        assert.equal(
+          harness.document.querySelector('[data-session-id="a"] button.astryx-side-nav-item')
+            ?.getAttribute('aria-current'),
+          'page',
+        );
+        assert.deepEqual(harness.menuLabels(), ['Pin', 'Rename', 'Archive']);
+        await harness.clickMenuItem(2);
+        assert.deepEqual(archived, ['d'], 'the single-row action still owns its menu target');
+        assert.equal(harness.archives, 0, 'the old picked set must not be swept');
+        assert.equal(
+          harness.document.querySelector('[data-session-id="d"] .maka-session-row-action')
+            ?.getAttribute('data-menu-open'),
+          null,
+        );
+        assert.equal(harness.document.querySelector('[data-picked="true"]'), null);
+      } finally {
+        await harness.dispose();
+      }
+    });
   }
-});
+}
 
 test('right-clicking inside the set keeps it', async () => {
   // A run built by dragging has to survive the gesture that asks what to do
@@ -580,19 +613,10 @@ test('right-clicking inside the set keeps it', async () => {
   try {
     await harness.rightClickRow('b');
     assert.deepEqual(harness.picks, []);
+    assert.equal(harness.clears, 0);
+    assert.equal(harness.document.querySelectorAll('[data-picked="true"]').length, 2);
+    assert.deepEqual(harness.menuLabels(), ['Pin 2 tasks', 'Archive 2 tasks']);
     assert.deepEqual(harness.opened, []);
-  } finally {
-    await harness.dispose();
-  }
-});
-
-test('clicking ⋯ on a row outside the set replaces it, and never opens the task', async () => {
-  const harness = await mount({ selectedIds: ['a'] });
-  try {
-    await harness.openRowMenu('d');
-    assert.deepEqual(harness.opened, []);
-    assert.equal(harness.picks[0]?.pick, 'replace');
-    assert.equal(harness.picks[0]?.sessionId, 'd');
   } finally {
     await harness.dispose();
   }
@@ -605,6 +629,8 @@ test('the menu counts the set once more than one row is picked', async () => {
     assert.deepEqual(harness.menuLabels(), ['Pin 3 tasks', 'Archive 3 tasks']);
     await harness.clickMenuItem(1);
     assert.equal(harness.archives, 1);
+    assert.equal(harness.clears, 0);
+    assert.equal(harness.document.querySelectorAll('[data-picked="true"]').length, 3);
   } finally {
     await harness.dispose();
   }
