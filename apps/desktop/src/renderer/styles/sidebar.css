@@ -585,8 +585,11 @@
  * `isSelected` itself is spent on the open row alone: it renders
  * `aria-current="page"`, and a set of picked rows is not a set of current
  * pages. What a screen reader hears instead is in the row's description.
+ * A menu target shares this ground only while its menu is open; opening a
+ * menu does not make that row part of the persistent selection.
  */
-.maka-session-row[data-picked='true'] .astryx-side-nav-item {
+.maka-session-row[data-picked='true'] .astryx-side-nav-item,
+.maka-session-row:has(> .maka-session-row-action[data-menu-open='true']) .astryx-side-nav-item {
   background-color: var(--color-neutral);
 }
 
@@ -598,7 +601,8 @@
  * ground — the two states stay one paint in both worlds.
  */
 @media (forced-colors: active) {
-  .maka-session-row[data-picked='true'] .astryx-side-nav-item {
+  .maka-session-row[data-picked='true'] .astryx-side-nav-item,
+  .maka-session-row:has(> .maka-session-row-action[data-menu-open='true']) .astryx-side-nav-item {
     background-color: Highlight;
     color: HighlightText;
   }

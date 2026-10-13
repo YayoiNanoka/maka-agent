@@ -281,8 +281,9 @@ export function SessionHistoryList() {
   }
 
   /**
-   * A menu is about a set, so opening one on a row outside the set replaces it
-   * — the way a file list answers a right-click on an unselected file.
+   * A menu on a row outside the picked set acts on that row alone. Drop the old
+   * picks without picking the menu target: its temporary highlight follows
+   * `data-menu-open`, so dismissing the menu leaves no extra selection behind.
    *
    * A row already in the set keeps the set: a run built by dragging must
    * survive the gesture that asks what to do with it. But the set is narrowed
@@ -305,7 +306,7 @@ export function SessionHistoryList() {
       commands.retain(orderedSessionIds());
       return;
     }
-    commands.pick({ sessionId, pick: 'replace', orderedSessionIds: [] });
+    commands.clear();
   }
 
   function handleListClickCapture(event: MouseEvent<HTMLDivElement>) {
@@ -358,7 +359,7 @@ export function SessionHistoryList() {
     }
     // Opening the menu re-enters `handleListClickCapture` with a synthetic
     // click, so the adoption is dispatched twice — harmless only because both
-    // of its branches are idempotent: `replace` sets the same one row, and
+    // of its branches are idempotent: `clear` drops the picks, and
     // `retain` intersects with the same list. Anything else here needs a guard.
     trigger?.click();
   }
