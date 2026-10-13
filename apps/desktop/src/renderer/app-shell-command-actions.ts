@@ -31,7 +31,7 @@ import {
 } from './platform/desktop/default-runtime-host-operation.js';
 import { buildCommandList } from "./command-palette-commands.js";
 import type { CopyManualDiagnosticReport } from './features/diagnostics/index.js';
-import type { Command, OverlayPaletteActions } from './features/overlays/index.js';
+import type { OverlayPaletteActions } from './features/overlays/index.js';
 import type { SessionCatalogController } from './application/contracts/session-catalog/session-catalog-state.js';
 import {
   commandPaletteActionErrorMessage,
@@ -61,6 +61,7 @@ type ComposerImportOwner = {
 type RefBox<T> = { current: T };
 
 export interface AppShellCommandListOptions {
+  standalone?: boolean;
   uiLocale: UiLocale;
   activeId: string | undefined;
   activePermissionMode: PermissionMode | undefined;
@@ -132,6 +133,7 @@ export function buildAppShellCommandList(
   const copy = getShellCopy(locale).commandActions;
 
   return buildCommandList({
+    allowGlobalNavigation: !options.standalone,
     locale,
     activeSessionId: options.activeId,
     themePref: options.themePref,
@@ -392,13 +394,7 @@ export function buildAppShellCommandList(
 export function useAppShellCommands(
   paletteOpen: boolean,
   commandOptions: AppShellCommandListOptions,
-): {
-  commands: Command[];
-  sessionCatalog: SessionCatalogController;
-  hiddenSessionIds: ReadonlySet<string>;
-  activeSessionId: string | undefined;
-  onSelectSession: (id: string) => void;
-} {
+) {
   const optionsRef = useRef(commandOptions);
   optionsRef.current = commandOptions;
   const { uiLocale } = commandOptions;

@@ -49,11 +49,11 @@ export interface DesktopNativeCapabilityAssemblyDeps {
   readonly revealMode: WindowRevealMode;
   readonly locale: Pick<DesktopLocaleAuthority, 'current' | 'subscribe'>;
   readonly keepSystemAwake?: { hold(reason: string): void; release(reason: string): void };
-  readonly mainWindow?: {
+  readonly sessionWindow?: (sessionId: string) => {
     windowBounds(): { x: number; y: number; width: number; height: number } | undefined;
     onWindowGeometryChanged(cb: () => void): () => void;
     browserWindow(): { isDestroyed(): boolean } | undefined;
-  };
+  } | undefined;
 }
 
 /** Assemble the Desktop-owned capabilities that a Host may call. */
@@ -63,11 +63,11 @@ export function assembleDesktopNativeCapabilities(
   const browserTools = buildBrowserTools();
   const computerUseOverlay = createCursorOverlayController({ revealMode: deps.revealMode });
   const computerUsePip = createComputerUsePipController(
-    deps.mainWindow
+    deps.sessionWindow
       ? {
-          resolveAnchorRect: () => deps.mainWindow?.windowBounds(),
-          subscribeAnchorChanges: (cb) => deps.mainWindow?.onWindowGeometryChanged(cb) ?? (() => {}),
-          resolveParentWindow: () => deps.mainWindow?.browserWindow(),
+          resolveAnchorRect: (sessionId) => deps.sessionWindow?.(sessionId)?.windowBounds(),
+          subscribeAnchorChanges: (sessionId, cb) => deps.sessionWindow?.(sessionId)?.onWindowGeometryChanged(cb) ?? (() => {}),
+          resolveParentWindow: (sessionId) => deps.sessionWindow?.(sessionId)?.browserWindow(),
           cursorPoint: () => screen.getCursorScreenPoint(),
           workAreaFor: (rect) => screen.getDisplayMatching(rect).workArea,
           revealMode: deps.revealMode,

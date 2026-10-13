@@ -3881,6 +3881,20 @@ const makaBridge = {
     },
   },
   appWindow: {
+    context: () => invokeWhenReady('session-window:context'),
+    routeSession: (navigation) => invokeWhenReady('session-window:route', navigation),
+    openSessionWindow: (sessionId) => invokeWhenReady('session-window:open', sessionId),
+    openInMainWindow: () => invokeWhenReady('session-window:open-main'),
+    sessionWindowReady: () => invokeWhenReady('session-window:ready'),
+    subscribeSessionWindowCommand(handler) {
+      const listener = (_event: Electron.IpcRendererEvent, command: import('../shared/session-window-contract.js').SessionWindowCommand) => handler(command);
+      ipcRenderer.on('session-window:command', listener);
+      return () => ipcRenderer.off('session-window:command', listener);
+    },
+    ackSessionWindowCommand: (reply) => invokeWhenReady('session-window:reply', reply),
+    saveWorkspaceSnapshot: (snapshot) => invokeWhenReady('session-window:save', snapshot),
+    loadWorkspaceSnapshot: (sessionIds) => invokeWhenReady('session-window:load', sessionIds),
+    commandMain: (command) => invokeWhenReady('session-window:command-main', command),
     popupMenu(input: import('../shared/native-menu.js').NativeMenuRequest): Promise<string | null> {
       return invokeWhenReady('window:popupMenu', input);
     },

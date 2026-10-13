@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Banner } from '@astryxdesign/core/Banner';
 import {
   ChatView,
@@ -35,7 +35,7 @@ import {
 import type { SessionSummary } from '@maka/core/session';
 import type { QuoteRef } from '@maka/core/events';
 import { generalizedErrorMessageForLocale } from '@maka/core/redaction';
-import { useQuoteCompanion } from './use-quote-companion';
+import { useQuoteCompanion } from './use-quote-companion.js';
 import { useComposerAttachments } from '@maka/ui/use-composer-attachments';
 import { localizedShellErrorMessage } from '../../../../locales/shell-copy.js';
 import { useComposerMentionsContext } from '../../../../composer-mentions.js';
@@ -53,8 +53,11 @@ import type {
   StagedCompanionQuote,
 } from './quote-companion-panel-state';
 import type { CompanionForkVisibilityEvent } from './quote-companion-visibility';
-import { readScrollMotionBehavior } from '../../../../scroll-motion-policy';
+import { readScrollMotionBehavior } from '../../../../scroll-motion-policy.js';
 import { useWorkbarServices } from '../../services-context.js';
+
+import { bindSideConversationPanel, restoredSideConversationPanel } from '../../../../application/contracts/session-side-conversation-handoff.js';
+import { captureWorkspaceAttachments, workspaceDraftContext } from '../../../../application/contracts/session-workspace-draft.js';
 
 /**
  * The side-conversation workbar tab: a transient read-only fork of the main session.
@@ -66,6 +69,7 @@ import { useWorkbarServices } from '../../services-context.js';
  * writes/shell are blocked, and web/custom tools prompt here. Selecting more text
  * in the main transcript adds another quote chip to THIS thread.
  */
+// The workspace transfer owns drafts; the backend continues to own the fork.
 export function QuoteCompanionPanel(props: {
   panelId: string;
   active: boolean;
@@ -92,6 +96,8 @@ export function QuoteCompanionPanel(props: {
   const toast = useToast();
   const copy = getDesktopConversationCopy(locale).quoteCompanion;
   const composerRef = useRef<ComposerHandle>(null);
+  const restoredWorkspaceRef = useRef(restoredSideConversationPanel(props.panelId));
+  const draftRestoredRef = useRef(false);
   const initialPromptStartedRef = useRef(false);
   const contextCompactionPresentationRef = useRef<
     ReturnType<typeof createQuoteCompanionCompactionPresentation>
@@ -117,14 +123,21 @@ export function QuoteCompanionPanel(props: {
     restoreAttachments,
     removeAttachment,
     clearSubmittedAttachments,
+    captureDrafts,
+    flushImports,
+    restoreMessageContext,
+    retainAttachments,
   } = useComposerAttachments({
     copy: getDesktopConversationCopy(locale).actions,
     formatError: (error, fallback) => localizedShellErrorMessage(error, fallback, locale),
     draftKey,
     toastApi: toast,
     service: attachments,
+    releaseRecoveryAttachments: attachments.releaseRecoveryAttachments,
   });
   const companion = useQuoteCompanion({
+    restoredWorkspace: restoredWorkspaceRef.current?.companion,
+    restoredHasContent: restoredWorkspaceRef.current?.hasContent,
     panelId: props.panelId,
     active: props.active,
     pendingQuotes: props.quotes,
@@ -178,6 +191,34 @@ export function QuoteCompanionPanel(props: {
       input.focus();
     },
   });
+  useLayoutEffect(() => {
+    const restored = restoredWorkspaceRef.current;
+    if (!restored || draftRestoredRef.current) return;
+    draftRestoredRef.current = true;
+    const draft = restored.draft;
+    composerRef.current?.restoreDrafts([{ ...draft, draftKey }]);
+    restoreMessageContext(draftKey, undefined, workspaceDraftContext(draft));
+  }, []);
+  useLayoutEffect(() => bindSideConversationPanel(props.panelId, {
+    async capture() {
+      await composerRef.current?.waitForDraftReady();
+      await flushImports();
+      const runtime = await companion.captureWorkspace();
+      const draft = composerRef.current?.captureDrafts([draftKey])[0];
+      const sessionId = runtime?.sessionId ?? props.sourceSession?.id ?? restoredWorkspaceRef.current?.draft.sessionId;
+      if (!draft || !sessionId) throw new Error('Side conversation composer is not ready');
+      const context = captureDrafts([draftKey])[0]!;
+      return {
+        ...(runtime ? { companion: runtime } : {}),
+        draft: { sessionId, text: draft.text, references: draft.references,
+          ...(draft.replacesMessageId ? { replacesMessageId: draft.replacesMessageId } : {}),
+          attachments: await captureWorkspaceAttachments(context.attachments), directoryReferences: context.directoryReferences, quotes: [],
+        },
+      };
+    },
+    detach: companion.detachWorkspace,
+    resume: companion.resumeWorkspace,
+  }), [companion, props.panelId, props.sourceSession, draftKey, captureDrafts, flushImports]);
   useEffect(() => {
     props.onContentStateChange?.(props.panelId, companion.hasContent);
   }, [companion.hasContent, props.onContentStateChange, props.panelId]);
@@ -290,6 +331,7 @@ export function QuoteCompanionPanel(props: {
             )}
             <Composer
               ref={composerRef}
+              retainSendContext={() => retainAttachments(pendingAttachments)}
               onSend={(text, metadata) =>
                 dispatchQuoteCompanionInput({
                   text,

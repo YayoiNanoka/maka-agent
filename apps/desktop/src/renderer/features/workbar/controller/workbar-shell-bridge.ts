@@ -78,6 +78,8 @@ export function createWorkbarShellBridge() {
     for (const listener of [...listeners]) listener();
   };
   const commands: WorkbarControllerCommands = {
+    captureWorkspace: (sessionIds) => controller?.commands.captureWorkspace(sessionIds) ?? {},
+    restoreWorkspace: (snapshots) => controller?.commands.restoreWorkspace(snapshots),
     openTool: (...args) => controller?.commands.openTool(...args),
     openSideChatWithQuote: (quote) => controller?.commands.openSideChatWithQuote(quote),
     respondToClientCapability: (response) =>

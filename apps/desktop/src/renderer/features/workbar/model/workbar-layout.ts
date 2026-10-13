@@ -72,6 +72,7 @@ export interface WorkbarLayoutState {
 
 export type WorkbarLayoutAction =
   | WorkbarPanelsAction
+  | { type: 'restore-layout'; sessionId: string; snapshot: import('../../../../shared/session-workbar-state.js').SessionWorkbarLayoutSnapshot }
   | { type: 'restore-terminals'; tabs: readonly SessionWorkbarTab[] }
   | { type: 'close-terminal'; sessionId: string; ref: string }
   | {
@@ -258,6 +259,25 @@ export function reduceWorkbarLayout(
   state: WorkbarLayoutState,
   action: WorkbarLayoutAction,
 ): WorkbarLayoutState {
+  if (action.type === 'restore-layout') {
+    let panels = action.snapshot.panels;
+    for (const placement of ['right', 'bottom'] as const) {
+      // Foreign resource tabs come from their live owner, never an older
+      // per-Session layout. Keep resources created after this snapshot too.
+      const foreign = panels[placement].tabs.filter((tab) => tab.kind === 'terminal' && tab.ownerSessionId !== action.sessionId).map((tab) => tab.id);
+      if (foreign.length) panels = reduceWorkbarPanels(panels, { type: 'close', placement, tabIds: foreign });
+    }
+    const existing = new Set([...panels.right.tabs, ...panels.bottom.tabs].map((tab) => tab.id));
+    for (const placement of ['right', 'bottom'] as const) {
+      const retained = state.panels[placement].tabs.filter((tab) => tab.kind === 'terminal' && !existing.has(tab.id));
+      if (retained.length) panels = { ...panels, [placement]: { ...panels[placement], tabs: [...panels[placement].tabs, ...retained] } };
+    }
+    return { ...state, panels, activeSessionId: action.sessionId,
+      collapsedBySession: { ...state.collapsedBySession, [action.sessionId]: action.snapshot.collapsed },
+      compactCollapsed: { ...state.compactCollapsed, [action.sessionId]: action.snapshot.collapsed },
+      bottomOpen: action.snapshot.bottomOpen, rightWidth: action.snapshot.rightWidth,
+      bottomHeight: action.snapshot.bottomHeight, spaceCollapsed: false };
+  }
   if (action.type === 'close-terminal') {
     for (const placement of ['right', 'bottom'] as const) {
       const tabIds = state.panels[placement].tabs.filter((tab) =>

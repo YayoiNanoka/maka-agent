@@ -36,6 +36,10 @@ export interface ComposerSurfaceOwner {
 
 /** Commands only: the shell gets no draft, pending flag or setter through this handle. */
 export interface ComposerSubmissionCommands {
+  waitForPendingSends(): Promise<void>;
+  captureWorkspace(sessionIds: readonly string[]): { revision?: import('../../../../shared/session-workspace-state.js').SessionWorkspaceRevision; retractedReferences: Readonly<Record<string, readonly import('@maka/core/events').InlineReference[]>> };
+  restoreWorkspace(drafts: readonly import('../../../../shared/session-workspace-state.js').SessionWorkspaceDraft[]): void;
+  clearWorkspace(sessionIds: readonly string[]): void;
   beginEditUserMessage(turnId: string): void;
   handleTurnFooterAction(turnId: string, actionId: TurnFooterActionMeta['id']): Promise<void>;
   /** Drops the pending Turn-footer marks of one retired Session. */

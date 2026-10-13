@@ -102,6 +102,7 @@ export interface EnsureCompanionForkDeps {
   sourceSession: SessionSummary;
   panelId: string;
   name: string;
+  recoveryAttachmentIds?: readonly string[];
   /** True once the panel has unmounted — checked after every await so a fork
    *  born after disposal is torn down instead of leaking a hidden run. */
   isDisposed: () => boolean;
@@ -297,6 +298,7 @@ export async function ensureCompanionFork(
       name,
       copyId: copyAttempt.copyId,
       sideConversation: true,
+      ...(deps.recoveryAttachmentIds?.length ? { recoveryAttachmentIds: deps.recoveryAttachmentIds } : {}),
     });
     if (!result.ok) {
       copyAttempt.complete();

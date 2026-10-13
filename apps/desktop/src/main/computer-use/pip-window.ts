@@ -91,6 +91,8 @@ export interface ComputerUsePipController {
   complete(sessionId: string): void;
   clearForSession(sessionId: string): void;
   destroyAll(): void;
+  /** Rebind the live mirror after its session moves to another workspace. */
+  refreshOwner(): void;
   isVisible(): boolean;
   /**
    * What the mirror's stop control runs. Same shape the status item uses, and
@@ -151,14 +153,14 @@ export interface CreatePipControllerDeps {
    * falls back to the primary display's corner, as Codex's own
    * `defaultHostForPositioning` / `fallbackAnchor` do.
    */
-  resolveAnchorRect?: () => Rectangle | undefined;
+  resolveAnchorRect?: (sessionId: string) => Rectangle | undefined;
   /**
    * Subscribe to app-window geometry changes; return an unsubscribe.
    *
    * Only resizes are acted on — see the subscription below for why a move is
    * deliberately ignored.
    */
-  subscribeAnchorChanges?: (cb: () => void) => () => void;
+  subscribeAnchorChanges?: (sessionId: string, cb: () => void) => () => void;
   /**
    * The app window itself, to make the mirror its child.
    *
@@ -182,7 +184,7 @@ export interface CreatePipControllerDeps {
    * The comment on the geometry subscription used to say repositioning a small
    * window was "cheap enough not to debounce". It is cheap. It is also late.
    */
-  resolveParentWindow?: () => ParentWindowLike | undefined;
+  resolveParentWindow?: (sessionId: string) => ParentWindowLike | undefined;
   /**
    * Where the pointer is, in screen points.
    *
@@ -230,7 +232,7 @@ export function createComputerUsePipController(
   deps: CreatePipControllerDeps = {},
 ): ComputerUsePipController {
   const resolveBounds =
-    deps.resolveBounds ?? ((aspect: number) => defaultResolveBounds(aspect, deps.resolveAnchorRect?.()));
+    deps.resolveBounds ?? ((aspect: number) => defaultResolveBounds(aspect, resolveAnchorRect()));
   const preloadPath = deps.preloadPath ?? join(defaultDistDir(), 'pip-preload.cjs');
   const htmlPath = deps.htmlPath ?? join(defaultDistDir(), 'pip.html');
 
@@ -359,8 +361,12 @@ export function createComputerUsePipController(
     if (w && !w.isDestroyed()) w.destroy();
   }
 
+  function resolveAnchorRect(): Rectangle | undefined {
+    return sessionId ? deps.resolveAnchorRect?.(sessionId) : undefined;
+  }
+
   function liveParent(): ParentWindowLike | undefined {
-    const candidate = deps.resolveParentWindow?.();
+    const candidate = sessionId ? deps.resolveParentWindow?.(sessionId) : undefined;
     return candidate && !candidate.isDestroyed() ? candidate : undefined;
   }
 
@@ -370,7 +376,7 @@ export function createComputerUsePipController(
    * `defaultHostForPositioning` falls back the same way.
    */
   function hostRect(current: Rectangle): Rect {
-    return deps.resolveAnchorRect?.() ?? workAreaOf(current);
+    return resolveAnchorRect() ?? workAreaOf(current);
   }
 
   function workAreaOf(rect: Rectangle): Rect {
@@ -596,9 +602,29 @@ export function createComputerUsePipController(
     }
   }
 
+  function bindAnchor(created: PipWindowLike): void {
+    unsubscribeAnchor?.();
+    unsubscribeAnchor =
+      deps.subscribeAnchorChanges?.(sessionId!, () => {
+        if (win !== created || created.isDestroyed()) return;
+        // A drag outranks the app window: whatever the window is doing, the
+        // mirror is where the pointer is holding it.
+        if (drag) return;
+        const next = resolveAnchorRect();
+        if (parented && next && anchorSize &&
+            next.width === anchorSize.width && next.height === anchorSize.height) {
+          return;
+        }
+        anchorSize = next ? { width: next.width, height: next.height } : null;
+        const current = created.getBounds();
+        moveTo(created, restPoint(current), { width: current.width, height: current.height });
+      }) ?? null;
+  }
+
   function ensure(nextSessionId: string): PipWindowLike {
     if (win && !win.isDestroyed() && sessionId === nextSessionId) return win;
     if (win) teardown();
+    sessionId = nextSessionId;
     const parent = liveParent();
     const bounds = resolveBounds(aspect);
     const options = pipWindowOptions(bounds, preloadPath, parent);
@@ -610,7 +636,7 @@ export function createComputerUsePipController(
     ready = false;
     queue = [];
     parented = Boolean(parent);
-    const anchor = deps.resolveAnchorRect?.();
+    const anchor = resolveAnchorRect();
     anchorSize = anchor ? { width: anchor.width, height: anchor.height } : null;
     created.onMessage((channel, payload) => handleMessage(created, channel, payload));
     // Queued until the page loads. A fresh window inherits whichever corner the
@@ -640,25 +666,22 @@ export function createComputerUsePipController(
     // exactly the trailing the mirror used to show during a drag. A resize
     // leaves the child where it is while the corner moves out from under it, so
     // that one has to be recomputed.
-    unsubscribeAnchor =
-      deps.subscribeAnchorChanges?.(() => {
-        if (win !== created || created.isDestroyed()) return;
-        // A drag outranks the app window: whatever the window is doing, the
-        // mirror is where the pointer is holding it.
-        if (drag) return;
-        const next = deps.resolveAnchorRect?.();
-        if (parented && next && anchorSize &&
-            next.width === anchorSize.width && next.height === anchorSize.height) {
-          return;
-        }
-        anchorSize = next ? { width: next.width, height: next.height } : null;
-        const current = created.getBounds();
-        moveTo(created, restPoint(current), { width: current.width, height: current.height });
-      }) ?? null;
+    bindAnchor(created);
     return created;
   }
 
   return {
+    refreshOwner(): void {
+      if (!win || win.isDestroyed() || !sessionId) return;
+      const parent = liveParent();
+      win.setParentWindow(parent);
+      parented = Boolean(parent);
+      bindAnchor(win);
+      const anchor = resolveAnchorRect();
+      anchorSize = anchor ? { width: anchor.width, height: anchor.height } : null;
+      const current = win.getBounds();
+      moveTo(win, restPoint(current), { width: current.width, height: current.height });
+    },
     present(input: PipPresentInput): void {
       if (typeof input.sessionId !== 'string' || input.sessionId.length === 0) return;
       if (!input.base64) return;

@@ -22,6 +22,9 @@ import {
   app,
   autoUpdater as nativeAutoUpdater,
   type BrowserWindow,
+  type WebContents,
+  View,
+  dialog,
   clipboard,
   ipcMain,
   Menu,
@@ -57,6 +60,7 @@ import {
   loadOrCreateRuntimeHostClientInstanceId,
   listRuntimeHostWslDistributions,
   runtimeHostProfileAccess,
+  projectSessionCatalogSummary,
   RuntimeHostProfileConnectionError,
 } from "@maka/runtime-host/client";
 import {
@@ -274,10 +278,17 @@ import {
 } from "./startup-context.js";
 import { registerWorkspaceSearchIpc } from "./workspace-search-ipc-main.js";
 import {
+  desktopSessionKey,
+  parseDesktopSessionKey,
   parseDesktopSessionResourceKey,
   requireDesktopTargetScope,
   type DesktopTargetScope,
 } from "../shared/runtime-host-identity.js";
+
+import { SessionWindowGroups } from './session-window-group.js';
+import { SessionWorkspaceStateStore } from './session-workspace-state-store.js';
+import { createSessionWindowCoordinator, registerSessionWindowIpc } from './session-window-coordinator.js';
+import type { SessionWorkspaceSnapshot } from '../shared/session-workspace-state.js';
 
 const MANAGED_UPDATE_RECONNECT_TIMEOUT_MS = 10_000;
 bootContext.prepareToQuit = prepareRuntimeHostDesktopQuit;
@@ -417,7 +428,10 @@ const native = assembleDesktopNativeCapabilities({
   revealMode,
   locale: desktopLocale,
   keepSystemAwake,
-  mainWindow: mainWindowController,
+  sessionWindow: (id) => {
+    const owner = sessionWindows.ownerForSession(desktopSessionKey(parseDesktopSessionResourceKey(id)));
+    return owner ? mainWindowController.registry.forSender(owner)?.controller : mainWindowController.registry.main()?.controller;
+  },
 });
 const riveWorkflowTool = buildRiveWorkflowTool();
 const completeDesktopInteractionTurn = (sessionId: string): void => {
@@ -440,10 +454,6 @@ const permissionOverlay = createPermissionOverlayMain({
   resolveLocale: () => desktopLocale.resolve(),
   revealMode,
 });
-mainWindowDelegates.onMainWindowClose = () => {
-  native.computerUseOverlay.destroyAll();
-  native.computerUsePip.destroyAll();
-};
 const attachmentApprovals = createAttachmentApprovalRegistry();
 /**
  * Dedicated task directories live in the user-owned `~/Maka/tasks` root —
@@ -482,6 +492,57 @@ const sessionLocal = new DesktopSessionLocalService(sessionLocalStore, {
   changed: localSessionChanged,
   onError: (error) => console.error('[session-local] background synchronization failed:', error),
 });
+const sessionWorkspaceStore = new SessionWorkspaceStateStore(join(userDataDir, 'session-workspaces.sqlite'), {
+  approvals: attachmentApprovals, recovery: sessionLocal.attachmentRecovery,
+});
+const sessionWindowGroups = new SessionWindowGroups();
+const sessionWindowLifetime = new AbortController();
+
+function workspaceOwner(sender: Pick<WebContents, 'id'>, hostId: string) {
+  const state = runtimeHostManager?.entries().find((entry) => entry.hostId === hostId);
+  if (!state || (state.readiness === 'unavailable' && state.error instanceof RuntimeHostProfileConnectionError && state.error.reason === 'credential_rejected')) {
+    throw new Error('Session Host authority is unavailable');
+  }
+  return {
+    senderId: sender.id,
+    partition: desktopSessionLocalPartition({ profileId: state.target.profile.id, hostId, incarnation: state.target.profileIncarnationId, credential: state.target.credential }),
+    scope: { hostId, targetEpoch: state.epoch },
+  };
+}
+async function saveWorkspaceSnapshot(sender: WebContents, snapshot: SessionWorkspaceSnapshot): Promise<void> {
+  const keys = [
+    ...snapshot.drafts.map((draft) => draft.sessionId),
+    ...snapshot.sideConversations.map((side) => side.panel.sourceSessionId),
+    ...Object.keys(snapshot.workbar ?? {}), ...Object.keys(snapshot.readingAnchors ?? {}),
+  ];
+  const hosts = new Set(keys.map((key) => parseDesktopSessionKey(key).hostId));
+  for (const hostId of hosts) {
+    const belongs = (key: string) => parseDesktopSessionKey(key).hostId === hostId;
+    await sessionWorkspaceStore.save(workspaceOwner(sender, hostId), {
+      capturedAt: snapshot.capturedAt,
+      drafts: snapshot.drafts.filter((draft) => belongs(draft.sessionId)),
+      sideConversations: snapshot.sideConversations.filter((side) => belongs(side.panel.sourceSessionId)),
+      workbar: Object.fromEntries(Object.entries(snapshot.workbar ?? {}).filter(([key]) => belongs(key))),
+      readingAnchors: Object.fromEntries(Object.entries(snapshot.readingAnchors ?? {}).filter(([key]) => belongs(key))),
+    });
+  }
+}
+async function loadWorkspaceSnapshot(sender: WebContents, sessionIds: readonly string[]): Promise<SessionWorkspaceSnapshot> {
+  const hosts = new Set(sessionIds.map((key) => parseDesktopSessionKey(key).hostId));
+  const snapshots: SessionWorkspaceSnapshot[] = [];
+  try {
+    for (const hostId of hosts) snapshots.push(sessionWorkspaceStore.load(workspaceOwner(sender, hostId), sessionIds.filter((key) => parseDesktopSessionKey(key).hostId === hostId)));
+  } catch (error) {
+    for (const snapshot of snapshots) sessionWorkspaceStore.releaseSnapshot(sender.id, snapshot);
+    throw error;
+  }
+  return {
+    capturedAt: Date.now(), drafts: snapshots.flatMap((snapshot) => snapshot.drafts),
+    sideConversations: snapshots.flatMap((snapshot) => snapshot.sideConversations),
+    workbar: Object.assign({}, ...snapshots.map((snapshot) => snapshot.workbar)),
+    readingAnchors: Object.assign({}, ...snapshots.map((snapshot) => snapshot.readingAnchors)),
+  };
+}
 registerDesktopSessionLocalIpc({
   ipcMain, service: sessionLocal, approvals: attachmentApprovals, resizeImage: resizeImageForAttachment,
   changed: localSessionChanged,
@@ -808,7 +869,47 @@ const browserIpc = registerBrowserIpc({
   mainWindowController,
   auxiliaryWindowRegistry,
   isHostActive: (scope) => runtimeHostManager?.ownsScope(scope) === true,
+  canUseSession: (sender, id) => sessionWindows.canUseSession(sender, id),
+  parkingParent: new View(),
 });
+const sessionWindows = createSessionWindowCoordinator({
+  windows: mainWindowController, signal: sessionWindowLifetime.signal,
+  ensureMainWindow: () => quitCoordinator.focusOrCreateWindow(),
+  isQuitting: () => quitCoordinator.isQuitting(),
+  resolveGroup: async (id) => {
+    const { hostId } = parseDesktopSessionKey(id);
+    const state = runtimeHostManager?.entries().find((entry) => entry.hostId === hostId);
+    if (!state) throw new Error('Session Host is unavailable');
+    const cached = sessionLocal.catalog().find((entry) => entry.scope.hostId === hostId)?.sessions ?? [];
+    const sessions = state.readiness === 'ready'
+      ? [...cached, ...(await state.candidate.client.listSessions()).map((session) => projectSessionCatalogSummary(session))]
+      : cached;
+    return sessionWindowGroups.resolve(id, sessions);
+  },
+  saveSnapshot: saveWorkspaceSnapshot,
+  loadSnapshot: loadWorkspaceSnapshot,
+  releaseSnapshot: (sender, snapshot) => sessionWorkspaceStore.releaseSnapshot(sender.id, snapshot),
+  transferResources: async ({ group, source, target }) => {
+    browserIpc.transferSessions(group.sessionIds, source, target);
+    native.computerUsePip.refreshOwner();
+  },
+  releaseResources: (sender) => {
+    sessionLocal.attachmentRecovery.releaseSender(sender.id);
+    browserIpc.releaseRenderer(sender);
+    const sessionId = native.computerUsePip.currentSessionId();
+    if (sessionId) {
+      const owner = sessionWindows.ownerForSession(desktopSessionKey(parseDesktopSessionResourceKey(sessionId)));
+      if (owner === sender || (!owner && mainWindowController.isMainRenderer(sender))) native.computerUsePip.clearForSession(sessionId);
+    }
+  },
+  onError: (error, sender) => {
+    console.error('[session-window]', error);
+    const options = { type: 'error' as const, title: 'Maka', message: error instanceof Error ? error.message : String(error) };
+    const window = sender && mainWindowController.browserWindowFor(sender);
+    void (window ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options));
+  },
+});
+registerSessionWindowIpc(sessionWindows, ipcMain);
 let workHubEnabled = false;
 const workHubPresentation = createWorkHubPresentation({
   isEnabled: () => workHubEnabled,
@@ -843,10 +944,10 @@ const windowsAppTray = createWindowsAppTray({
   quit: () => app.quit(),
   onError: (error) => console.error('[tray]', error),
 });
-mainWindowDelegates.onMainWindowClosed = () => {
+mainWindowDelegates.onWorkspaceWindowClosed = () => {
   // A hidden WorkHub host window can keep window-all-closed from firing.
   // Without a tray, use the existing quit flow; cancelling it restores Maka.
-  if (process.platform !== 'darwin' && !windowsAppTray.hasTray()) app.quit();
+  if (!mainWindowController.hasOpenWindows() && process.platform !== 'darwin' && !windowsAppTray.hasTray()) app.quit();
 };
 const mcpCapabilityPublisher = createCapabilityRevisionPublisher(() =>
   mcpManager.toolSnapshot().revision,
@@ -1014,6 +1115,16 @@ const notifyRun = createRunNotifier({
   locale: desktopLocale,
   mainWindowController,
   e2e: isE2e,
+  focusSession: (input) => {
+    const state = runtimeHostManager?.entries().find((entry) => entry.readiness === 'ready' && entry.candidate.client.hostEpoch === input.hostEpoch);
+    if (state) void sessionWindows.focusSession(desktopSessionKey({ hostId: state.hostId, sessionId: input.sessionId })).catch(console.error);
+  },
+  isSessionFocused: (input) => {
+    const state = runtimeHostManager?.entries().find((entry) => entry.readiness === 'ready' && entry.candidate.client.hostEpoch === input.hostEpoch);
+    if (!state) return false;
+    const owner = sessionWindows.ownerForSession(desktopSessionKey({ hostId: state.hostId, sessionId: input.sessionId }));
+    return (owner ? mainWindowController.browserWindowFor(owner) : mainWindowController.browserWindow())?.isFocused() ?? false;
+  },
 });
 
 const sessionCopyOwnerProcessId = randomUUID();
@@ -1052,6 +1163,16 @@ const createLocalRuntimeHostManager = () => createRuntimeHostDesktopManager(
     ipcMain,
     workspaceRoot,
     attachmentApprovals,
+    recoverAttachmentItems: (senderId, scope, sessionId, items) => {
+      const owner = workspaceOwner({ id: senderId }, scope.hostId);
+      if (owner.scope.targetEpoch !== scope.targetEpoch) throw new Error('Attachment Host authority changed');
+      return sessionLocal.attachmentRecovery.prepare({ ...owner, sessionId }, items);
+    },
+    transferRecoveryAttachments: (senderId, scope, sourceSessionId, targetSessionId, ids) => {
+      const owner = workspaceOwner({ id: senderId }, scope.hostId);
+      if (owner.scope.targetEpoch !== scope.targetEpoch) throw new Error('Attachment Host authority changed');
+      sessionLocal.attachmentRecovery.transfer({ ...owner, sessionId: sourceSessionId }, targetSessionId, ids);
+    },
     stat: (path) => import("node:fs/promises").then(({ stat }) => stat(path)),
     resizeImage: resizeImageForAttachment,
     mainWindowController,
@@ -1200,6 +1321,10 @@ const createLocalRuntimeHostManager = () => createRuntimeHostDesktopManager(
     ...(e2eFixture?.scenario === "chat-partial-history"
       ? { transcriptHistoryBytes: PARTIAL_HISTORY_TRANSCRIPT_BYTES }
       : {}),
+    canUseSession: (senderId, scope, sessionId) => {
+      const sender = mainWindowController.registry.entries().find((entry) => entry.window.webContents.id === senderId)?.window.webContents;
+      return !!sender && sessionWindows.canUseSession(sender, desktopSessionKey({ ...scope, sessionId }));
+    },
     retireCancelledMessages: (scope, sessionId, messageIds) =>
       sessionLocal.retireCancelledMessages(scope, sessionId, messageIds),
     failNotAdmittedMessages: (scope, sessionId, messageIds) =>
@@ -1237,7 +1362,7 @@ const createLocalRuntimeHostManager = () => createRuntimeHostDesktopManager(
       if (localTarget) {
         sessionLocal.connectionChanged(localTarget);
         sessionLocalStore.bindAuthority(localTarget.profileId, localTarget.partition);
-        if (state.readiness === 'unavailable' && state.error instanceof RuntimeHostProfileConnectionError && state.error.reason === 'credential_rejected') sessionLocal.purge(localTarget);
+        if (state.readiness === 'unavailable' && state.error instanceof RuntimeHostProfileConnectionError && state.error.reason === 'credential_rejected') { sessionLocal.purge(localTarget); sessionWorkspaceStore.clear(localTarget.partition); sessionWindowGroups.forgetHost(state.hostId); }
       }
       sessionLocal.wake();
       const event = runtimeHostTargetEvent(state);
@@ -1281,7 +1406,8 @@ const createLocalRuntimeHostManager = () => createRuntimeHostDesktopManager(
     },
     onTargetRemoved: (state) => {
       const localTarget = localSessionTarget(state);
-      if (localTarget) sessionLocal.purge(localTarget);
+      if (localTarget) { sessionLocal.purge(localTarget); sessionWorkspaceStore.clear(localTarget.partition); }
+      sessionWindowGroups.forgetHost(state.hostId);
       mainWindowController.send("runtime-host-profiles:changed", {
         ...runtimeHostTargetEvent(state),
         readiness: "unavailable",
@@ -2020,7 +2146,7 @@ function registerPersistentClientIpc(): void {
     }),
   );
   registerDesktopDiagnosticsIpc({ ipcMain, ...desktopDiagnostics });
-  ipcMain.handle('directories:pick', async () => {
+  ipcMain.handle('directories:pick', async (event) => {
     const local = runtimeHostManager?.entries().find(
       (state) => state.target.profile.kind === 'local',
     );
@@ -2029,7 +2155,7 @@ function registerPersistentClientIpc(): void {
     const result = await mainWindowController.showOpenDialog({
       title: nativeFileDialogCopy(await desktopLocale.resolve()).referenceFolder,
       properties: ['openDirectory'],
-    });
+    }, event.sender);
     if (result.canceled || !result.filePaths[0]) return { ok: false, reason: 'cancelled' };
     return { ok: true, reference: { hostId, path: result.filePaths[0] } };
   });
@@ -2037,7 +2163,7 @@ function registerPersistentClientIpc(): void {
     const result = await mainWindowController.showOpenDialog({
       title: nativeFileDialogCopy(await desktopLocale.resolve()).addAttachments,
       properties: ["openFile", "multiSelections"],
-    });
+    }, event.sender);
     if (result.canceled || !result.filePaths[0])
       return { ok: false, reason: "cancelled" };
     const { stat } = await import("node:fs/promises");
@@ -2054,6 +2180,11 @@ function registerPersistentClientIpc(): void {
   registerAttachmentPreviewIpc({
     ipcMain,
     approvals: attachmentApprovals,
+    recovery: sessionLocal.attachmentRecovery,
+    authorizeRecovery: (owner) => {
+      try { return sessionLocal.target(owner.scope).partition === owner.partition; }
+      catch { return false; }
+    },
     readFile: readFileCapped,
     renderPreview: renderAttachmentPreview,
   });
@@ -2109,7 +2240,11 @@ function emitSessionsChanged(
 ): void {
   sessionLocal.changed(scope);
   if (reason === 'deleted' && sessionId) {
-    try { sessionLocalStore.removeSession(sessionLocal.target(scope).partition, sessionId); } catch { /* A retired target cannot repopulate its cache. */ }
+    try {
+      const partition = sessionLocal.target(scope).partition;
+      sessionLocalStore.removeSession(partition, sessionId);
+      sessionWorkspaceStore.delete(partition, [desktopSessionKey({ ...scope, sessionId })]);
+    } catch { /* A retired target cannot repopulate its cache. */ }
   }
   const event: SessionChangedEvent = {
     reason,
@@ -2118,6 +2253,9 @@ function emitSessionsChanged(
     ...(extra?.modelId ? { modelId: extra.modelId } : {}),
     ...(extra?.turnId ? { turnId: extra.turnId } : {}),
   };
+  if (sessionId && reason !== 'deleted') {
+    void sessionWindows.refreshGroup(desktopSessionKey({ ...scope, sessionId })).catch(() => undefined);
+  }
   mainWindowController.send("sessions:changed", scope, event);
 }
 
@@ -2156,16 +2294,25 @@ function wireLifecycle(): void {
 }
 
 async function prepareRuntimeHostDesktopQuit(): Promise<'ready' | 'cancelled'> {
-  const preparation = await prepareRuntimeHostQuit(runtimeHostManager, {
-    confirmInterrupt: async () => {
-      const locale = await desktopLocale.resolve();
-      const dialog = buildRuntimeHostActiveQuitDialog(locale);
-      const { response } = await showDesktopMessageBox(dialog.options, { locale });
-      return dialog.decisions[response] === 'quit';
-    },
-  });
-  if (preparation === 'ready') mainWindowController.browserWindow()?.destroy();
-  return preparation;
+  // Save drafts while Host admission is still available. Cancelling quit must
+  // return every renderer to an editable workspace.
+  await sessionWindows.flushAll();
+  try {
+    const preparation = await prepareRuntimeHostQuit(runtimeHostManager, {
+      confirmInterrupt: async () => {
+        const locale = await desktopLocale.resolve();
+        const dialog = buildRuntimeHostActiveQuitDialog(locale);
+        const { response } = await showDesktopMessageBox(dialog.options, { locale });
+        return dialog.decisions[response] === 'quit';
+      },
+    });
+    if (preparation === 'cancelled') await sessionWindows.resumeAll();
+    else for (const entry of mainWindowController.registry.entries()) entry.window.destroy();
+    return preparation;
+  } catch (error) {
+    await sessionWindows.resumeAll();
+    throw error;
+  }
 }
 
 function closeRuntimeHostDesktop(): Promise<void> {
@@ -2173,6 +2320,9 @@ function closeRuntimeHostDesktop(): Promise<void> {
 }
 
 async function disposeRuntimeHostDesktop(): Promise<void> {
+  sessionWindowLifetime.abort();
+  sessionWindows.dispose();
+  sessionWorkspaceStore.close();
   sessionLocal.close();
   powerMonitor.off("resume", wakePeerRecoveryAfterResume);
   clientSettingsWatcher.stop();

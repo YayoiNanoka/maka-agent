@@ -42,6 +42,7 @@ import {
   Globe,
   Mail,
   MailOpen,
+  PictureInPicture2,
   Pencil,
   Pin,
   PinOff,
@@ -80,7 +81,7 @@ import { getConversationCopy } from './conversation-copy.js';
 import { getSessionHoverCardCopy } from './session-hover-card-copy.js';
 import { deriveTitlebarProjectName } from './titlebar-session-identity.js';
 
-type SessionRowActionId = 'flag' | 'unread' | 'archive' | 'rename' | 'move';
+type SessionRowActionId = 'open-window' | 'flag' | 'unread' | 'archive' | 'rename' | 'move';
 
 /**
  * The drag payload for "move this task to that project".
@@ -150,6 +151,7 @@ function useSidebarHoverCardTrigger(
 export interface SessionRowActions {
   onToggleFlag(sessionId: string, next: boolean): void | Promise<void>;
   onSetUnread(sessionId: string, unread: boolean): void | Promise<void>;
+  onOpenInNewWindow?(sessionId: string): void | Promise<void>;
   onArchive(sessionId: string): void | Promise<void>;
   onRename(sessionId: string, name: string): void | Promise<void>;
   /**
@@ -1623,6 +1625,11 @@ function SessionItemActions(props: {
                     );
                   },
                 },
+                ...(actions.onOpenInNewWindow ? [{
+                  label: copy.openInNewWindow,
+                  icon: PictureInPicture2,
+                  onClick: () => runRowAction('open-window', () => actions.onOpenInNewWindow?.(props.session.id)),
+                }] : []),
                 // Archive is where the rail stops. Deleting is the one row
                 // action that cannot be undone, and the rail is where a
                 // mis-click is likeliest: rows are dense, the menu is one hover

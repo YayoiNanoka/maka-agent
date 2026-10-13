@@ -87,6 +87,7 @@ export function useComposerSubmission<Owner extends ComposerSurfaceOwner>(input:
     uiLocale,
   });
   // Held for the whole of a send; see ChatComposerRegion.
+  const pendingSendsRef = useRef(new Set<Promise<unknown>>());
   const [newTaskSendPending, setNewTaskSendPending] = useState(false);
   const [revisionDraft, setRevisionDraft] = useState<TurnRevisionDraft | null>(null);
   const revisionDraftRef = useRef<TurnRevisionDraft | null>(null);
@@ -240,13 +241,39 @@ export function useComposerSubmission<Owner extends ComposerSurfaceOwner>(input:
     [commitRevisionDraft, composerRef, services],
   );
 
+  const sendForWorkspace = useCallback((...args: Parameters<typeof onSend>) => {
+    const pending = onSend(...args);
+    pendingSendsRef.current.add(pending);
+    void pending.finally(() => pendingSendsRef.current.delete(pending)).catch(() => {});
+    return pending;
+  }, [onSend]);
   const shellCommands = useMemo<ComposerSubmissionCommands>(() => ({
+    async waitForPendingSends() {
+      while (pendingSendsRef.current.size) await Promise.allSettled([...pendingSendsRef.current]);
+    },
+    captureWorkspace(sessionIds) {
+      const revision = revisionDraftRef.current;
+      return {
+        ...(revision && sessionIds.includes(revision.draftSessionId) ? { revision: structuredClone(revision) } : {}),
+        retractedReferences: Object.fromEntries(sessionIds.map((key) => [key, structuredClone(retractedWorkspaceReferencesRef.current[key] ?? [])])),
+      };
+    },
+    restoreWorkspace(drafts) {
+      for (const draft of drafts) {
+        retractedWorkspaceReferencesRef.current[draft.sessionId] = [...(draft.retractedReferences ?? [])];
+        if (draft.revision) commitRevisionDraft(structuredClone(draft.revision));
+      }
+    },
+    clearWorkspace(sessionIds) {
+      if (revisionDraftRef.current && sessionIds.includes(revisionDraftRef.current.draftSessionId)) commitRevisionDraft(null);
+      for (const key of sessionIds) delete retractedWorkspaceReferencesRef.current[key];
+    },
     beginEditUserMessage: (turnId) => revision.beginEditUserMessage(turnId),
     handleTurnFooterAction: (turnId, actionId) => turn.handleTurnFooterAction(turnId, actionId),
     clearPendingTurnActions: (sessionId) => turnActionRegistry.clearForSession(sessionId),
-  }), [revision, turn, turnActionRegistry.clearForSession]);
+  }), [commitRevisionDraft, revision, turn, turnActionRegistry.clearForSession]);
   const reader = useMemo(() => ({
-    onSend,
+    onSend: sendForWorkspace,
     newTaskSendPending,
     revisionDraft,
     cancelRevisionDraft: () => { void revision.cancelRevisionDraft(); },
@@ -255,7 +282,7 @@ export function useComposerSubmission<Owner extends ComposerSurfaceOwner>(input:
     respondToUserForm: chat.respondToUserForm,
     stop,
     composerResumeAction: resume.composerResumeAction,
-  }), [chat, newTaskSendPending, onSend, resume.composerResumeAction, revision, revisionDraft, stop]);
+  }), [chat, newTaskSendPending, sendForWorkspace, resume.composerResumeAction, revision, revisionDraft, stop]);
   // What the transcript and the chrome readers take, apart from the Composer's
   // submission state, so a send or an edit draft does not repaint the transcript.
   const turnReader = useMemo(() => ({

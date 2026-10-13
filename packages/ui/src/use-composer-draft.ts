@@ -21,9 +21,9 @@
  * Composer draft-persistence hook (issue #1044).
  *
  * Owns the per-session unsent-draft store that used to live inline in
- * `composer.tsx`: a bounded Map keyed by `draftKey` and the active key.
+ * `composer.tsx`: a Map keyed by `draftKey` and the active key.
  * The pure store operations
- * (remember / read, with a 120k-char ordinary-draft bound and 32-entry limit) stay in
+ * (remember / read) stay in
  * `composer-helpers.ts` — this hook is the React seam that wires them to the
  * input's `ComposerTextPort`.
  *
@@ -50,7 +50,16 @@ export interface ComposerDraftRecovery extends DraftMutationGuard {
   restore(text: string, references: readonly InlineReference[], replacesMessageId: string): void;
 }
 
+export interface ComposerDraftSnapshot {
+  readonly draftKey: string;
+  readonly text: string;
+  readonly references: readonly InlineReference[];
+  readonly replacesMessageId?: string;
+}
+
 export interface ComposerDraftApi {
+  captureDrafts(keys: readonly string[]): ComposerDraftSnapshot[];
+  restoreDrafts(drafts: readonly ComposerDraftSnapshot[]): void;
   /** Remember the current (or given) value; persist ordinary drafts when configured. */
   saveCurrentDraft(value?: string): void;
   /** Clear one session's draft; the active key's draft is the input itself. */
@@ -92,18 +101,7 @@ export function useComposerDraft(input: {
   const mutations = useDraftMutationGuard();
 
   function remember(key: string | undefined, value: string, references: readonly InlineReference[]) {
-    const previousKeys = [...draftStoreRef.current.keys()];
-    rememberComposerDraft(draftStoreRef.current, key, value, {
-      preserveFullText: replacementsByKey.current.has(key ?? ''),
-    });
-    // Capacity eviction abandons the old edit. Emptying the current body is
-    // handled separately because its attachments or quotes may still remain.
-    for (const previousKey of previousKeys) {
-      if (previousKey !== key && !draftStoreRef.current.has(previousKey)) {
-        replacementsByKey.current.delete(previousKey);
-        mutations.changed(previousKey);
-      }
-    }
+    rememberComposerDraft(draftStoreRef.current, key, value);
     if (key && draftStoreRef.current.has(key)) {
       const retained = draftStoreRef.current.get(key)!;
       const removedPrefix = value.length - retained.length;
@@ -207,6 +205,14 @@ export function useComposerDraft(input: {
   });
 
   return {
+    captureDrafts: (keys) => keys.map((key) => ({
+      draftKey: key, text: getDraft(key),
+      references: structuredClone(activeDraftKeyRef.current === key ? input.references?.read() ?? [] : referencesByKey.current.get(key) ?? []),
+      ...(replacementsByKey.current.has(key) ? { replacesMessageId: replacementsByKey.current.get(key)! } : {}),
+    })),
+    restoreDrafts: (drafts) => {
+      for (const draft of drafts) setDraft(draft.draftKey, draft.text, draft.references, draft.replacesMessageId);
+    },
     saveCurrentDraft,
     clearDraft,
     setDraft,

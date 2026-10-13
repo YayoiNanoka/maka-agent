@@ -35,6 +35,8 @@ interface NotificationsDeps {
   settingsStore: { get(): Promise<AppSettings> };
   locale: Pick<DesktopLocaleAuthority, 'observe'>;
   mainWindowController: MainWindowController;
+  focusSession: (input: RunNotificationEvent) => void;
+  isSessionFocused: (input: RunNotificationEvent) => boolean;
   e2e: boolean;
 }
 
@@ -47,7 +49,7 @@ export function createRunNotifier(deps: NotificationsDeps): (input: RunNotificat
     const gate = {
       enabled: settings.notifications.runComplete,
       supported,
-      windowFocused: deps.mainWindowController.isFocused(),
+      windowFocused: deps.isSessionFocused(input),
       e2e: deps.e2e,
     };
     if (!shouldRaiseRunNotification(gate)) return;
@@ -56,7 +58,7 @@ export function createRunNotifier(deps: NotificationsDeps): (input: RunNotificat
       input,
       deps.locale.observe(settings),
     );
-    showNativeNotification(copy, () => deps.mainWindowController.focus());
+    showNativeNotification(copy, () => deps.focusSession(input));
     app.dock?.bounce('informational');
   });
 }

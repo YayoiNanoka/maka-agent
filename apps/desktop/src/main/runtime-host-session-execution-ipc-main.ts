@@ -170,6 +170,8 @@ export interface RuntimeHostSessionExecutionIpcDeps {
   client: RuntimeHostSessionExecutionClient;
   observer: RuntimeHostSessionObserver;
   attachmentApprovals: AttachmentApprovalRegistry;
+  recoverAttachmentItems?: (senderId: number, sessionId: string, items: unknown) => { items: unknown[]; validate(): void; dispose(): void };
+  transferRecoveryAttachments?: (senderId: number, sourceSessionId: string, targetSessionId: string, ids: unknown) => void;
   emitSessionsChanged: (
     reason: SessionChangedReason,
     sessionId?: string,
@@ -198,33 +200,41 @@ type MessageAttachmentResult =
   | { readonly ok: false; readonly reason: 'attachment_blocked'; readonly code: AttachmentIngestBlockedCode };
 
 async function prepareMessageAttachments(input: {
-  deps: Pick<RuntimeHostSessionExecutionIpcDeps, 'attachmentApprovals' | 'client' | 'resizeImage' | 'stat'>;
+  deps: Pick<RuntimeHostSessionExecutionIpcDeps, 'attachmentApprovals' | 'client' | 'resizeImage' | 'stat' | 'recoverAttachmentItems'>;
   getSenderId: () => number;
   sessionId: string;
   retainedAttachments: readonly AttachmentRef[];
   attachmentItems: unknown;
 }): Promise<MessageAttachmentResult> {
   const attachments = retainedAttachmentsForSession(input.sessionId, input.retainedAttachments);
+  let recovery: ReturnType<NonNullable<RuntimeHostSessionExecutionIpcDeps['recoverAttachmentItems']>> | undefined;
   try {
     if (input.attachmentItems !== undefined) {
+      recovery = input.deps.recoverAttachmentItems?.(input.getSenderId(), input.sessionId, input.attachmentItems);
       const files = await resolveIngestItems({
         senderId: input.getSenderId(),
-        items: input.attachmentItems,
+        items: recovery?.items ?? input.attachmentItems,
         approvals: input.deps.attachmentApprovals,
         stat: input.deps.stat,
       });
+      recovery?.validate();
       attachments.push(...await resolveAttachmentRefs({
         files,
         resizeImage: input.deps.resizeImage,
         snapshot: ({ name, mimeType, content }) =>
           input.deps.client.ingestAttachment({ sessionId: input.sessionId, name, mimeType, content }),
       }));
+      recovery?.validate();
     }
   } catch (error) {
     if (error instanceof AttachmentIngestBlockedError) {
       return { ok: false, reason: 'attachment_blocked', code: error.code };
     }
     throw error;
+  } finally {
+    // The renderer retains a failed send's draft and releases its approvals on
+    // success. Only hold the byte snapshot while it is being ingested here.
+    recovery?.dispose();
   }
   return attachments.length > MAX_ATTACHMENT_COUNT
     ? { ok: false, reason: 'attachment_blocked', code: 'count_limit' }
@@ -798,6 +808,11 @@ export function registerRuntimeHostSessionExecutionIpc(
     "sessions:branchFromTurn",
     async (event, sessionId: string, input: unknown) => {
       const normalized = normalizeRuntimeHostBranchFromTurnInput(input);
+      const recoveryIds = input && typeof input === 'object' && 'recoveryAttachmentIds' in input
+        ? input.recoveryAttachmentIds : undefined;
+      if (recoveryIds !== undefined && (!normalized.sideConversation || !Array.isArray(recoveryIds) ||
+          recoveryIds.length > MAX_ATTACHMENT_COUNT || recoveryIds.some((id) => typeof id !== 'string' || !id.startsWith('local-recovery:'))))
+        throw new Error('Invalid side conversation recovery attachments');
       const createBranch = () =>
         deps.client.copySession("branch", {
           sourceSessionId: sessionId,
@@ -837,6 +852,10 @@ export function registerRuntimeHostSessionExecutionIpc(
           } satisfies SideConversationBranchResult;
         }
         throw error;
+      }
+      if (Array.isArray(recoveryIds) && recoveryIds.length > 0) {
+        if (!deps.transferRecoveryAttachments) throw new Error('Attachment recovery is unavailable');
+        deps.transferRecoveryAttachments(event.sender.id, sessionId, branch.id, recoveryIds);
       }
       if (normalized.name) {
         branch = await deps.client.updateSessionMetadata(branch.id, {

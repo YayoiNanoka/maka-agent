@@ -31,16 +31,13 @@ import {
   type SetStateAction,
 } from 'react';
 import type { QuoteRef } from '@maka/core/events';
-import type { OrchestrationMode } from '@maka/core/orchestration';
 import type { UiLocale, UiLocalePreference } from '@maka/core/ui-locale';
-import { collapseSessionRevisions } from '@maka/core/session-revisions';
 import { isLinkedSubagentSession } from '@maka/core/session';
 import { resolveUiLocale } from '@maka/core/ui-locale';
 import { hasSettledInitialOnboarding } from '@maka/core/onboarding-milestone';
 import {
   ChatSurfaceLayout,
   type ComposerHandle,
-  type MakaUriDest,
   MakaUriContext,
   AstryxLocaleProvider,
   LocaleProvider,
@@ -60,11 +57,13 @@ import { deriveWorkspaceReadinessRecovery } from './workspace-readiness-recovery
 import { AgentGraphPanel } from './agent-graph-panel';
 import { ChatComposerRegion } from './chat-composer-region';
 import { WorkbarHost, WorkbarProvider, WorkbarShellRoot, type WorkbarShellProjection } from './features/workbar';
+import { SessionWindowRoot, SessionWindowBinding, SessionWindowEmptyState, type SessionWindowProjection } from './features/session-windows/index.js';
 import { AppUpdateProvider } from './features/app-update/index.js';
 import * as Goals from './features/goals';
 import * as ModuleHub from './features/module-hub';
 import {
   SessionNavigationProvider,
+  SessionNavigationCommands,
   createSessionOpenCommand,
   sessionRailLayoutStore,
   useSessionNavigationReads,
@@ -97,7 +96,7 @@ import * as Diagnostics from './features/diagnostics/index.js';
 import { getDesktopConversationCopy } from './application/contracts/conversation-copy';
 import { ErrorBoundary } from './error-boundary';
 import { useShellAppearance } from './use-shell-appearance';
-import { SessionSettingsProvider, useSessionSettingIntent } from './features/session-settings';
+import { SessionSettingsProvider, useSessionSettingIntent, createSessionModeCommands, deriveSessionSettingsPresentation } from './features/session-settings';
 import { pendingSessionView } from './pending-session-view';
 import { readScrollMotionBehavior } from './scroll-motion-policy';
 import { readNavigationState, selectNavigation } from './nav-selection';
@@ -136,12 +135,6 @@ import { useShellConnections } from './use-shell-connections';
 import { useSystemUiLocale } from './use-system-ui-locale';
 import { AppShell as AstryxAppShell } from '@astryxdesign/core/AppShell';
 
-type ComposerImportOwner = {
-  sessionId: string | undefined;
-  navSection: NavSelection['section'];
-  newTaskDraftKey?: string;
-};
-
 export function AppShell() {
   const [uiLocalePreference, setUiLocalePreference] = useState<UiLocalePreference>('auto');
   const [uiLocaleOverride, setUiLocaleOverride] = useState<UiLocale | null>(null);
@@ -159,8 +152,10 @@ export function AppShell() {
           <ErrorBoundary locale={uiLocale}>
             <AppUpdateProvider>
               <RuntimeHostHandoffOverlay />
-              <WorkHubControlOverlay />
-              <TaskEntry.TaskEntryRoot>
+              <SessionWindowRoot>
+                {(sessionWindow) => <>
+                {!sessionWindow.standalone && <WorkHubControlOverlay />}
+                <TaskEntry.TaskEntryRoot>
                 {(taskEntry) => (
                   <Overlays.OverlaysRoot>
                     {(overlays) => (
@@ -168,13 +163,13 @@ export function AppShell() {
                         {(sharedSessionDialog) => (
                           <WorkbarShellRoot>
                             {(workbar) => (
-                              <Conversation.ConversationProvider>
+                              <Conversation.ConversationProvider automaticSelection={false}>
                                 <OnboardingProjectionRoot>
                                   {(onboarding) => (
                                     <Diagnostics.ManualDiagnosticReportConsumer>
                                       {(copyManualDiagnosticReport) => (
                                         <AppShellContent
-                                          {...{ taskEntry, overlays, sharedSessionDialog, workbar, onboarding, copyManualDiagnosticReport, uiLocale, setUiLocaleOverride, setUiLocalePreference }}
+                                          {...{ sessionWindow, taskEntry, overlays, sharedSessionDialog, workbar, onboarding, copyManualDiagnosticReport, uiLocale, setUiLocaleOverride, setUiLocalePreference }}
                                         />
                                       )}
                                     </Diagnostics.ManualDiagnosticReportConsumer>
@@ -188,7 +183,8 @@ export function AppShell() {
                     )}
                   </Overlays.OverlaysRoot>
                 )}
-              </TaskEntry.TaskEntryRoot>
+              </TaskEntry.TaskEntryRoot></>}
+              </SessionWindowRoot>
             </AppUpdateProvider>
           </ErrorBoundary>
         </Diagnostics.DiagnosticReportToastProvider>
@@ -209,6 +205,7 @@ export function AppShell() {
 const SESSION_RAIL = <SessionListPanel />;
 
 function AppShellContent({
+  sessionWindow,
   taskEntry,
   overlays,
   sharedSessionDialog,
@@ -219,6 +216,7 @@ function AppShellContent({
   setUiLocaleOverride,
   setUiLocalePreference,
 }: {
+  sessionWindow: SessionWindowProjection;
   taskEntry: TaskEntryShellProjection;
   overlays: OverlaysShellProjection;
   sharedSessionDialog: SessionCollaborationDialogProjection;
@@ -241,7 +239,7 @@ function AppShellContent({
     refreshChangedSession,
     activeId,
     activeIdRef,
-    bootstrapSelectionLease,
+    readSelectionRevision,
     setActiveId,
     startNewSession,
     clearOwnedSessionState,
@@ -264,18 +262,21 @@ function AppShellContent({
   const sessionCount = authoritativeSessionIds?.size ?? 0;
 
   const {
-    openHelp,
+    openHelp: openLocalHelp,
     closePalette,
     openSearch,
     setSearchScrollTarget,
-    openSettings,
-    openSettingsSection,
+    openSettings: openLocalSettings,
+    openSettingsSection: openLocalSettingsSection,
     openProjectSettings,
     openProviderCatalog,
     openConnectionDetail,
     openProviderCreate,
     setSettingsProfileId,
   } = overlays.commands;
+  const openHelp = sessionWindow.standalone ? () => sessionWindow.commandMain('openHelp') : openLocalHelp;
+  const openSettings = sessionWindow.standalone ? () => sessionWindow.commandMain('openSettings') : openLocalSettings;
+  const openSettingsSection = sessionWindow.standalone ? openSettings : openLocalSettingsSection;
   const { searchScrollTarget } = overlays.selectors;
   const settingsOpen = overlays.selectors.settings.open;
 
@@ -297,15 +298,16 @@ function AppShellContent({
   const composerStaging = useMemo(Conversation.createComposerStagingCommands, []);
   const composerSubmission = useMemo(Conversation.createComposerSubmissionCommands, []);
   const [petCompletionNonce, setPetCompletionNonce] = useState(0);
-  const [navigationState, setNavigationState] = useState(() => readNavigationState());
+  const [navigationState, setNavigationState] = useState(() => readNavigationState(!sessionWindow.standalone));
   const navSelection = navigationState.selection;
   const sessionsSelected = navSelection.section === 'sessions';
   const setNavSelection = useCallback<Dispatch<SetStateAction<NavSelection>>>((nextSelection) => {
+    if (sessionWindow.standalone) return;
     setNavigationState((current) => selectNavigation(
       current,
       typeof nextSelection === 'function' ? nextSelection(current.selection) : nextSelection,
     ));
-  }, []);
+  }, [sessionWindow.standalone]);
   const navSelectionRef = useRef<NavSelection>(navSelection);
   // Navigation only: whether WorkHub is enabled at all is the client switch
   // the WorkHub enablement authority owns (see WorkHubEnablementWatch below).
@@ -422,20 +424,8 @@ function AppShellContent({
   const composerEditing = queueSurface.editing;
   const rendererMountedRef = useRef(true);
   const { setPermissionMode, setSessionModel, setSessionThinkingLevel, setSessionExecutor } = sessionSettingIntent.commands;
-  const modelConfigurationOverlay = sessionSettingIntent.overlay.modelConfiguration;
-  const activeSessionForModelControls = activeSession
-    ? {
-        ...activeSession,
-        ...(modelConfigurationOverlay
-          ? {
-              llmConnectionId: modelConfigurationOverlay.modelTarget.llmConnectionId,
-              llmConnectionSlug: modelConfigurationOverlay.modelTarget.llmConnectionSlug,
-              model: modelConfigurationOverlay.modelTarget.model,
-              thinkingLevel: modelConfigurationOverlay.thinkingLevel ?? undefined,
-            }
-          : {}),
-      }
-    : undefined;
+  const { activeSessionForModelControls, activePlanMode, activeOrchestrationMode } =
+    deriveSessionSettingsPresentation(activeSession, activeId, sessionSettingIntent);
   // Surface a credential-lifecycle alert directly in the chat header when
   // the active session's connection is in `needs_reauth` / `error` or has
   // been deleted entirely with no usable default. Main resolves credential
@@ -516,43 +506,10 @@ function AppShellContent({
     sessionSettingIntent.commands.clear(sessionId);
   }
 
-  // Stable: the rail's row actions are built from it, and it only reaches
-  // registries and refs that are themselves stable (#4109).
-  function setPlanMode(active: boolean): Promise<boolean> {
-    const sessionId = activeIdRef.current;
-    if (!sessionId) {
-      sessionSettingIntent.commands.setNewTaskPlanMode(active);
-      return Promise.resolve(true);
-    }
-    if (active === activePlanMode) return Promise.resolve(true);
-    return sessionSettingIntent.commands.setPlanMode(sessionId, active);
-  }
-
-  /**
-   * The ＋ menu's orchestration choice and the `/swarm` and `/graph` commands
-   * all land here, so every entry point spells the field the same way.
-   *
-   * `/swarm off` means "leave swarm", not "go to default": a Session already
-   * in Graph has nothing for it to do.
-   */
-  function setOrchestrationMode(mode: OrchestrationMode): Promise<boolean> {
-    const sessionId = activeIdRef.current;
-    if (!sessionId) {
-      sessionSettingIntent.commands.setNewTaskOrchestrationMode(mode);
-      return Promise.resolve(true);
-    }
-    if (mode === activeOrchestrationMode) return Promise.resolve(true);
-    return sessionSettingIntent.commands.setOrchestrationMode(sessionId, mode);
-  }
-
-  function setOrchestrationModeActive(
-    mode: Exclude<OrchestrationMode, 'default'>,
-    active: boolean,
-  ): Promise<boolean> {
-    if (active) return setOrchestrationMode(mode);
-    if (activeOrchestrationMode !== mode) return Promise.resolve(true);
-    return setOrchestrationMode('default');
-  }
+  const { setPlanMode, setOrchestrationMode, setOrchestrationModeActive } = createSessionModeCommands({
+    sessionId: () => activeIdRef.current, planMode: () => activePlanMode,
+    orchestrationMode: () => activeOrchestrationMode, commands: sessionSettingIntent.commands,
+  });
 
   const openSessionInChatRef = useRef<
     (sessionId: string, turnId?: string, sequence?: number) => void
@@ -597,18 +554,6 @@ function AppShellContent({
         permissionMode: newSessionPermissionMode,
       })
     : undefined);
-  // Each control reads its own field. There is nothing to project and nothing
-  // to keep in sync: a Session in Plan with Swarm as its orchestration default
-  // says both, because it is both.
-  const activePlanMode = activeId
-    ? sessionSettingIntent.overlay.planMode
-      ?? ((activeSessionForView?.collaborationMode ?? 'agent') === 'plan')
-    : newTaskSettings.planMode;
-  const activeOrchestrationMode: OrchestrationMode = activeId
-    ? sessionSettingIntent.overlay.orchestrationMode
-      ?? activeSessionForView?.orchestrationMode
-      ?? 'default'
-    : newTaskSettings.orchestrationMode;
   const {
     boundary: activeExecutionBoundary,
     unreadable: activeExecutionBoundaryUnreadable,
@@ -741,8 +686,9 @@ function AppShellContent({
   }, [composerEditing, composerStaging, sessionSettingIntent.commands, setNavSelection, setSearchScrollTarget, startNewSession]);
 
   const createSession = useCallback(async () => {
-    openNewTaskSurface();
-  }, [openNewTaskSurface]);
+    if (sessionWindow.standalone) sessionWindow.commandMain('newTask');
+    else openNewTaskSurface();
+  }, [openNewTaskSurface, sessionWindow.standalone, sessionWindow.commandMain]);
 
   // Stable, because the rail's Project rows carry it: a fresh identity here
   // rebuilt the whole list on every AppShell commit (#4109).
@@ -782,7 +728,7 @@ function AppShellContent({
   const hasModalOpen = overlays.selectors.anyModalOpen || sharedSessionDialog.isOpen;
   const shellObscured = hasModalOpen || settingsOpen;
   const exitWorkHub = useCallback(() => setWorkHubActive(false), []);
-  const openSession = useMemo(
+  const openLocalSession = useMemo(
     () =>
       createSessionOpenCommand({
         activateSession: setActiveId,
@@ -792,6 +738,9 @@ function AppShellContent({
       }),
     [exitWorkHub, setNavSelection, setActiveId, setSearchScrollTarget],
   );
+  const openSession = useCallback((sessionId: string, turnId?: string, sequence?: number) => {
+    sessionWindow.openSession({ sessionId, turnId, sequence }, () => openLocalSession(sessionId, turnId, sequence));
+  }, [sessionWindow.openSession, openLocalSession]);
   useLayoutEffect(() => {
     openSessionInChatRef.current = openSession;
   }, [openSession]);
@@ -800,6 +749,7 @@ function AppShellContent({
   // their identity carries no information and this object never has to be
   // held still by hand (#4109).
   const sessionNavigationPorts: SessionNavigationPorts = {
+    openInNewWindow: sessionWindow.openInNewWindow,
     sessionsRef,
     acquireAutomaticQueryBlock: sessionCatalogController.acquireAutomaticQueryBlock,
     clearSessionRendererState,
@@ -879,89 +829,16 @@ function AppShellContent({
     toastApi,
   });
   useAppShellPersistenceEffects({
-    navigationState,
+    navigationState: sessionWindow.standalone ? undefined : navigationState,
     themePalette,
     themePref,
   });
-  function captureComposerImportOwner(): ComposerImportOwner {
-    return {
-      sessionId: activeIdRef.current,
-      navSection: navSelectionRef.current.section,
-      ...(activeIdRef.current === undefined
-        ? { newTaskDraftKey: currentNewTaskDraftKey }
-        : {}),
-    };
-  }
+  const { captureComposerImportOwner, isShellSurfaceOwnerActive, isComposerImportOwnerActive, isNewChatSendSurfaceActive } =
+    Conversation.createComposerSurfaceOwner({ activeIdRef, navSelectionRef, newTaskDraftKey: currentNewTaskDraftKey, isSessionSelected });
 
-  /**
-   * "Is this owner still the surface the user is looking at." One rule, both
-   * halves: an async result that lands after the user moved on must not toast,
-   * navigate or steal focus, and `selectNavigation` never clears `activeId`
-   * (nav-selection.ts) — so the session id alone answers yes long after the
-   * user left for 扩展 or 设置.
-   *
-   * The two below are this same question with a precondition on what KIND of
-   * owner the caller wants, not second opinions about the question. They were
-   * three independent spellings once, and the one that re-derived it from an
-   * id drifted: it lost the section half, which is exactly what let a failed
-   * send pull a user out of 技能 and into 设置 · 模型.
-   */
-  function isShellSurfaceOwnerActive(owner: ComposerImportOwner): boolean {
-    return navSelectionRef.current.section === owner.navSection &&
-      isSessionSelected(owner.sessionId) &&
-      (owner.sessionId !== undefined || owner.newTaskDraftKey === currentNewTaskDraftKey);
-  }
+  function bootstrapSessions() { return sessionWindow.bootstrap(refreshSessions, readSelectionRevision, openSession); }
 
-  /** …and the owner was captured on the chat surface. */
-  function isComposerImportOwnerActive(owner: ComposerImportOwner): boolean {
-    return owner.navSection === 'sessions' && isShellSurfaceOwnerActive(owner);
-  }
-
-  /** …and it was the new-chat surface, which by definition has no session. */
-  function isNewChatSendSurfaceActive(owner: ComposerImportOwner): boolean {
-    return owner.sessionId === undefined && isComposerImportOwnerActive(owner);
-  }
-
-  async function bootstrapSessions() {
-    const next = await refreshSessions();
-    bootstrapSelectionLease.reconcile(collapseSessionRevisions(next));
-    bootstrapSelectionLease.release();
-  }
-
-  /**
-   * PR-UI-RENDER-2 - single chokepoint for the Markdown internal-URI
-   * router. Receives a typed `MakaUriDest` from the link override in
-   * `<Markdown>` and dispatches to the existing app navigation
-   * surfaces:
-   *
-   *   - `kind: 'settings'` → `openSettingsSection(section)` (existing
-   *     Settings modal jump, persisted via localStorage).
-   *   - `kind: 'compose'` → replace the composer's text through
-   *     `composerEditing.replaceText(...)` and focus it. We do NOT
-   *     auto-submit the prompt; the user still presses Enter. That
-   *     keeps an injected `maka://compose?text=ransfer my keys...`
-   *     from sending without a human in the loop.
-   *
-   * No other cases exist today by design — the parser only emits
-   * these two discriminants. If a new variant is added in `MakaUriDest`,
-   * TypeScript's exhaustiveness check below trips and a new branch
-   * must be wired here with corresponding fixture and journey coverage.
-   */
-  function dispatchMakaUri(dest: MakaUriDest) {
-    switch (dest.kind) {
-      case 'settings':
-        openSettingsSection(dest.section);
-        return;
-      case 'compose':
-        composerEditing.replaceText(dest.text);
-        composerEditing.focus();
-        return;
-      default: {
-        const _exhaustive: never = dest;
-        return _exhaustive;
-      }
-    }
-  }
+  const dispatchMakaUri = Conversation.createComposerUriDispatcher(openSettingsSection, composerEditing);
 
   function closeSettings() {
     overlays.commands.closeSettings();
@@ -1026,6 +903,7 @@ function AppShellContent({
   // `ConversationHomeSurface` reads for the displayed Session.
   const homeSurfaceEligible = sessionsSelected && transcriptEmpty;
   const commandOptions: AppShellCommandListOptions = {
+    standalone: sessionWindow.standalone,
     uiLocale,
     activeId,
     activePermissionMode,
@@ -1174,9 +1052,10 @@ function AppShellContent({
     <WorkbarProvider
       bridge={bridge}
       input={{
-        workHub: { active: workHubActive },
+        workHub: sessionWindow.standalone ? undefined : { active: workHubActive },
         available: sessionsSelected && (workHubActive || Boolean(activeHostSession)),
         layoutSessionId: activeId,
+        persistLayout: !sessionWindow.standalone,
         activeSession: activeHostSession,
         projectId: currentProjectId,
         projectAliases: currentProject?.aliases ?? [],
@@ -1185,7 +1064,7 @@ function AppShellContent({
         modelChoices: chatModelChoices,
         toastApi,
         composerDraft: composerEditing,
-        openNewTaskSurface,
+        openNewTaskSurface: sessionWindow.standalone ? undefined : openNewTaskSurface,
         openSessionInChat,
         resolveWorkBoardTarget,
         prepareWorkBoardDraft,
@@ -1194,6 +1073,8 @@ function AppShellContent({
     <div
       className="appFrame agents-layout-root"
       data-agents-page
+      data-window-kind={sessionWindow.context.kind}
+      inert={sessionWindow.frozen || undefined}
       data-maka-content-ready={!isOnboardingLoading || undefined}
       /* The single writer for sidebar state in the DOM. It sits on the frame,
          above both the chrome strip and the shell, so every rule that keys on
@@ -1201,20 +1082,26 @@ function AppShellContent({
          Copies on the shell and the detail panel bought nothing — one had no
          readers at all — and three writers of the same value is three chances
          for them to disagree. */
-      data-sidebar-state={sessionListCollapsed ? 'collapsed' : 'expanded'}
+      data-sidebar-state={sessionWindow.standalone || sessionListCollapsed ? 'collapsed' : 'expanded'}
       /* The frame is the shared owner for dimensions consumed by both shell
          columns and titlebar chrome. CSS clears the titlebar reserve when the
          responsive layout moves the workbar below the conversation. */
       style={appShellFrameStyle({
-        sessionListCollapsed,
+        sessionListCollapsed: sessionWindow.standalone || sessionListCollapsed,
         sessionListWidth,
       })}
     >
-      <ArchiveRetentionNotices navigation={overlays.commands} />
+      <Conversation.ConversationWindowState>{(conversation) => <SessionWindowBinding conversation={conversation} window={sessionWindow} staging={composerStaging} submission={composerSubmission} workbar={commands}
+        activeSessionId={activeId} refreshSessions={refreshSessions} refreshMessages={refreshMessages}
+        openLocal={(navigation) => openLocalSession(navigation.sessionId, navigation.turnId, navigation.sequence)}
+        clearLocal={() => { setNavSelection({ section: 'sessions' }); setSearchScrollTarget(null); }} />
+      }</Conversation.ConversationWindowState>
+      {sessionWindow.standalone && <SessionNavigationCommands ports={sessionNavigationPorts} commandsRef={sessionNavigationCommandsRef} />}
+      {!sessionWindow.standalone && <ArchiveRetentionNotices navigation={overlays.commands} />}
       <Diagnostics.PreviousMainProcessInterruptionNotice ready={appearanceHydrated} />
       <ShellLifecycleSubscriptions {...shellLifecycle} />
       <OnboardingConnectionSeed seed={defaultHostConnections.seedSnapshot} refresh={() => void defaultHostConnections.refreshConnections()} />
-      <WorkHubEnablementWatch onEnabled={() => { setWorkHubActive(true); setNavSelection({ section: 'sessions' }); }} onDisabled={exitWorkHub} />
+      {!sessionWindow.standalone && <WorkHubEnablementWatch onEnabled={() => { setWorkHubActive(true); setNavSelection({ section: 'sessions' }); }} onDisabled={exitWorkHub} />}
       <Conversation.ConversationLifecycle
         refreshSessions={refreshSessions}
         onExecutionBoundaryChanged={reloadActiveExecutionBoundary}
@@ -1231,6 +1118,9 @@ function AppShellContent({
         modalOpen={hasModalOpen}
         settingsOpen={settingsOpen}
         sidebarCollapsed={sessionListCollapsed}
+        standalone={sessionWindow.standalone}
+        returningToMain={sessionWindow.returning}
+        onOpenInMainWindow={sessionWindow.openInMainWindow}
         onToggleSidebar={() => sessionSideNavHandleRef.current?.getCollapseState()?.toggle()}
         onOpenSearchModal={openSearch}
         workbar={{ togglePosition: workbarTogglePosition }}
@@ -1277,7 +1167,7 @@ function AppShellContent({
         mobileNav={{ breakpoint: 'none', hasToggle: false }}
         aria-hidden={shellObscured}
         inert={shellObscured}
-        sideNav={
+        sideNav={sessionWindow.standalone ? undefined :
           <ModuleHub.ModuleHubScheduledTasksBoundary
             render={(scheduledTasks) => (
               <SessionNavigationProvider
@@ -1329,10 +1219,11 @@ function AppShellContent({
               inert={switchingSession || undefined}
               aria-busy={switchingSession || undefined}>
               <ModuleHub.ModuleHubHost />
-              <WorkHubMainNavigation workbarReady={workHubActive && selectors.ready}
+              {!sessionWindow.standalone && <><WorkHubMainNavigation workbarReady={workHubActive && selectors.ready}
                 onOpenUsage={() => commands.toggleTool('inspector')} onToggleWorkbar={commands.toggleRightPanel}
                 onOpenWorkHub={openWorkHub} onOpenSession={(sessionId) => { closeSettings(); openSession(sessionId); }} />
-              <WorkHubDock workbar={selectors} workbarTogglePosition={workbarTogglePosition} visible={workHubActive && sessionsSelected && !shellObscured} />
+              <WorkHubDock workbar={selectors} workbarTogglePosition={workbarTogglePosition} visible={workHubActive && sessionsSelected && !shellObscured} /></>}
+              {sessionWindow.standalone && !activeId && <SessionWindowEmptyState />}
               <ChatSurfaceLayout
                 data-session-history-surface="true"
                 // ChatView positions this transcript: switching conversations,
@@ -1343,7 +1234,7 @@ function AppShellContent({
                 scrollToBottomLabel={
                   desktopConversationCopy.actions.scrollMainToBottom
                 }
-                hidden={workHubActive || !sessionsSelected}
+                hidden={workHubActive || !sessionsSelected || (sessionWindow.standalone && !activeId)}
                 composer={
                   <>
                     {ownerActiveId ? (
@@ -1391,7 +1282,7 @@ function AppShellContent({
                   onDeleteQueuedEntry={activeId ? queueSurface.deleteQueuedEntry : undefined}
                   onReorderQueuedEntries={activeId ? queueSurface.reorderQueuedEntries : undefined}
                   contextPickEnabled={canStageComposerContext}
-                  executorComposer={{ selection: executor, taskSubmissionHardBlocked, connectionCount: connections.length, onSetup: () => openSettingsSection('external-agents'), onNewTask: openNewTaskSurface }}
+                  executorComposer={{ selection: executor, taskSubmissionHardBlocked, connectionCount: connections.length, onSetup: () => openSettingsSection('external-agents'), onNewTask: createSession }}
                   activeSession={activeSessionForView}
                   {...{ executorTarget, onExecutorTargetChange }}
                   usageModel={activeModel}
@@ -1479,9 +1370,7 @@ function AppShellContent({
                 sessionHealthNotice={sessionHealthNotice}
                 taskDirectoryNotice={taskDirectoryNotice}
                 localInteractionAvailable={activeBoundarySurface.localInteractionAvailable}
-                workspaceReadinessRecovery={workspaceReadinessRecovery}
-                showOnboardingHero={showOnboardingHero}
-                onboardingState={onboardingState}
+                {...{ workspaceReadinessRecovery, showOnboardingHero, onboardingState }}
                 onOpenSettings={openSettingsSection}
                 onOpenConnectionDetail={openConnectionDetail}
                 onAddProvider={openProviderCreate}
@@ -1523,14 +1412,7 @@ function AppShellContent({
       <TaskEntry.TaskEntryHost />
       <RuntimeHostSshTerminalDialog />
       <AppShellOverlays
-        closeSettings={closeSettings}
-        themePref={themePref}
-        setThemePref={setThemePref}
-        themePalette={themePalette}
-        setThemePalette={setThemePalette}
-        setUiLocalePreference={setUiLocalePreference}
-        uiLocaleUpdateGate={uiLocaleUpdateGate}
-        setUserLabel={setUserLabel}
+        {...{ closeSettings, themePref, setThemePref, themePalette, setThemePalette, setUiLocalePreference, uiLocaleUpdateGate, setUserLabel }}
         refreshChatDefaults={() => {
           void taskEntry.commands.refresh().catch(() => undefined);
         }}

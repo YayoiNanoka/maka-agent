@@ -23,7 +23,7 @@ import type { DesktopTargetScope } from '../shared/runtime-host-identity.js';
 import { ATTACHMENT_APPROVAL_TTL_MS, type IssuedAttachmentApproval } from './attachment-approval.js';
 import { MAX_LOCAL_MESSAGE_BYTES } from './session-local-store.js';
 
-interface RecoveryOwner {
+export interface RecoveryOwner {
   senderId: number;
   partition: string;
   scope: DesktopTargetScope;
@@ -33,6 +33,8 @@ interface RecoveryEntry {
   owner: string;
   senderId: number;
   partition: string;
+  scope: DesktopTargetScope;
+  sessionId: string;
   issuedAt: number;
   leases: number;
   releaseRequested: boolean;
@@ -43,7 +45,7 @@ function ownerKey(owner: RecoveryOwner): string {
   return JSON.stringify([owner.senderId, owner.partition, owner.scope.hostId, owner.scope.targetEpoch, owner.sessionId]);
 }
 
-/** Main-only byte snapshots. Tokens cannot be redeemed by preview or Host-direct ingest. */
+/** Main-only byte snapshots. Previews are decoded and re-encoded; Host-direct ingest cannot redeem these tokens. */
 export class SessionLocalAttachmentRecovery {
   readonly #entries = new Map<string, RecoveryEntry>();
   constructor(private readonly now: () => number = Date.now) {}
@@ -66,12 +68,29 @@ export class SessionLocalAttachmentRecovery {
     return attachments.map((attachment) => {
       const approvalId = `local-recovery:${randomUUID()}`;
       this.#entries.set(approvalId, {
-        owner: ownerKey(owner), senderId: owner.senderId, partition: owner.partition, issuedAt: this.now(),
+        owner: ownerKey(owner), senderId: owner.senderId, partition: owner.partition, scope: { ...owner.scope }, sessionId: owner.sessionId, issuedAt: this.now(),
         leases: 0, releaseRequested: false,
         attachment: { ...attachment, content: new Uint8Array(attachment.content) },
       });
       return { approvalId, name: attachment.name, mimeType: attachment.mimeType, size: attachment.content.byteLength };
     });
+  }
+
+  /** Main-internal lookup: callers must revalidate the current Host authority. */
+  ownerForPreview(senderId: number, approvalId: string): RecoveryOwner | undefined {
+    this.#prune();
+    const entry = this.#entries.get(approvalId);
+    if (!entry || entry.senderId !== senderId || entry.releaseRequested) return undefined;
+    return { senderId, partition: entry.partition, scope: { ...entry.scope }, sessionId: entry.sessionId };
+  }
+
+  /** Main-only copy for durable workspace custody. No lease is consumed or revoked. */
+  snapshot(owner: RecoveryOwner, approvalId: string): { name: string; mimeType: string; content: Uint8Array } {
+    this.#prune();
+    const entry = this.#entries.get(approvalId);
+    if (!entry || entry.owner !== ownerKey(owner) || entry.releaseRequested)
+      throw new AttachmentIngestBlockedError('source_expired');
+    return { ...entry.attachment, content: new Uint8Array(entry.attachment.content) };
   }
 
   /** Cleanup is sender-scoped, not target-scoped: an abandoned old target can still be released. */
@@ -89,8 +108,37 @@ export class SessionLocalAttachmentRecovery {
     }
   }
 
+  /** A closing renderer relinquishes its drafts without revoking an in-flight send. */
+  releaseSender(senderId: number): void {
+    this.release(senderId, [...this.#entries].filter(([, entry]) => entry.senderId === senderId).map(([id]) => id));
+  }
+
+  /** Main calls this only after creating the specific side-conversation copy. */
+  transfer(owner: RecoveryOwner, targetSessionId: string, ids: unknown): void {
+    if (!Array.isArray(ids) || ids.length > MAX_ATTACHMENT_COUNT ||
+        ids.some((id) => typeof id !== 'string' || !id.startsWith('local-recovery:') || id.length > 256))
+      throw new AttachmentIngestBlockedError('items_invalid');
+    if (new Set(ids).size !== ids.length) throw new AttachmentIngestBlockedError('duplicate_source');
+    this.#prune();
+    const source = ownerKey(owner);
+    const target = ownerKey({ ...owner, sessionId: targetSessionId });
+    const entries = ids.map((id) => {
+      const entry = this.#entries.get(id);
+      // A replay of the same acknowledged copy may already have moved these
+      // exact handles. Neither case grants another window or Session access.
+      if (!entry || (entry.owner !== source && entry.owner !== target) || entry.releaseRequested || entry.leases)
+        throw new AttachmentIngestBlockedError('source_expired');
+      return entry;
+    });
+    for (const entry of entries) {
+      entry.owner = target;
+      entry.sessionId = targetSessionId;
+    }
+  }
+
   prepare(owner: RecoveryOwner, items: unknown): {
     items: unknown[];
+    validate(): void;
     commit<T>(admit: () => T): T;
     dispose(): void;
   } {
@@ -122,6 +170,10 @@ export class SessionLocalAttachmentRecovery {
     let disposed = false;
     return {
       items: expanded,
+      validate: () => {
+        if (disposed) throw new AttachmentIngestBlockedError('source_expired');
+        for (const id of ids) requireEntry(id, true);
+      },
       commit: (admit) => {
         if (disposed) throw new AttachmentIngestBlockedError('source_expired');
         // Admission is synchronous (SQLite enqueue): no event-loop turn may

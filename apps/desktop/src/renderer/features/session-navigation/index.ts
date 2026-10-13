@@ -32,3 +32,5 @@ export type {
   SessionNavigationPorts,
   SessionNavigationServices,
 } from './ports.js';
+
+export { SessionNavigationCommands } from './ui/session-navigation-commands.js';

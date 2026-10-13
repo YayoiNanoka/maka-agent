@@ -21,6 +21,8 @@ import type { WorkbarServices } from './ports.js';
 
 export { WorkbarServicesProvider } from './services-context.js';
 export { BrowserPanel } from './tools/browser/browser-panel.js';
+export { WorkbarSurface } from './ui/workbar-surface.js';
+export { useSideConversationWorkspace } from './tools/side-chat/use-side-conversation-workspace.js';
 export type {
   WorkbarServices,
   SessionTracePage,
@@ -144,6 +146,7 @@ export function createFakeWorkbarServices(
       subscribeUsageChanges: noopSubscription,
     },
     attachments: {
+      releaseRecoveryAttachments: async () => undefined,
       readBytes: async () => ({ ok: false, reason: 'not_found' }),
       pickFiles: async () => ({ ok: false, reason: 'cancelled' }),
       previewApproval: async () => ({ ok: false, reason: 'not configured' }),

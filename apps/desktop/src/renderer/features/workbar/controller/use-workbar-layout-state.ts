@@ -41,6 +41,7 @@ import {
   type SessionWorkbarTab,
   type SessionWorkbarTabKind,
 } from '../model/workbar-tabs.js';
+import type { SessionWorkbarLayoutSnapshot } from '../../../../shared/session-workbar-state.js';
 const LAYOUT_PERSIST_DEBOUNCE_MS = 200;
 
 /**
@@ -52,7 +53,9 @@ export function useWorkbarLayoutState(
   activeSessionId: string | undefined,
   authoritativeSessionIds: ReadonlySet<string> | undefined,
   compact: boolean,
+  persistLayout = true,
 ) {
+  const sessionLayouts = useRef<Record<string, SessionWorkbarLayoutSnapshot>>({});
   const [state, dispatch] = useReducer(
     reduceWorkbarLayout,
     activeSessionId,
@@ -62,7 +65,10 @@ export function useWorkbarLayoutState(
   // briefly show the previous Session's panel and could overwrite an open
   // action issued by another layout effect in the activation commit.
   if (state.activeSessionId !== activeSessionId) {
-    dispatch({ type: 'activate-session', sessionId: activeSessionId });
+    const restored = activeSessionId ? sessionLayouts.current[activeSessionId] : undefined;
+    dispatch(restored && activeSessionId
+      ? { type: 'restore-layout', sessionId: activeSessionId, snapshot: restored }
+      : { type: 'activate-session', sessionId: activeSessionId });
   }
   // Same reason: a window crossing the threshold must not paint one frame of
   // the other layout.
@@ -76,6 +82,18 @@ export function useWorkbarLayoutState(
   }, [authoritativeSessionIds, activeSessionId, state.panels]);
   const stateRef = useRef(state);
   stateRef.current = state;
+  if (state.activeSessionId) sessionLayouts.current[state.activeSessionId] = {
+    panels: state.panels, collapsed: isSessionWorkbarCollapsed(state), bottomOpen: state.bottomOpen,
+    rightWidth: state.rightWidth, bottomHeight: state.bottomHeight,
+  };
+  const captureWorkspace = useCallback((sessionIds: readonly string[]) => Object.fromEntries(
+    sessionIds.flatMap((id) => sessionLayouts.current[id] ? [[id, sessionLayouts.current[id]!]] : []),
+  ), []);
+  const restoreWorkspace = useCallback((snapshots: Readonly<Record<string, SessionWorkbarLayoutSnapshot>>) => {
+    Object.assign(sessionLayouts.current, snapshots);
+    const id = stateRef.current.activeSessionId;
+    if (id && snapshots[id]) dispatch({ type: 'restore-layout', sessionId: id, snapshot: snapshots[id]! });
+  }, []);
   const rightDragStartRef = useRef(state.rightWidth);
   const bottomDragStartRef = useRef(state.bottomHeight);
   // The Workbar reducer is the controlled size authority. These props adapt it
@@ -194,25 +212,25 @@ export function useWorkbarLayoutState(
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
-      persistWorkbarLayout(stateRef.current, 'right-size');
+      if (persistLayout) persistWorkbarLayout(stateRef.current, 'right-size');
     }, LAYOUT_PERSIST_DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
-  }, [state.rightWidth]);
+  }, [state.rightWidth, persistLayout]);
   useEffect(() => {
-    persistWorkbarLayout(stateRef.current, 'right-visibility');
-  }, [state.collapsedBySession]);
+    if (persistLayout) persistWorkbarLayout(stateRef.current, 'right-visibility');
+  }, [state.collapsedBySession, persistLayout]);
   useEffect(() => {
     const handle = window.setTimeout(() => {
-      persistWorkbarLayout(stateRef.current, 'bottom-size');
+      if (persistLayout) persistWorkbarLayout(stateRef.current, 'bottom-size');
     }, LAYOUT_PERSIST_DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
-  }, [state.bottomHeight]);
+  }, [state.bottomHeight, persistLayout]);
   useEffect(() => {
-    persistWorkbarLayout(stateRef.current, 'bottom-visibility');
-  }, [state.bottomOpen]);
+    if (persistLayout) persistWorkbarLayout(stateRef.current, 'bottom-visibility');
+  }, [state.bottomOpen, persistLayout]);
   useEffect(() => {
-    persistWorkbarLayout(stateRef.current, 'topology');
-  }, [state.panels]);
+    if (persistLayout) persistWorkbarLayout(stateRef.current, 'topology');
+  }, [state.panels, persistLayout]);
 
   const setWorkbarCollapsed = useCallback(
     (next: SetStateAction<boolean>) => {
@@ -245,6 +263,8 @@ export function useWorkbarLayoutState(
   );
 
   return {
+    captureWorkspace,
+    restoreWorkspace,
     workbarCollapsed: isSessionWorkbarCollapsed(state),
     setWorkbarCollapsed,
     spaceCollapsed: state.spaceCollapsed,

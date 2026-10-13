@@ -162,6 +162,7 @@ export function SessionNavigationProvider(props: SessionNavigationProviderProps)
 
   const rowActions = useMemo<SessionRowActions>(
     () => ({
+      onOpenInNewWindow: props.ports.openInNewWindow,
       onToggleFlag: (sessionId, next) => {
         void controller.commands.flagSession(sessionId, next);
       },
@@ -181,7 +182,7 @@ export function SessionNavigationProvider(props: SessionNavigationProviderProps)
       // command, reached from Settings › 已归档任务, where the task has already
       // been archived once.
     }),
-    [controller.commands],
+    [controller.commands, props.ports.openInNewWindow],
   );
 
   // The rail draws a row for every Host's Projects, so a task may only be moved

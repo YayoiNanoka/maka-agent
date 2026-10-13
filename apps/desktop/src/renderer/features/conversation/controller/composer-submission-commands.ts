@@ -27,6 +27,10 @@ export function createComposerSubmissionCommands(): ComposerSubmissionCommands {
     return binding.current;
   };
   const commands: ComposerSubmissionCommands = {
+    waitForPendingSends: () => binding.current?.waitForPendingSends() ?? Promise.resolve(),
+    captureWorkspace: (keys) => binding.current?.captureWorkspace(keys) ?? { retractedReferences: {} },
+    restoreWorkspace: (drafts) => binding.current?.restoreWorkspace(drafts),
+    clearWorkspace: (keys) => binding.current?.clearWorkspace(keys),
     beginEditUserMessage: (turnId) => requireOwner().beginEditUserMessage(turnId),
     handleTurnFooterAction: (turnId, actionId) => requireOwner().handleTurnFooterAction(turnId, actionId),
     // Cleanup only: with no owner mounted there is nothing pending to drop.
