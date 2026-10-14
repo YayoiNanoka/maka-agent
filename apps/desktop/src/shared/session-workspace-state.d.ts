@@ -65,7 +65,7 @@ export interface SideConversationWorkspaceState {
   readonly draft: SessionWorkspaceDraft;
 }
 
-/** Persisted separately from the window list: saving this never restores windows. */
+/** Process-lifetime handoff state; never persisted or used to restore windows on restart. */
 export interface SessionWorkspaceSnapshot {
   readonly workbar?: Readonly<Record<string, import('./session-workbar-state.js').SessionWorkbarLayoutSnapshot>>;
   readonly readingAnchors?: Readonly<Record<string, { readonly turnId: string }>>;

@@ -21,9 +21,9 @@
  * Composer draft-persistence hook (issue #1044).
  *
  * Owns the per-session unsent-draft store that used to live inline in
- * `composer.tsx`: a Map keyed by `draftKey` and the active key.
+ * `composer.tsx`: a bounded Map keyed by `draftKey` and the active key.
  * The pure store operations
- * (remember / read) stay in
+ * (remember / read, with a 120k-char ordinary-draft bound and 32-entry limit) stay in
  * `composer-helpers.ts` — this hook is the React seam that wires them to the
  * input's `ComposerTextPort`.
  *
@@ -101,7 +101,18 @@ export function useComposerDraft(input: {
   const mutations = useDraftMutationGuard();
 
   function remember(key: string | undefined, value: string, references: readonly InlineReference[]) {
-    rememberComposerDraft(draftStoreRef.current, key, value);
+    const previousKeys = [...draftStoreRef.current.keys()];
+    rememberComposerDraft(draftStoreRef.current, key, value, {
+      preserveFullText: replacementsByKey.current.has(key ?? ''),
+    });
+    // Capacity eviction abandons the old edit. Emptying the current body is
+    // handled separately because its attachments or quotes may still remain.
+    for (const previousKey of previousKeys) {
+      if (previousKey !== key && !draftStoreRef.current.has(previousKey)) {
+        replacementsByKey.current.delete(previousKey);
+        mutations.changed(previousKey);
+      }
+    }
     if (key && draftStoreRef.current.has(key)) {
       const retained = draftStoreRef.current.get(key)!;
       const removedPrefix = value.length - retained.length;
@@ -211,7 +222,14 @@ export function useComposerDraft(input: {
       ...(replacementsByKey.current.has(key) ? { replacesMessageId: replacementsByKey.current.get(key)! } : {}),
     })),
     restoreDrafts: (drafts) => {
-      for (const draft of drafts) setDraft(draft.draftKey, draft.text, draft.references, draft.replacesMessageId);
+      // Handoffs navigate before restoring. Restore the live editor last so
+      // the ordinary cache bound cannot evict its replacement identity while
+      // inactive group members are installed.
+      const active = drafts.find((draft) => draft.draftKey === activeDraftKeyRef.current);
+      for (const draft of drafts) {
+        if (draft !== active) setDraft(draft.draftKey, draft.text, draft.references, draft.replacesMessageId);
+      }
+      if (active) setDraft(active.draftKey, active.text, active.references, active.replacesMessageId);
     },
     saveCurrentDraft,
     clearDraft,

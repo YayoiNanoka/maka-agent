@@ -29,6 +29,7 @@ function useConversationWindowState() {
   return {
     composer,
     clearOwnedSessionState: workspace.commands.clearOwnedSessionState,
+    clearSelection: () => workspace.commands.setActiveId(undefined),
     readActiveSessionId: () => workspace.activeIdRef.current,
     captureReadingAnchors(sessionIds: readonly string[]) {
       return Object.fromEntries(sessionIds.flatMap((id) => {

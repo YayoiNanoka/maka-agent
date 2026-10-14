@@ -3890,6 +3890,7 @@ const makaBridge = {
     },
     ackSessionWindowCommand: (reply) => invokeWhenReady('session-window:reply', reply),
     saveWorkspaceSnapshot: (snapshot) => invokeWhenReady('session-window:save', snapshot),
+    adoptWorkspaceSnapshot: (snapshot) => invokeWhenReady('session-window:adopt', snapshot),
     loadWorkspaceSnapshot: (sessionIds) => invokeWhenReady('session-window:load', sessionIds),
     commandMain: (command) => invokeWhenReady('session-window:command-main', command),
     popupMenu(input: import('../shared/native-menu.js').NativeMenuRequest): Promise<string | null> {

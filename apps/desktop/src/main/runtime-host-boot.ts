@@ -492,7 +492,7 @@ const sessionLocal = new DesktopSessionLocalService(sessionLocalStore, {
   changed: localSessionChanged,
   onError: (error) => console.error('[session-local] background synchronization failed:', error),
 });
-const sessionWorkspaceStore = new SessionWorkspaceStateStore(join(userDataDir, 'session-workspaces.sqlite'), {
+const sessionWorkspaceStore = new SessionWorkspaceStateStore({
   approvals: attachmentApprovals, recovery: sessionLocal.attachmentRecovery,
 });
 const sessionWindowGroups = new SessionWindowGroups();
@@ -516,15 +516,28 @@ async function saveWorkspaceSnapshot(sender: WebContents, snapshot: SessionWorks
     ...Object.keys(snapshot.workbar ?? {}), ...Object.keys(snapshot.readingAnchors ?? {}),
   ];
   const hosts = new Set(keys.map((key) => parseDesktopSessionKey(key).hostId));
-  for (const hostId of hosts) {
+  const workspaces = [...hosts].map((hostId) => {
     const belongs = (key: string) => parseDesktopSessionKey(key).hostId === hostId;
-    await sessionWorkspaceStore.save(workspaceOwner(sender, hostId), {
+    return { owner: workspaceOwner(sender, hostId), snapshot: {
       capturedAt: snapshot.capturedAt,
       drafts: snapshot.drafts.filter((draft) => belongs(draft.sessionId)),
       sideConversations: snapshot.sideConversations.filter((side) => belongs(side.panel.sourceSessionId)),
       workbar: Object.fromEntries(Object.entries(snapshot.workbar ?? {}).filter(([key]) => belongs(key))),
       readingAnchors: Object.fromEntries(Object.entries(snapshot.readingAnchors ?? {}).filter(([key]) => belongs(key))),
-    });
+    } };
+  });
+  await sessionWorkspaceStore.saveAll(workspaces);
+}
+function forgetWorkspaceSnapshot(sender: WebContents, snapshot: SessionWorkspaceSnapshot): void {
+  const hosts = new Map<string, string[]>();
+  for (const draft of snapshot.drafts) {
+    const hostId = parseDesktopSessionKey(draft.sessionId).hostId;
+    const ids = hosts.get(hostId) ?? [];
+    ids.push(draft.sessionId);
+    hosts.set(hostId, ids);
+  }
+  for (const [hostId, ids] of hosts) {
+    sessionWorkspaceStore.forget(workspaceOwner(sender, hostId).partition, ids, snapshot.capturedAt);
   }
 }
 async function loadWorkspaceSnapshot(sender: WebContents, sessionIds: readonly string[]): Promise<SessionWorkspaceSnapshot> {
@@ -537,7 +550,7 @@ async function loadWorkspaceSnapshot(sender: WebContents, sessionIds: readonly s
     throw error;
   }
   return {
-    capturedAt: Date.now(), drafts: snapshots.flatMap((snapshot) => snapshot.drafts),
+    capturedAt: Math.max(0, ...snapshots.map((snapshot) => snapshot.capturedAt)), drafts: snapshots.flatMap((snapshot) => snapshot.drafts),
     sideConversations: snapshots.flatMap((snapshot) => snapshot.sideConversations),
     workbar: Object.assign({}, ...snapshots.map((snapshot) => snapshot.workbar)),
     readingAnchors: Object.assign({}, ...snapshots.map((snapshot) => snapshot.readingAnchors)),
@@ -887,6 +900,7 @@ const sessionWindows = createSessionWindowCoordinator({
     return sessionWindowGroups.resolve(id, sessions);
   },
   saveSnapshot: saveWorkspaceSnapshot,
+  forgetSnapshot: forgetWorkspaceSnapshot,
   loadSnapshot: loadWorkspaceSnapshot,
   releaseSnapshot: (sender, snapshot) => sessionWorkspaceStore.releaseSnapshot(sender.id, snapshot),
   transferResources: async ({ group, source, target }) => {
@@ -2294,25 +2308,18 @@ function wireLifecycle(): void {
 }
 
 async function prepareRuntimeHostDesktopQuit(): Promise<'ready' | 'cancelled'> {
-  // Save drafts while Host admission is still available. Cancelling quit must
-  // return every renderer to an editable workspace.
-  await sessionWindows.flushAll();
-  try {
-    const preparation = await prepareRuntimeHostQuit(runtimeHostManager, {
-      confirmInterrupt: async () => {
-        const locale = await desktopLocale.resolve();
-        const dialog = buildRuntimeHostActiveQuitDialog(locale);
-        const { response } = await showDesktopMessageBox(dialog.options, { locale });
-        return dialog.decisions[response] === 'quit';
-      },
-    });
-    if (preparation === 'cancelled') await sessionWindows.resumeAll();
-    else for (const entry of mainWindowController.registry.entries()) entry.window.destroy();
-    return preparation;
-  } catch (error) {
-    await sessionWindows.resumeAll();
-    throw error;
+  const preparation = await prepareRuntimeHostQuit(runtimeHostManager, {
+    confirmInterrupt: async () => {
+      const locale = await desktopLocale.resolve();
+      const dialog = buildRuntimeHostActiveQuitDialog(locale);
+      const { response } = await showDesktopMessageBox(dialog.options, { locale });
+      return dialog.decisions[response] === 'quit';
+    },
+  });
+  if (preparation === 'ready') {
+    for (const entry of mainWindowController.registry.entries()) entry.window.destroy();
   }
+  return preparation;
 }
 
 function closeRuntimeHostDesktop(): Promise<void> {

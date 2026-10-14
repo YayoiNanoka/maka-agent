@@ -28,7 +28,7 @@ export function createSessionWindowCommandHandler(deps: {
   capture(sessionIds: readonly string[]): Promise<SessionWorkspaceSnapshot>;
   clear(sessionIds: readonly string[], clearSelection: boolean): void;
   restore(snapshot: SessionWorkspaceSnapshot): void;
-  navigate(navigation: SessionWindowNavigation): Promise<void>;
+  navigate(navigation: SessionWindowNavigation, loadSnapshot?: boolean): Promise<void>;
   save(snapshot: SessionWorkspaceSnapshot): Promise<void>;
   detach(sessionIds: readonly string[]): void;
   resume(): void;
@@ -44,9 +44,9 @@ export function createSessionWindowCommandHandler(deps: {
           deps.freeze(false);
           return;
         case 'restore':
-          await deps.save(await deps.capture(deps.sessionIds()));
+          deps.freeze(true);
+          await deps.navigate(command.navigation, false);
           deps.restore(command.snapshot);
-          await deps.navigate(command.navigation);
           deps.freeze(false);
           return;
         case 'navigate':

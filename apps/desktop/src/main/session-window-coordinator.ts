@@ -36,6 +36,7 @@ export interface SessionWindowCoordinatorDeps {
   readonly ensureMainWindow: () => Promise<void>;
   readonly resolveGroup: (sessionId: string) => Promise<SessionWindowGroup>;
   readonly saveSnapshot: (sender: WebContents, snapshot: SessionWorkspaceSnapshot) => Promise<void>;
+  readonly forgetSnapshot: (sender: WebContents, snapshot: SessionWorkspaceSnapshot) => void;
   readonly loadSnapshot: (sender: WebContents, sessionIds: readonly string[]) => Promise<SessionWorkspaceSnapshot>;
   readonly releaseSnapshot: (sender: WebContents, snapshot: SessionWorkspaceSnapshot) => void;
   readonly transferResources: (input: {
@@ -104,6 +105,7 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
       event.preventDefault();
       if (closing.has(windowId)) return;
       closing.add(windowId);
+      let retainedSnapshot: SessionWorkspaceSnapshot | undefined;
       void (async () => {
         // Wait for transfers involving this window before taking its final snapshot.
         await Promise.allSettled([...queues.values(), mainPresentation]);
@@ -111,9 +113,11 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
         const result = await request(entry, { kind: 'flush' });
         if (!result.snapshot) throw new Error('The window did not confirm its saved workspace');
         await saveSnapshot(sender, result.snapshot);
+        retainedSnapshot = result.snapshot;
         await deps.releaseResources(sender);
         entry.window.destroy();
       })().catch(async (error) => {
+        if (retainedSnapshot && !entry.window.isDestroyed()) deps.forgetSnapshot(sender, retainedSnapshot);
         if (!entry.window.isDestroyed()) await request(entry, { kind: 'resume', ...(entry.context.kind === 'session' ? { group: entry.context.group } : {}) }).catch(() => undefined);
         reportError(error, sender);
       }).finally(() => closing.delete(windowId));
@@ -219,7 +223,7 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
     entry.controller.focus();
   }
 
-  async function saveSnapshot(sender: WebContents, snapshot: SessionWorkspaceSnapshot): Promise<void> {
+  async function requireSnapshotOwner(sender: WebContents, snapshot: SessionWorkspaceSnapshot): Promise<void> {
     requireWindow(sender);
     const sessionIds = new Set([
       ...snapshot.drafts.map((draft) => draft.sessionId),
@@ -230,7 +234,16 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
       if (!memberGroups.has(id)) await resolveGroup(id);
       if (!canUseSession(sender, id)) throw new Error('This workspace belongs to another window');
     }
+  }
+
+  async function saveSnapshot(sender: WebContents, snapshot: SessionWorkspaceSnapshot): Promise<void> {
+    await requireSnapshotOwner(sender, snapshot);
     await deps.saveSnapshot(sender, snapshot);
+  }
+
+  async function adoptSnapshot(sender: WebContents, snapshot: SessionWorkspaceSnapshot): Promise<void> {
+    await requireSnapshotOwner(sender, snapshot);
+    deps.forgetSnapshot(sender, snapshot);
   }
 
   function transfer(group: SessionWindowGroup, navigation: SessionWindowNavigation, target: WorkspaceWindowEntry, source?: WorkspaceWindowEntry): Promise<void> {
@@ -243,26 +256,30 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
     const sourceSender = source?.window.webContents;
     const previousOwner = owners.get(key);
     let sourcePrepared = false;
+    let sourceSnapshot: SessionWorkspaceSnapshot | undefined;
     let sourceCleared = false;
     let resourcesMoved = false;
     let committed = false;
     let activeSessionId: string | undefined;
     let targetRetained: SessionWindowCommandResult | undefined;
+    let targetPrepared = false;
     let snapshot: SessionWorkspaceSnapshot | undefined;
     try {
       await waitReady(target);
       if (target.context.kind === 'main') {
+        targetPrepared = true;
         const retained = await request(target, { kind: 'flush' });
         targetRetained = retained;
         if (!retained.snapshot) throw new Error('The main window did not save its current workspace');
         await saveSnapshot(targetSender, retained.snapshot);
       }
       if (source) {
-        const prepared = await request(source, { kind: 'prepare-transfer', group });
         sourcePrepared = true;
+        const prepared = await request(source, { kind: 'prepare-transfer', group });
         if (!prepared.snapshot) throw new Error('The source window did not save its workspace');
         activeSessionId = prepared.activeSessionId;
         await saveSnapshot(sourceSender!, prepared.snapshot);
+        sourceSnapshot = prepared.snapshot;
       }
       // Issue handles only to the renderer that will receive them. A read is an
       // allocation, so obtain it once and before clearing the source workspace.
@@ -277,6 +294,8 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
       resourcesMoved = true;
       await deps.transferResources({ group, source: sourceSender, target: targetSender });
       await request(target, { kind: 'restore', group, navigation, snapshot });
+      deps.forgetSnapshot(targetSender, snapshot);
+      if (targetRetained?.snapshot) deps.forgetSnapshot(targetSender, targetRetained.snapshot);
       selections.set(target.context.windowId, navigation);
       target.controller.reveal();
       target.controller.focus();
@@ -296,18 +315,24 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
         }
         if (sourceCleared && activeSessionId && group.sessionIds.includes(activeSessionId)) {
           const restored = await deps.loadSnapshot(sourceSender!, group.sessionIds);
-          try { await request(source, { kind: 'restore', group, navigation: { sessionId: activeSessionId }, snapshot: restored }); }
+          try {
+            await request(source, { kind: 'restore', group, navigation: { sessionId: activeSessionId }, snapshot: restored });
+            deps.forgetSnapshot(sourceSender!, restored);
+          }
           catch (restoreError) { deps.releaseSnapshot(sourceSender!, restored); throw restoreError; }
         } else if (sourcePrepared) {
+          if (!sourceCleared && sourceSnapshot) deps.forgetSnapshot(sourceSender!, sourceSnapshot);
           await request(source, { kind: 'resume', group });
         }
       }
-      if (target.context.kind === 'main' && !target.window.isDestroyed() && targetRetained) {
-        if (committed && targetRetained.activeSessionId && targetRetained.snapshot) {
+      if (target.context.kind === 'main' && !target.window.isDestroyed() && targetPrepared) {
+        if (committed && targetRetained?.activeSessionId && targetRetained.snapshot) {
           const previousGroup = await resolveGroup(targetRetained.activeSessionId);
           await request(target, { kind: 'restore', group: previousGroup,
             navigation: { sessionId: targetRetained.activeSessionId }, snapshot: targetRetained.snapshot });
+          deps.forgetSnapshot(targetSender, targetRetained.snapshot);
         } else {
+          if (targetRetained?.snapshot) deps.forgetSnapshot(targetSender, targetRetained.snapshot);
           await request(target, { kind: 'resume', group });
         }
       }
@@ -359,10 +384,11 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
       if (owner(group) !== origin) throw new Error('The session window no longer owns this workspace');
       // prepare-transfer returns the current member; use it when available in
       // transfer rather than switching the user back to the original root.
-      const current = await request(origin, { kind: 'flush' });
-      if (current.snapshot) await saveSnapshot(sender, current.snapshot);
-      const sessionId = current.activeSessionId && group.sessionIds.includes(current.activeSessionId) ? current.activeSessionId : initial;
-      try { await transfer(group, { sessionId }, await ensureMain(), origin); }
+      try {
+        const current = await request(origin, { kind: 'prepare-transfer', group });
+        const sessionId = current.activeSessionId && group.sessionIds.includes(current.activeSessionId) ? current.activeSessionId : initial;
+        await transfer(group, { sessionId }, await ensureMain(), origin);
+      }
       catch (error) {
         if (!origin.window.isDestroyed()) await request(origin, { kind: 'resume', group }).catch(() => undefined);
         throw error;
@@ -384,18 +410,9 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
     return entry.context.kind === 'main';
   }
 
-  async function resumeAll(): Promise<void> {
-    const retained = registry.entries().filter((entry) => ready.has(entry.context.windowId));
-    const results = await Promise.allSettled(retained.map((entry) => request(entry, {
-      kind: 'resume', ...(entry.context.kind === 'session' ? { group: entry.context.group } : {}),
-    })));
-    const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
-    if (failure) throw failure.reason;
-  }
-
   return {
     context: (sender: WebContents) => requireWindow(sender).context,
-    routeSession, openSessionWindow, openInMainWindow, ownerForSession, canUseSession, saveSnapshot,
+    routeSession, openSessionWindow, openInMainWindow, ownerForSession, canUseSession, saveSnapshot, adoptSnapshot,
     refreshGroup: resolveGroup,
     async loadSnapshot(sender: WebContents, sessionIds: readonly string[]) {
       requireWindow(sender);
@@ -419,9 +436,7 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
           const navigation = selections.get(entry.context.windowId) ?? { sessionId: entry.context.initialSessionId };
           void serial(key, async () => {
             if (owner(group) !== entry) return;
-            const snapshot = await deps.loadSnapshot(sender, group.sessionIds);
-            try { await request(entry, { kind: 'restore', group, navigation, snapshot }); }
-            catch (error) { deps.releaseSnapshot(sender, snapshot); throw error; }
+            await request(entry, { kind: 'navigate', group, navigation });
             entry.controller.reveal();
           }).catch((error) => reportError(error, sender));
         }
@@ -430,7 +445,13 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
     reply(sender: WebContents, reply: SessionWindowCommandReply): void {
       const entry = requireWindow(sender);
       const operation = pending.get(reply.requestId);
-      if (!operation || operation.windowId !== entry.context.windowId) return;
+      if (!operation) {
+        // A timed-out flush can finish saving after its window has resumed.
+        // Reuse the normal ownership check; an arbitrary reply is not authority.
+        if (reply.ok && reply.result?.snapshot) void adoptSnapshot(sender, reply.result.snapshot).catch((error) => reportError(error, sender));
+        return;
+      }
+      if (operation.windowId !== entry.context.windowId) return;
       if (reply.ok) operation.resolve(reply.result ?? {});
       else operation.reject(new Error(reply.error));
     },
@@ -445,21 +466,6 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
         entry.window.webContents.send('window:command', { id: command });
         entry.controller.focus();
       });
-    },
-    resumeAll,
-    async flushAll(): Promise<void> {
-      await Promise.allSettled([...queues.values(), mainPresentation]);
-      const retained = registry.entries().filter((entry) => ready.has(entry.context.windowId));
-      try {
-        for (const entry of retained) {
-          const result = await request(entry, { kind: 'flush' });
-          if (!result.snapshot) throw new Error('A window did not confirm its saved workspace');
-          await saveSnapshot(entry.window.webContents, result.snapshot);
-        }
-      } catch (error) {
-        await resumeAll().catch(reportError);
-        throw error;
-      }
     },
     dispose(): void {
       unsubscribe();
@@ -489,6 +495,7 @@ export function registerSessionWindowIpc(coordinator: SessionWindowCoordinator, 
     return coordinator.reply(sender, input as SessionWindowCommandReply);
   });
   handle('save', (sender, input) => coordinator.saveSnapshot(sender, input));
+  handle('adopt', (sender, input) => coordinator.adoptSnapshot(sender, input));
   handle('load', (sender, input: unknown) => {
     if (!Array.isArray(input)) throw new TypeError('Invalid session list');
     return coordinator.loadSnapshot(sender, input.map(requireSessionId));

@@ -42,7 +42,9 @@ function harness() {
     ...snapshot(), drafts: entries.map(([sessionId, text]) => ({ sessionId, text, references: [], attachments: [], directoryReferences: [], quotes: [] })),
   });
   let failRestore: 'main' | 'session' | undefined;
+  let prepareWait: Promise<void> | undefined;
   let failSave = false;
+  let failLoad = false;
   let failRelease = false;
   let nextId = 0;
   let coordinator: ReturnType<typeof createSessionWindowCoordinator>;
@@ -55,6 +57,7 @@ function harness() {
         if (channel !== 'session-window:command') return;
         commands.push({ windowId: this.id, command });
         queueMicrotask(async () => {
+          if (command.kind === 'prepare-transfer' && prepareWait) await prepareWait;
           if (restoreGate && command.kind === 'restore' && this.context.kind === 'main') {
             const gate = restoreGate; restoreGate = undefined; gate.started(); await gate.wait;
           }
@@ -121,8 +124,9 @@ function harness() {
     signal: new AbortController().signal,
     ensureMainWindow: async () => { if (!registry.main()) add({ kind: 'main' }); },
     resolveGroup: async (id) => group.sessionIds.includes(id) ? group : { hostId: 'local', groupId: id, sessionIds: [id] },
-    saveSnapshot: async (sender, state) => { if (failSave) throw new Error('disk full'); saves.push(String(sender.id)); for (const draft of state.drafts) drafts.set(draft.sessionId, draft.text); },
-    loadSnapshot: async (sender, ids) => { loads.push(String(sender.id)); return toSnapshot([...drafts].filter(([id]) => ids.includes(id))); },
+    saveSnapshot: async (sender, state) => { if (failSave) throw new Error('attachment unavailable'); saves.push(String(sender.id)); for (const draft of state.drafts) drafts.set(draft.sessionId, draft.text); },
+    loadSnapshot: async (sender, ids) => { if (failLoad) throw new Error('recovery capacity'); loads.push(String(sender.id)); return toSnapshot([...drafts].filter(([id]) => ids.includes(id))); },
+    forgetSnapshot: (_sender, snapshot) => { for (const draft of snapshot.drafts) drafts.delete(draft.sessionId); },
     releaseSnapshot: (sender) => { released.push(String(sender.id)); },
     transferResources: async ({ source, target }) => { migrations.push(`${source?.id}->${target.id}`); },
     releaseResources: () => { if (failRelease) throw new Error('resource release failed'); },
@@ -144,7 +148,9 @@ function harness() {
     drafts,
     failRestore: () => { failRestore = 'session'; },
     failMainRestore: () => { failRestore = 'main'; },
+    delayPrepare: (wait: Promise<void>) => { prepareWait = wait; },
     failSave: () => { failSave = true; },
+    failLoad: () => { failLoad = true; },
     failRelease: () => { failRelease = true; },
   };
 }
@@ -268,30 +274,10 @@ test('reloaded child restores the last viewed group member without opening anoth
   await settle();
   assert.equal(h.windows.length, 2);
   const last = h.commands.at(-1)?.command;
-  assert.equal(last?.kind, 'restore');
-  if (last?.kind === 'restore') assert.equal(last.navigation.sessionId, 'A-child');
+  assert.equal(last?.kind, 'navigate');
+  if (last?.kind === 'navigate') assert.equal(last.navigation.sessionId, 'A-child');
+  assert.equal(h.loads.length, 1, 'reload never replays an adopted draft');
 });
-
-test('failed application flush resumes all windows instead of leaving the UI frozen', async () => {
-  const h = harness();
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  h.failSave();
-  await assert.rejects(h.coordinator.flushAll(), /disk full/);
-  assert.deepEqual(h.commands.slice(-2).map(({ windowId, command }) => [windowId, command.kind]), [['1', 'resume'], ['2', 'resume']]);
-});
-
-
-test('cancelled quit resumes every saved window and keeps their owners available', async () => {
-  const h = harness();
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  await h.coordinator.flushAll();
-  await h.coordinator.resumeAll();
-  assert.deepEqual(h.commands.slice(-2).map(({ windowId, command }) => [windowId, command.kind]), [['1', 'resume'], ['2', 'resume']]);
-  assert.equal(h.main.destroyed, false);
-  assert.equal(h.windows[1]!.destroyed, false);
-  assert.equal(h.coordinator.ownerForSession('A'), h.windows[1]!.webContents);
-});
-
 
 test('synchronous cleanup failure after native destruction is reported without throwing from closed', async () => {
   const h = harness();
@@ -345,7 +331,68 @@ test('concurrent groups returning to a recreated main preserve both drafts and s
   assert.equal(b.destroyed, true);
   assert.equal(main.drafts.get('A'), 'draft A');
   assert.equal(main.drafts.get('B'), 'draft B');
-  assert.equal(h.drafts.get('A'), 'draft A');
-  assert.equal(h.drafts.get('B'), 'draft B');
+  assert.equal(h.drafts.size, 0, 'live renderer owns adopted drafts; no stale main-process copies');
   assert.equal(h.errors.length, 0);
+});
+
+
+test('adopted snapshots are removed while closed-window snapshots wait for their next owner', async () => {
+  const h = harness();
+  h.main.drafts.set('A', 'unsent');
+  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
+  const child = h.windows[1]!;
+  assert.equal(h.drafts.size, 0);
+  child.drafts.set('A', 'newer unsent');
+  child.close();
+  await settle();
+  assert.equal(h.drafts.get('A'), 'newer unsent');
+  const snapshot = await h.coordinator.loadSnapshot(h.main.webContents as never, ['A']);
+  await h.coordinator.adoptSnapshot(h.main.webContents as never, snapshot);
+  assert.equal(h.drafts.size, 0);
+});
+
+
+test('failed handoff before source clear and failed normal close discard stale custody', async () => {
+  for (const operation of ['load', 'close'] as const) {
+    const h = harness();
+    h.main.drafts.set('A', 'old unsent draft');
+    if (operation === 'load') {
+      h.failLoad();
+      await assert.rejects(h.coordinator.openSessionWindow(h.main.webContents as never, 'A'), /recovery capacity/);
+    } else {
+      h.failRelease();
+      h.main.close();
+      await settle();
+    }
+    assert.equal(h.main.destroyed, false);
+    assert.equal(h.main.drafts.get('A'), 'old unsent draft');
+    h.main.drafts.set('A', ''); // The owner can continue editing or send successfully.
+    assert.equal(h.drafts.size, 0, 'a resumed owner must not leave a stale draft to replay');
+  }
+});
+
+
+test('a timed-out source preparation resumes its window and ignores the late snapshot', async () => {
+  const h = harness();
+  h.main.drafts.set('A', 'draft');
+  let complete!: () => void;
+  h.delayPrepare(new Promise<void>((resolve) => { complete = resolve; }));
+  await assert.rejects(h.coordinator.openSessionWindow(h.main.webContents as never, 'A'), /not confirmed/);
+  assert.ok(h.commands.some(({ windowId, command }) => windowId === h.main.id && command.kind === 'resume'));
+  complete();
+  await settle();
+  assert.equal(h.main.destroyed, false);
+  assert.equal(h.drafts.size, 0);
+});
+
+test('late replies cannot discard a snapshot belonging to another window', async () => {
+  const h = harness();
+  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
+  const child = h.windows[1]!;
+  const retained = { ...snapshot(), drafts: [{ sessionId: 'A', text: 'child draft', references: [], attachments: [], directoryReferences: [], quotes: [] }] };
+  await h.coordinator.saveSnapshot(child.webContents as never, retained);
+  h.coordinator.reply(h.main.webContents as never, { requestId: 'invented', ok: true, result: { snapshot: retained } });
+  await settle();
+  assert.equal(h.drafts.get('A'), 'child draft');
+  assert.match(String(h.errors.at(-1)), /another window/);
 });

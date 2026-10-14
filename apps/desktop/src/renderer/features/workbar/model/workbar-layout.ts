@@ -72,7 +72,7 @@ export interface WorkbarLayoutState {
 
 export type WorkbarLayoutAction =
   | WorkbarPanelsAction
-  | { type: 'restore-layout'; sessionId: string; snapshot: import('../../../../shared/session-workbar-state.js').SessionWorkbarLayoutSnapshot }
+  | { type: 'restore-layout'; sessionId: string; snapshot: import('../../../../shared/session-workbar-state.js').SessionWorkbarLayoutSnapshot; collapsedBySession: Record<string, boolean> }
   | { type: 'restore-terminals'; tabs: readonly SessionWorkbarTab[] }
   | { type: 'close-terminal'; sessionId: string; ref: string }
   | {
@@ -262,8 +262,8 @@ export function reduceWorkbarLayout(
   if (action.type === 'restore-layout') {
     let panels = action.snapshot.panels;
     for (const placement of ['right', 'bottom'] as const) {
-      // Foreign resource tabs come from their live owner, never an older
-      // per-Session layout. Keep resources created after this snapshot too.
+      // Foreign resource tabs come from their live owner, never the source
+      // window. Keep resources created in this window after capture too.
       const foreign = panels[placement].tabs.filter((tab) => tab.kind === 'terminal' && tab.ownerSessionId !== action.sessionId).map((tab) => tab.id);
       if (foreign.length) panels = reduceWorkbarPanels(panels, { type: 'close', placement, tabIds: foreign });
     }
@@ -273,8 +273,8 @@ export function reduceWorkbarLayout(
       if (retained.length) panels = { ...panels, [placement]: { ...panels[placement], tabs: [...panels[placement].tabs, ...retained] } };
     }
     return { ...state, panels, activeSessionId: action.sessionId,
-      collapsedBySession: { ...state.collapsedBySession, [action.sessionId]: action.snapshot.collapsed },
-      compactCollapsed: { ...state.compactCollapsed, [action.sessionId]: action.snapshot.collapsed },
+      collapsedBySession: { ...state.collapsedBySession, ...action.collapsedBySession },
+      compactCollapsed: { ...state.compactCollapsed, ...action.collapsedBySession },
       bottomOpen: action.snapshot.bottomOpen, rightWidth: action.snapshot.rightWidth,
       bottomHeight: action.snapshot.bottomHeight, spaceCollapsed: false };
   }

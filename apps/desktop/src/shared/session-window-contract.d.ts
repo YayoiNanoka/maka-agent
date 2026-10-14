@@ -74,6 +74,8 @@ export interface SessionWindowBridge {
   subscribeSessionWindowCommand(handler: (command: SessionWindowCommand) => void): () => void;
   ackSessionWindowCommand(reply: SessionWindowCommandReply): Promise<void>;
   saveWorkspaceSnapshot(snapshot: SessionWorkspaceSnapshot): Promise<void>;
+  /** Release main-process custody after the renderer adopts a handoff snapshot. */
+  adoptWorkspaceSnapshot(snapshot: SessionWorkspaceSnapshot): Promise<void>;
   loadWorkspaceSnapshot(sessionIds: readonly string[]): Promise<SessionWorkspaceSnapshot>;
   /** Forward application-wide navigation without replacing a session window's task. */
   commandMain(command: 'newTask' | 'openSettings' | 'openHelp'): Promise<void>;

@@ -78,7 +78,7 @@ test('detaching and returning keeps the same native browser and restores a minim
 });
 
 // Electron boundary: closing/recreating real BrowserWindows and app restart,
-// plus persisted draft recovery across separate renderer/main lifetimes.
+// including in-memory handoff between renderers and a fresh main-process lifetime.
 test('closing main keeps the session window alive and restart opens only main', async ({ sessionLocalWindow }) => {
   const { page, app, restart } = sessionLocalWindow;
   const id = await createTask(page, 'multi-window independent lifetime');
@@ -111,5 +111,5 @@ test('closing main keeps the session window alive and restart opens only main', 
   }).toBe(0);
   await ensureSidebarExpanded(restored);
   await restored.locator(`[data-session-id=${JSON.stringify(id)}]`).click();
-  await expect(restored.locator(COMPOSER_INPUT)).toHaveText('saved after closing a session window');
+  await expect(restored.locator(COMPOSER_INPUT)).toHaveText('');
 });

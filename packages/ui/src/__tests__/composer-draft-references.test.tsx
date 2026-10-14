@@ -135,9 +135,8 @@ test('keyed draft appends preserve file reference offsets, isolation and clearin
     await render('b');
     for (let index = 0; index < 33; index++) draft.setDraft(`other-${index}`, 'other draft');
     await render('a');
-    assert.equal(value, '@same.ts\n\noriginal');
-    assert.equal(draft.replacementMessageId('a'), 'evicted-original', 'other session drafts cannot evict an unsent replacement');
-    draft.clearDraft('a');
+    assert.equal(value, '');
+    assert.equal(draft.replacementMessageId('a'), undefined, 'evicting text also abandons replacement ownership');
     value = 'unrelated new message';
     draft.saveCurrentDraft();
     assert.equal(draft.replacementMessageId('a'), undefined);
@@ -261,23 +260,20 @@ for (const active of [true, false]) {
       assert.deepEqual(references, [reference]);
       assert.equal(draft.replacementMessageId('edit'), 'paused-original');
 
-      // Abandoning the edit drops its identity; ordinary drafts stay lossless too.
+      // Abandoning the edit restores the normal draft policy and drops references.
       draft.clearDraft('edit');
       assert.equal(draft.replacementMessageId('edit'), undefined);
       assert.deepEqual(references, []);
       draft.setDraft('edit', body, [reference]);
       await render('other');
       await render('edit');
-      assert.equal(value.length, body.length);
-      assert.equal(value, body);
-      assert.deepEqual(references, [reference]);
+      assert.equal(value.length, 120_000);
+      assert.equal(value, body.slice(-120_000));
+      assert.deepEqual(references, []);
 
-      // All group members remain available for a later window transfer.
+      // Whole-entry eviction must still abandon even an oversized replacement.
       draft.appendDraft('evicted-edit', body, [reference], 'evicted-original');
       for (let index = 0; index < 32; index++) draft.setDraft(`other-${index}`, 'another draft');
-      assert.equal(draft.getDraft('evicted-edit'), body);
-      assert.equal(draft.replacementMessageId('evicted-edit'), 'evicted-original');
-      draft.clearDraft('evicted-edit');
       assert.equal(draft.getDraft('evicted-edit'), '');
       assert.equal(draft.replacementMessageId('evicted-edit'), undefined);
     } finally {
@@ -331,3 +327,41 @@ test('window handoff snapshots active and inactive drafts with references and re
     Object.assign(globalThis, originals);
   }
 });
+
+
+for (const body of ['@file.ts ' + 'long '.repeat(25_600), ' \n  \t']) {
+  test(`window handoff preserves the live ${body.trim() ? 'oversized' : 'whitespace'} draft without changing the ordinary cache policy`, async () => {
+    const originals = { document: globalThis.document, window: globalThis.window, IS_REACT_ACT_ENVIRONMENT: (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT };
+    const { document, window } = parseHTML('<div id="root"></div>');
+    Object.assign(globalThis, { document, window, IS_REACT_ACT_ENVIRONMENT: true });
+    const root = createRoot(document.querySelector('#root')!);
+    let value = '';
+    let references: readonly InlineReference[] = [];
+    let draft!: ComposerDraftApi;
+    function Probe({ draftKey }: { draftKey: string }) {
+      draft = useComposerDraft({ text: { getValue: () => value, setValue: (next) => { value = next; } }, draftKey,
+        onDraftKeyChange() {}, references: { read: () => references, write: (next) => { references = next; } } });
+      return null;
+    }
+    try {
+      await act(() => root.render(<Probe draftKey="source" />));
+      value = body;
+      references = body.trim() ? [{ kind: 'workspace_file', value: '@file.ts', label: 'file.ts', start: 0 }] : [];
+      const saved = draft.captureDrafts(['source']);
+      await act(() => root.render(null));
+      value = ''; references = [];
+      // The destination must select the transferred Session before restoration.
+      await act(() => root.render(<Probe draftKey="source" />));
+      draft.restoreDrafts(saved);
+      assert.equal(value, body);
+      assert.deepEqual(references, saved[0]!.references);
+      await act(() => root.render(<Probe draftKey="other" />));
+      await act(() => root.render(<Probe draftKey="source" />));
+      assert.equal(value, body.trim() ? body.slice(-120_000) : '');
+      assert.deepEqual(references, []);
+    } finally {
+      await act(() => root.unmount());
+      Object.assign(globalThis, originals);
+    }
+  });
+}

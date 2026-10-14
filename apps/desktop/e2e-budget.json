@@ -87,7 +87,7 @@
     },
     "session-windows.spec.ts": {
       "tests": 2,
-      "electron": "native BrowserWindow focus/minimize/close and main recreation, real WebContentsView identity across renderer/main transfer, and restart with persisted drafts but no restored session windows"
+      "electron": "native BrowserWindow focus/minimize/close and main recreation, real WebContentsView identity across renderer/main transfer, and restart with neither restored session windows nor persisted handoff drafts"
     }
   }
 }

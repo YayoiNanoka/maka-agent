@@ -29,7 +29,6 @@ import type { SessionWindowNavigation } from '../ports.js';
 import { useSessionWindowServices } from '../services-context.js';
 import type { SessionWindowProjection } from './session-window-root.js';
 
-const AUTOSAVE_MS = 1_000;
 const afterCommit = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
 /** Main commands and explicit user navigation converge before changing selection. */
@@ -44,6 +43,7 @@ export function SessionWindowBinding(props: {
   conversation: {
     composer: { readonly current: ComposerHandle | null };
     readActiveSessionId(): string | undefined;
+    clearSelection(): void;
     clearOwnedSessionState(sessionId: string): void;
     captureReadingAnchors(sessionIds: readonly string[]): Readonly<Record<string, { readonly turnId: string }>>;
     restoreReadingAnchors(anchors: Readonly<Record<string, { readonly turnId: string }>>, sessionIds: readonly string[]): void;
@@ -60,16 +60,15 @@ export function SessionWindowBinding(props: {
   useLayoutEffect(() => { current.current = { props, conversation }; });
   const visited = useRef(new Set<string>());
   const released = useRef(new Set<string>());
-  // Approved opens restore before selecting. A first send creates its draft
-  // locally; it has no previous snapshot to load. A released member must never
+  // A first send creates its draft locally, with no handoff snapshot to load.
+  // A released member must never
   // re-enter the save set through a delayed publication from its old viewer.
   if (props.activeSessionId && !released.current.has(props.activeSessionId)) visited.current.add(props.activeSessionId);
 
   useEffect(() => {
     let disposed = false;
-    let transferring = false;
     let queue = Promise.resolve();
-    let lastSavedContent: string | undefined;
+    let restoresInFlight = 0;
     const owners = () => ({ composer: current.current.conversation.composer.current, staging: current.current.props.staging, submission: current.current.props.submission });
     const capture = async (ids: readonly string[]) => {
       const sessionIds = ids.filter((id) => visited.current.has(id));
@@ -83,28 +82,45 @@ export function SessionWindowBinding(props: {
       current.current.conversation.restoreReadingAnchors(snapshot.readingAnchors ?? {}, snapshot.drafts.map((draft) => draft.sessionId));
       for (const draft of snapshot.drafts) { released.current.delete(draft.sessionId); visited.current.add(draft.sessionId); }
     };
-    const restoreBeforeOpen = async (sessionId: string, isCurrent: () => boolean) => {
-      if (visited.current.has(sessionId)) return;
-      await restoreSessionWindowWorkspace({
+    const openWorkspace = async (sessionId: string, isCurrent: () => boolean, activate: () => void) => {
+      if (visited.current.has(sessionId)) { if (isCurrent()) activate(); return; }
+      released.current.add(sessionId);
+      restoresInFlight += 1;
+      flushSync(() => current.current.props.window.setRestoring(true));
+      try {
+        await restoreSessionWindowWorkspace({
         load: () => services.loadWorkspaceSnapshot([sessionId]),
         release: services.releaseSnapshot,
+        adopt: services.adoptWorkspaceSnapshot,
+        activate: async (snapshot) => {
+          flushSync(() => {
+            if (snapshot.capturedAt > 0) current.current.conversation.clearSelection();
+            activate();
+          });
+          await current.current.props.refreshMessages(sessionId);
+          await afterCommit();
+        },
         isCurrent: () => !disposed && isCurrent(),
         restore: (snapshot) => {
-          restore(snapshot);
+          flushSync(() => restore(snapshot));
           released.current.delete(sessionId);
           visited.current.add(sessionId);
         },
-      });
+        });
+      } finally {
+        restoresInFlight -= 1;
+        if (!disposed && !restoresInFlight) current.current.props.window.setRestoring(false);
+      }
     };
-    props.window.lifecycle.current = { restoreBeforeOpen };
+    props.window.lifecycle.current = { openWorkspace };
     const freeze = (value: boolean) => {
-      transferring = value;
       flushSync(() => current.current.props.window.setFrozen(value));
     };
-    const navigate = async (navigation: SessionWindowNavigation) => {
+    const navigate = async (navigation: SessionWindowNavigation, loadSnapshot = true) => {
       await current.current.props.refreshSessions();
-      await restoreBeforeOpen(navigation.sessionId, () => true);
-      flushSync(() => current.current.props.openLocal(navigation));
+      const activate = () => flushSync(() => current.current.props.openLocal(navigation));
+      if (loadSnapshot) await openWorkspace(navigation.sessionId, () => !disposed, activate);
+      else flushSync(() => { current.current.conversation.clearSelection(); activate(); });
       await current.current.props.refreshMessages(navigation.sessionId);
       await afterCommit();
     };
@@ -155,22 +171,10 @@ export function SessionWindowBinding(props: {
       });
     });
     void services.sessionWindowReady();
-    const timer = setInterval(() => {
-      if (transferring || !visited.current.size) return;
-      queue = queue.then(async () => {
-        if (disposed || transferring) return;
-        const snapshot = await capture([...visited.current]);
-        const content = JSON.stringify({ ...snapshot, capturedAt: 0 });
-        if (content === lastSavedContent) return;
-        await services.saveWorkspaceSnapshot(snapshot);
-        lastSavedContent = content;
-      }).catch(() => undefined); // A final handoff/close must still confirm persistence.
-    }, AUTOSAVE_MS);
     return () => {
       disposed = true;
       unsubscribe();
       unsubscribeDeleted();
-      clearInterval(timer);
       props.window.lifecycle.current = undefined;
     };
   }, [services, props.window.lifecycle]);

@@ -27,7 +27,9 @@ import type { SessionWorkspaceSnapshot } from '../../../../shared/session-worksp
 export async function restoreSessionWindowWorkspace(input: {
   load(): Promise<SessionWorkspaceSnapshot>;
   release(snapshot: SessionWorkspaceSnapshot): Promise<void>;
+  activate(snapshot: SessionWorkspaceSnapshot): Promise<void>;
   restore(snapshot: SessionWorkspaceSnapshot): void;
+  adopt(snapshot: SessionWorkspaceSnapshot): Promise<void>;
   isCurrent(): boolean;
 }): Promise<void> {
   const snapshot = await input.load();
@@ -35,13 +37,20 @@ export async function restoreSessionWindowWorkspace(input: {
     await input.release(snapshot);
     return;
   }
+  try { await input.activate(snapshot); }
+  catch (error) { await input.release(snapshot); throw error; }
+  if (!input.isCurrent()) {
+    await input.release(snapshot);
+    return;
+  }
   input.restore(snapshot);
+  await input.adopt(snapshot);
 }
 
 /** A routed or superseded request never briefly mounts in the source window. */
 export function createSessionWindowNavigator(deps: {
   route(navigation: SessionWindowNavigation): Promise<'local' | 'routed'>;
-  restore(sessionId: string, isCurrent: () => boolean): Promise<void>;
+  openWorkspace(sessionId: string, isCurrent: () => boolean, activate: () => void): Promise<void>;
   blocked(): boolean;
 }) {
   let revision = 0;
@@ -51,8 +60,7 @@ export function createSessionWindowNavigator(deps: {
     const isCurrent = () => !deps.blocked() && ownRevision === revision;
     const route = await deps.route(navigation);
     if (route !== 'local' || !isCurrent()) return;
-    await deps.restore(navigation.sessionId, isCurrent);
-    if (isCurrent()) activate();
+    await deps.openWorkspace(navigation.sessionId, isCurrent, () => { if (isCurrent()) activate(); });
   };
   return { open, invalidate: () => { revision += 1; } };
 }

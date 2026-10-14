@@ -27,11 +27,12 @@ import { sessionWindowCopy } from '../copy.js';
 
 export interface SessionWindowProjection {
   readonly context: SessionWindowContext;
-  readonly lifecycle: { current?: { restoreBeforeOpen(sessionId: string, isCurrent: () => boolean): Promise<void> } };
+  readonly lifecycle: { current?: { openWorkspace(sessionId: string, isCurrent: () => boolean, activate: () => void): Promise<void> } };
   readonly frozen: boolean;
   readonly returning: boolean;
   readonly standalone: boolean;
   setFrozen(frozen: boolean): void;
+  setRestoring(restoring: boolean): void;
   bootstrap(refresh: () => Promise<SessionSummary[]>, revision: () => number, open: (id: string) => void): Promise<void>;
   openSession(navigation: SessionWindowNavigation, activate: () => void): void;
   openInNewWindow(sessionId: string): Promise<void>;
@@ -44,11 +45,12 @@ export function SessionWindowRoot(props: { children(window: SessionWindowProject
   const services = useSessionWindowServices();
   const locale = useUiLocale();
   const toast = useToast();
-  const lifecycle = useRef<{ restoreBeforeOpen(sessionId: string, isCurrent: () => boolean): Promise<void> }>(undefined);
+  const lifecycle = useRef<{ openWorkspace(sessionId: string, isCurrent: () => boolean, activate: () => void): Promise<void> }>(undefined);
   const blocked = useRef(false);
   const [context, setContext] = useState<SessionWindowContext>();
   const [failure, setFailure] = useState(false);
   const [frozen, setFrozen] = useState(false);
+  const [restoring, setRestoring] = useState(false);
   const [returning, setReturning] = useState(false);
   const copy = sessionWindowCopy(locale);
   useEffect(() => {
@@ -61,7 +63,10 @@ export function SessionWindowRoot(props: { children(window: SessionWindowProject
   }, [services]);
   const navigator = useMemo(() => createSessionWindowNavigator({
     route: services.routeSession,
-    restore: async (sessionId, isCurrent) => { await lifecycle.current?.restoreBeforeOpen(sessionId, isCurrent); },
+    openWorkspace: async (sessionId, isCurrent, activate) => {
+      if (lifecycle.current) await lifecycle.current.openWorkspace(sessionId, isCurrent, activate);
+      else if (isCurrent()) activate();
+    },
     blocked: () => blocked.current,
   }), [services]);
   const commands = useMemo(() => {
@@ -92,5 +97,5 @@ export function SessionWindowRoot(props: { children(window: SessionWindowProject
   }, [services, toast, copy.failed, context?.kind, navigator]);
   if (failure) return <div role="alert">{copy.failed}</div>;
   if (!context) return null;
-  return props.children({ context, lifecycle, frozen, returning, standalone: context.kind === 'session', ...commands });
+  return props.children({ context, lifecycle, frozen: frozen || restoring, setRestoring, returning, standalone: context.kind === 'session', ...commands });
 }

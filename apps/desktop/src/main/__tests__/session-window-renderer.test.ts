@@ -55,14 +55,14 @@ test('clearing A releases its displayed child but preserves an unrelated B selec
   }
 });
 
-test('handoff freezes before capturing and target restore preserves B before installing A', async () => {
+test('handoff freezes before capture and activates the destination before restoring its live draft', async () => {
   const state = harness('B');
   const prepared = await state.handler({ requestId: 'prepare', kind: 'prepare-transfer', group });
   assert.deepEqual(state.events, ['freeze', 'capture:A,child']);
   assert.equal(prepared?.activeSessionId, 'B');
   state.events.length = 0;
   await state.handler({ requestId: 'restore', kind: 'restore', group, navigation: { sessionId: 'child' }, snapshot });
-  assert.deepEqual(state.events, ['capture:A,B', 'save', 'restore', 'navigate:child', 'resume']);
+  assert.deepEqual(state.events, ['freeze', 'navigate:child', 'restore', 'resume']);
   assert.equal(state.active(), 'child');
 });
 
@@ -77,10 +77,10 @@ test('a failed close save resumes the source without detaching or discarding it'
   const handler = createSessionWindowCommandHandler({
     freeze: (value) => { events.push(value ? 'freeze' : 'thaw'); }, activeSessionId: () => 'A', sessionIds: () => ['A'],
     capture: async () => snapshot, clear: () => { throw new Error('unexpected clear'); }, restore: () => undefined,
-    navigate: async () => undefined, save: async () => { throw new Error('disk full'); },
+    navigate: async () => undefined, save: async () => { throw new Error('attachment unavailable'); },
     detach: () => { events.push('detach'); }, resume: () => { events.push('resume'); },
   });
-  await assert.rejects(handler({ requestId: 'flush', kind: 'flush' }), /disk full/);
+  await assert.rejects(handler({ requestId: 'flush', kind: 'flush' }), /attachment unavailable/);
   assert.deepEqual(events, ['freeze', 'resume', 'thaw']);
 });
 
@@ -92,14 +92,14 @@ function deferred<T>() {
 
 test('an owned task routes to its other window without restoring or mounting locally', async () => {
   const calls: string[] = [];
-  const open = createSessionWindowNavigator({ route: async () => 'routed', restore: async () => { calls.push('restore'); }, blocked: () => false });
+  const open = createSessionWindowNavigator({ route: async () => 'routed', openWorkspace: async (_id, _current, activate) => { calls.push('restore'); activate(); }, blocked: () => false });
   await open.open({ sessionId: 'A' }, () => { calls.push('activate'); });
   assert.deepEqual(calls, []);
 });
 
-test('local navigation restores the saved workspace before selecting the task', async () => {
+test('local navigation delegates selection to the workspace handoff', async () => {
   const calls: string[] = [];
-  const open = createSessionWindowNavigator({ route: async () => 'local', restore: async () => { calls.push('restore'); }, blocked: () => false });
+  const open = createSessionWindowNavigator({ route: async () => 'local', openWorkspace: async (_id, _current, activate) => { calls.push('restore'); activate(); }, blocked: () => false });
   await open.open({ sessionId: 'A' }, () => { calls.push('activate'); });
   assert.deepEqual(calls, ['restore', 'activate']);
 });
@@ -108,14 +108,14 @@ test('a superseded route and a route arriving during handoff cannot replace the 
   const first = deferred<'local'>();
   let blocked = false;
   const selected: string[] = [];
-  const open = createSessionWindowNavigator({ route: (nav: SessionWindowNavigation) => nav.sessionId === 'A' ? first.promise : Promise.resolve('local'), restore: async () => undefined, blocked: () => blocked });
+  const open = createSessionWindowNavigator({ route: (nav: SessionWindowNavigation) => nav.sessionId === 'A' ? first.promise : Promise.resolve('local'), openWorkspace: async (_id, _current, activate) => activate(), blocked: () => blocked });
   const old = open.open({ sessionId: 'A' }, () => { selected.push('A'); });
   await open.open({ sessionId: 'B' }, () => { selected.push('B'); });
   first.resolve('local');
   await old;
   assert.deepEqual(selected, ['B']);
   const restoring = deferred<void>();
-  const during = createSessionWindowNavigator({ route: async () => 'local', restore: () => restoring.promise, blocked: () => blocked });
+  const during = createSessionWindowNavigator({ route: async () => 'local', openWorkspace: async (_id, _current, activate) => { await restoring.promise; activate(); }, blocked: () => blocked });
   const pending = during.open({ sessionId: 'A' }, () => { selected.push('A'); });
   await Promise.resolve();
   blocked = true;
@@ -188,9 +188,9 @@ test('a completed freeze/resume cycle invalidates both pending routes and pendin
     const navigator = createSessionWindowNavigator({
       blocked: () => blocked,
       route: async () => { if (phase === 'route') await wait.promise; return 'local'; },
-      restore: async (_id, isCurrent) => {
+      openWorkspace: async (_id, isCurrent, activate) => {
         if (phase === 'restore') await wait.promise;
-        if (isCurrent()) effects.push('restored-A');
+        if (isCurrent()) { effects.push('restored-A'); activate(); }
       },
     });
     const pending = navigator.open({ sessionId: 'A' }, () => { effects.push('selected-A'); });
@@ -229,8 +229,9 @@ test('a discarded workspace load releases main and side-chat recovery handles wi
   const selected: string[] = [];
   const navigator = createSessionWindowNavigator({
     blocked: () => false, route: async () => 'local',
-    restore: (_id, isCurrent) => restoreSessionWindowWorkspace({
+    openWorkspace: (_id, isCurrent, activate) => restoreSessionWindowWorkspace({
       load: () => ready.promise, release: services.releaseSnapshot, isCurrent,
+      activate: async () => activate(), adopt: async () => {},
       restore: (state) => { for (const member of state.drafts) restored.set(member.sessionId, member.text); },
     }),
   });
@@ -278,5 +279,22 @@ test('window bootstrap preserves an explicit new-task reload intent before and d
   } finally {
     if (previous) Object.defineProperty(globalThis, 'sessionStorage', previous);
     else Reflect.deleteProperty(globalThis, 'sessionStorage');
+  }
+});
+
+
+test('workspace adoption follows activation and restore; cancelled activation retains custody', async () => {
+  for (const cancelled of [false, true]) {
+    const events: string[] = [];
+    let current = true;
+    await restoreSessionWindowWorkspace({
+      load: async () => snapshot,
+      isCurrent: () => current,
+      activate: async () => { events.push('activate'); if (cancelled) current = false; },
+      restore: () => { events.push('restore'); },
+      adopt: async () => { events.push('adopt'); },
+      release: async () => { events.push('release'); },
+    });
+    assert.deepEqual(events, cancelled ? ['activate', 'release'] : ['activate', 'restore', 'adopt']);
   }
 });

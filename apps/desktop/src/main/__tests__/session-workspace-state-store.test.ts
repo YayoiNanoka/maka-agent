@@ -35,14 +35,13 @@ function fixture(t: { after(fn: () => void): void }, now: () => number = Date.no
   const dir = mkdtempSync(join(tmpdir(), 'maka-workspace-state-'));
   const approvals = createAttachmentApprovalRegistry({ now });
   const recovery = new SessionLocalAttachmentRecovery(now);
-  const path = join(dir, 'workspace.sqlite');
-  const store = new SessionWorkspaceStateStore(path, { approvals, recovery });
+  const store = new SessionWorkspaceStateStore({ approvals, recovery });
   t.after(() => { store.close(); rmSync(dir, { recursive: true, force: true }); });
-  return { dir, path, store, approvals, recovery };
+  return { dir, store, approvals, recovery };
 }
 
-test('stores the complete group without replacing another session and survives store reopening', async (t) => {
-  const { path, store, approvals, recovery } = fixture(t);
+test('hands off the complete group without replacing another session or crossing authority boundaries', async (t) => {
+  const { store } = fixture(t);
   const a: SessionWorkspaceDraft = {
     ...emptyDraft(), text: 'draft @file.ts',
     references: [{ kind: 'workspace_file', value: '@file.ts', label: 'file.ts', start: 6 }],
@@ -53,15 +52,40 @@ test('stores the complete group without replacing another session and survives s
   };
   await store.save(owner, snapshot({ ...emptyDraft('unrelated'), text: 'keep me' }));
   await store.save(owner, { ...snapshot(a, { ...emptyDraft('child'), text: 'child draft' }), readingAnchors: { [key('a')]: { turnId: 'turn-1' } } });
-  const another = new SessionWorkspaceStateStore(path, { approvals, recovery });
-  try {
-    const loaded = another.load({ ...owner, senderId: 22 }, [key('a'), key('child')]);
-    assert.deepEqual(loaded.drafts, [a, { ...emptyDraft('child'), text: 'child draft' }]);
-    assert.deepEqual(loaded.readingAnchors, { [key('a')]: { turnId: 'turn-1' } });
-    assert.equal(another.load(owner, [key('unrelated')]).drafts[0]!.text, 'keep me');
-    assert.equal(another.load({ ...owner, partition: 'different-authority' }, [key('a')]).drafts[0]!.text, '');
-    assert.throws(() => another.load({ ...owner, scope: { ...owner.scope, hostId: 'other-host' } }, [key('a')]), /different Host/);
-  } finally { another.close(); }
+  const loaded = store.load({ ...owner, senderId: 22 }, [key('a'), key('child')]);
+  assert.deepEqual(loaded.drafts, [a, { ...emptyDraft('child'), text: 'child draft' }]);
+  assert.deepEqual(loaded.readingAnchors, { [key('a')]: { turnId: 'turn-1' } });
+  assert.equal(store.load(owner, [key('unrelated')]).drafts[0]!.text, 'keep me');
+  assert.equal(store.load({ ...owner, partition: 'different-authority' }, [key('a')]).drafts[0]!.text, '');
+  assert.throws(() => store.load({ ...owner, scope: { ...owner.scope, hostId: 'other-host' } }, [key('a')]), /different Host/);
+});
+
+test('a new process-lifetime store starts empty and shutdown invalidates pending handoffs', async (t) => {
+  const { store, approvals, recovery } = fixture(t);
+  await store.save(owner, {
+    ...snapshot({ ...emptyDraft(), text: 'only for this app lifetime', attachments: [{ type: 'upload', name: 'draft.txt', mimeType: 'text/plain', base64: Buffer.from('draft bytes').toString('base64') }] }),
+    readingAnchors: { [key('a')]: { turnId: 'turn-1' } },
+  });
+  const pending = store.save(owner, snapshot({ ...emptyDraft(), text: 'closing' }));
+  store.close();
+  await assert.rejects(pending, /authorization was cleared/);
+  await assert.rejects(store.save(owner, snapshot(emptyDraft())), /store is closed/);
+  const restarted = new SessionWorkspaceStateStore({ approvals, recovery });
+  t.after(() => restarted.close());
+  assert.deepEqual(restarted.load(owner, [key('a')]), {
+    capturedAt: 0, drafts: [emptyDraft()], sideConversations: [], workbar: {}, readingAnchors: {},
+  });
+});
+
+test('destination edits do not mutate the snapshot needed for transfer rollback', async (t) => {
+  const { store } = fixture(t);
+  const draft = { ...emptyDraft(), text: 'original', quotes: [{ text: 'quoted text' }] };
+  await store.save(owner, { ...snapshot(draft), readingAnchors: { [key('a')]: { turnId: 'turn-1' } } });
+  const destination = store.load({ ...owner, senderId: 22 }, [key('a')]);
+  Object.assign(destination.drafts[0]!.quotes[0]!, { text: 'changed' });
+  Object.assign(destination.readingAnchors![key('a')]!, { turnId: 'changed' });
+  assert.deepEqual(store.load(owner, [key('a')]).drafts, [draft]);
+  assert.deepEqual(store.load(owner, [key('a')]).readingAnchors, { [key('a')]: { turnId: 'turn-1' } });
 });
 
 test('picked and recovery attachments are saved by main, reissued for the destination, and retain source send leases', async (t) => {
@@ -77,7 +101,7 @@ test('picked and recovery attachments are saved by main, reissued for the destin
     { type: 'upload', name: 'paste.txt', mimeType: 'text/plain', base64: Buffer.from('paste bytes').toString('base64') },
   ] };
   await store.save(owner, snapshot(draft));
-  assert.ok(approvals.peekApproval(owner.senderId, picked.approvalId), 'periodic save does not consume a picker approval');
+  assert.ok(approvals.peekApproval(owner.senderId, picked.approvalId), 'preparing a handoff does not consume a picker approval');
   const target = { ...owner, senderId: 22, scope: { ...owner.scope, targetEpoch: 'new-epoch' } };
   const loaded = store.load(target, [key('a')]);
   const issued = loaded.drafts[0]!.attachments;
@@ -163,7 +187,7 @@ test('a workspace can save three independently valid 45 MiB drafts together', as
   }
 });
 
-test('an exact draft owner can keep already-custodied bytes after source token expiry without reading its path again', async (t) => {
+test('a handoff snapshot does not extend source approval or recovery token lifetime', async (t) => {
   let now = 0;
   const { dir, store, approvals, recovery } = fixture(t, () => now);
   const path = join(dir, 'long-lived.txt');
@@ -181,15 +205,29 @@ test('an exact draft owner can keep already-custodied bytes after source token e
     { ...owner, scope: { ...owner.scope, targetEpoch: 'other' } },
   ]) await assert.rejects(store.save(other, snapshot(draft)), { code: 'source_expired' });
   await assert.rejects(store.save(owner, snapshot({ ...draft, sessionId: key('b') })), { code: 'source_expired' });
-  await store.save(owner, snapshot({ ...draft, text: 'edited after expiry' }));
+  await assert.rejects(store.save(owner, snapshot({ ...draft, text: 'edited after expiry' })), { code: 'source_expired' });
   const target = { ...owner, senderId: 22 };
   const loaded = store.load(target, [key('a')]);
-  assert.equal(loaded.drafts[0]!.text, 'edited after expiry');
+  assert.equal(loaded.drafts[0]!.text, '', 'failed preparation preserves the last transferable snapshot');
   const prepared = recovery.prepare({ ...target, sessionId: 'a' }, loaded.drafts[0]!.attachments);
   assert.deepEqual(prepared.items.map((item) => Buffer.from((item as { base64: string }).base64, 'base64').toString()), ['original', 'recovered']);
   prepared.dispose();
-  await store.save(owner, snapshot(emptyDraft()));
-  await assert.rejects(store.save(owner, snapshot(draft)), { code: 'source_expired' }, 'removed attachments cannot be resurrected by their former custody');
+  store.forget(owner.partition, [key('a')], loaded.capturedAt);
+  assert.equal(store.load(owner, [key('a')]).drafts[0]!.attachments.length, 0);
+  await assert.rejects(store.save(owner, snapshot(draft)), { code: 'source_expired' }, 'adoption does not retain a second attachment recovery path');
+});
+
+test('adoption forgets transferred state while preserving newer captures and future handoffs', async (t) => {
+  const { store } = fixture(t);
+  await store.save(owner, { ...snapshot({ ...emptyDraft(), text: 'older' }), capturedAt: 10 });
+  const earlier = store.load({ ...owner, senderId: 22 }, [key('a')]);
+  await store.save(owner, { ...snapshot({ ...emptyDraft(), text: 'newer' }), capturedAt: 20 });
+  store.forget(owner.partition, [key('a')], earlier.capturedAt);
+  assert.equal(store.load(owner, [key('a')]).drafts[0]!.text, 'newer');
+  store.forget(owner.partition, [key('a')], 20);
+  assert.equal(store.load(owner, [key('a')]).drafts[0]!.text, '');
+  await store.save(owner, { ...snapshot({ ...emptyDraft(), text: 'next handoff' }), capturedAt: 30 });
+  assert.equal(store.load(owner, [key('a')]).drafts[0]!.text, 'next handoff', 'adoption is not session deletion');
 });
 
 test('only an authorized recovery owner can place bytes in a workspace', async (t) => {
@@ -273,4 +311,17 @@ test('deletion during a picker read ignores its revoked approval and still saves
   assert.ok(deleted);
   assert.equal(loaded.drafts[0]!.attachments.length, 0);
   assert.equal(loaded.drafts[1]!.text, 'unrelated draft');
+});
+
+test('a failed multi-Host window capture releases earlier partitions instead of replaying stale drafts', async (t) => {
+  const { store } = fixture(t);
+  const other = { senderId: owner.senderId, partition: 'authority-b', scope: { hostId: 'host-b', targetEpoch: 'epoch-b' } };
+  const otherKey = desktopSessionKey({ hostId: 'host-b', sessionId: 'b' });
+  const first = snapshot({ ...emptyDraft(), text: 'still owned by the renderer' });
+  const invalid = snapshot({ ...emptyDraft(), sessionId: otherKey, attachments: [{ type: 'approval', approvalId: 'expired', name: 'draft.txt', size: 1 }] });
+  await store.save(owner, snapshot({ ...emptyDraft('unrelated'), text: 'closed window keeps this' }));
+  await assert.rejects(store.saveAll([{ owner, snapshot: first }, { owner: other, snapshot: invalid }]));
+  assert.equal(store.load(owner, [key('a')]).drafts[0]!.text, '');
+  assert.equal(store.load(owner, [key('unrelated')]).drafts[0]!.text, 'closed window keeps this');
+  assert.equal(store.load(other, [otherKey]).drafts[0]!.text, '');
 });

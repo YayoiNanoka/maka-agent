@@ -55,7 +55,6 @@ export function useWorkbarLayoutState(
   compact: boolean,
   persistLayout = true,
 ) {
-  const sessionLayouts = useRef<Record<string, SessionWorkbarLayoutSnapshot>>({});
   const [state, dispatch] = useReducer(
     reduceWorkbarLayout,
     activeSessionId,
@@ -65,10 +64,7 @@ export function useWorkbarLayoutState(
   // briefly show the previous Session's panel and could overwrite an open
   // action issued by another layout effect in the activation commit.
   if (state.activeSessionId !== activeSessionId) {
-    const restored = activeSessionId ? sessionLayouts.current[activeSessionId] : undefined;
-    dispatch(restored && activeSessionId
-      ? { type: 'restore-layout', sessionId: activeSessionId, snapshot: restored }
-      : { type: 'activate-session', sessionId: activeSessionId });
+    dispatch({ type: 'activate-session', sessionId: activeSessionId });
   }
   // Same reason: a window crossing the threshold must not paint one frame of
   // the other layout.
@@ -82,17 +78,24 @@ export function useWorkbarLayoutState(
   }, [authoritativeSessionIds, activeSessionId, state.panels]);
   const stateRef = useRef(state);
   stateRef.current = state;
-  if (state.activeSessionId) sessionLayouts.current[state.activeSessionId] = {
-    panels: state.panels, collapsed: isSessionWorkbarCollapsed(state), bottomOpen: state.bottomOpen,
-    rightWidth: state.rightWidth, bottomHeight: state.bottomHeight,
-  };
-  const captureWorkspace = useCallback((sessionIds: readonly string[]) => Object.fromEntries(
-    sessionIds.flatMap((id) => sessionLayouts.current[id] ? [[id, sessionLayouts.current[id]!]] : []),
-  ), []);
+  const captureWorkspace = useCallback((sessionIds: readonly string[]) => {
+    const current = stateRef.current;
+    return Object.fromEntries(sessionIds.map((id) => [id, {
+      panels: current.panels,
+      collapsed: isSessionWorkbarCollapsed({ ...current, activeSessionId: id }),
+      bottomOpen: current.bottomOpen,
+      rightWidth: current.rightWidth,
+      bottomHeight: current.bottomHeight,
+    }]));
+  }, []);
   const restoreWorkspace = useCallback((snapshots: Readonly<Record<string, SessionWorkbarLayoutSnapshot>>) => {
-    Object.assign(sessionLayouts.current, snapshots);
+    // Only an explicit handoff restores topology. Ordinary Session navigation
+    // keeps the existing window-wide topology and dimensions.
     const id = stateRef.current.activeSessionId;
-    if (id && snapshots[id]) dispatch({ type: 'restore-layout', sessionId: id, snapshot: snapshots[id]! });
+    if (id && snapshots[id]) dispatch({
+      type: 'restore-layout', sessionId: id, snapshot: snapshots[id]!,
+      collapsedBySession: Object.fromEntries(Object.entries(snapshots).map(([sessionId, snapshot]) => [sessionId, snapshot.collapsed])),
+    });
   }, []);
   const rightDragStartRef = useRef(state.rightWidth);
   const bottomDragStartRef = useRef(state.bottomHeight);
