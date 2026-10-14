@@ -216,9 +216,11 @@ test('routes the first-paint IPC only to the active Renderer recovery listener',
     mainWindowSource.indexOf('setTitlebarControlsVisible(sender', readyHandlerStart),
   );
   const reloadStart = mainWindowSource.indexOf('    async reloadMainRenderer() {');
+  const reloadEnd = mainWindowSource.indexOf('    isRenderer:', reloadStart);
+  assert.ok(reloadStart >= 0 && reloadEnd > reloadStart);
   const reloadHandler = mainWindowSource.slice(
     reloadStart,
-    mainWindowSource.indexOf('    send: safeSendToRenderer', reloadStart),
+    reloadEnd,
   );
 
   assert.match(
@@ -227,7 +229,7 @@ test('routes the first-paint IPC only to the active Renderer recovery listener',
   );
   assert.match(
     reloadHandler,
-    /clearShowFallbackTimer\(\);\s*revealGate\.reset\(\);\s*target\.hide\(\);/u,
+    /clearShowFallbackTimer\(\);\s*if \(context\.kind === 'session'\) handoffReady = false;\s*revealGate\.reset\(\);\s*target\.hide\(\);/u,
   );
   assert.match(reloadHandler, /reloadMainRendererProcess\(/u);
   assert.match(reloadHandler, /subscribeMainFrameCommitted:/u);
