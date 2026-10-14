@@ -42,6 +42,9 @@ async function harness() {
   const primary: TestDisplay = { workArea: { x: 0, y: 0, width: 1500, height: 1000 }, scaleFactor: 1 };
   const displays = { primary, matching: primary };
   const matchingCalls: Electron.Rectangle[] = [];
+  const dialogCalls: { kind: 'open' | 'save'; parent: unknown }[] = [];
+  const auxiliaryRenderers = new Set<Contents>();
+  const nativeParents = new Map<Contents, FakeWindow>();
   class Contents extends EventEmitter {
     session = {};
     destroyed = false;
@@ -53,6 +56,10 @@ async function harness() {
     send() {}
   }
   class FakeWindow extends EventEmitter {
+    static fromWebContents(contents: Contents) {
+      return nativeParents.get(contents) ?? windows.find((window) =>
+        !window.isDestroyed() && window.webContents === contents) ?? null;
+    }
     readonly id = windows.length + 1;
     private readonly contents = new Contents();
     destroyed = false;
@@ -84,6 +91,10 @@ async function harness() {
   }
   const modules: Record<string, unknown> = {
     electron: { app: {}, BrowserWindow: FakeWindow, nativeTheme: { shouldUseDarkColors: false },
+      dialog: {
+        showOpenDialog: async (parent: unknown) => { dialogCalls.push({ kind: 'open', parent }); return { canceled: false, filePaths: ['/selected.txt'] }; },
+        showSaveDialog: async (parent: unknown) => { dialogCalls.push({ kind: 'save', parent }); return { canceled: false, filePath: '/saved.txt' }; },
+      },
       screen: {
         getAllDisplays: () => [displays.primary, displays.matching],
         getPrimaryDisplay: () => displays.primary,
@@ -104,7 +115,10 @@ async function harness() {
     './theme-source.js': { isDarkAppearance: () => false, toNativeThemeSource: () => 'system' },
     './window-reveal.js': { createWindowRevealGate },
     './windows-maximize-renderer-sync.js': { createWindowsMaximizeRendererSync: () => () => undefined },
-    './auxiliary-window-registry.js': { auxiliaryWindowRegistry: { renderers: () => [] } },
+    './auxiliary-window-registry.js': { auxiliaryWindowRegistry: {
+      renderers: () => auxiliaryRenderers.values(),
+      rendererParent: (contents: Contents) => !contents.isDestroyed() && auxiliaryRenderers.has(contents) ? {} : undefined,
+    } },
     './workspace-window-registry.js': { workspaceWindowRegistry: registry },
     '../shared/runtime-host-identity.js': {},
   };
@@ -124,11 +138,69 @@ async function harness() {
   });
   return {
     controller, registry, windows, displays, matchingCalls, closedCounts,
+    dialogCalls, auxiliaryRenderers, nativeParents,
+    createRenderer: () => new Contents(),
+    createAuxiliaryWindow: () => new FakeWindow({ show: false }),
     releaseSettings: () => releaseSettings(),
     pauseSettings: () => { settings = new Promise<void>((resolve) => { releaseSettings = resolve; }); },
     settingsReads: () => settingsReads,
   };
 }
+
+test('file dialogs stay with the requesting workspace instead of the active main window', async () => {
+  const h = await harness();
+  h.releaseSettings();
+  const signal = new AbortController().signal;
+  await h.controller.createWindow(signal);
+  await h.controller.createSessionWindow({ kind: 'session', initialSessionId: 'A', group: { hostId: 'local', groupId: 'A', sessionIds: ['A'] } }, signal);
+  const child = h.windows[1]!;
+  await h.controller.showOpenDialog({}, child.webContents as never);
+  await h.controller.showSaveDialog({}, child.webContents as never);
+  assert.deepEqual(h.dialogCalls, [{ kind: 'open', parent: child }, { kind: 'save', parent: child }]);
+});
+
+test('WorkHub file dialogs follow its registered renderer from docked to floating', async () => {
+  const h = await harness();
+  h.releaseSettings();
+  await h.controller.createWindow(new AbortController().signal);
+  const main = h.windows[0]!;
+  const workHub = h.createRenderer();
+  h.auxiliaryRenderers.add(workHub);
+  h.nativeParents.set(workHub, main);
+  assert.equal((await h.controller.showOpenDialog({}, workHub as never)).canceled, false);
+  assert.equal((await h.controller.showSaveDialog({}, workHub as never)).canceled, false);
+  const floating = h.createAuxiliaryWindow();
+  h.nativeParents.set(workHub, floating);
+  main.destroy();
+  assert.equal((await h.controller.showOpenDialog({}, workHub as never)).canceled, false);
+  assert.equal((await h.controller.showSaveDialog({}, workHub as never)).canceled, false);
+  assert.deepEqual(h.dialogCalls, [
+    { kind: 'open', parent: main }, { kind: 'save', parent: main },
+    { kind: 'open', parent: floating }, { kind: 'save', parent: floating },
+  ]);
+});
+
+test('file dialogs reject unknown or destroyed auxiliary senders and missing or destroyed parents', async () => {
+  const h = await harness();
+  const sender = h.createRenderer();
+  const parent = h.createAuxiliaryWindow();
+  h.nativeParents.set(sender, parent);
+  const assertCancelled = async () => {
+    assert.equal((await h.controller.showOpenDialog({}, sender as never)).canceled, true);
+    assert.equal((await h.controller.showSaveDialog({}, sender as never)).canceled, true);
+    assert.equal(h.dialogCalls.length, 0);
+  };
+  await assertCancelled();
+  h.auxiliaryRenderers.add(sender);
+  h.nativeParents.delete(sender);
+  await assertCancelled();
+  h.nativeParents.set(sender, parent);
+  parent.destroy();
+  await assertCancelled();
+  h.nativeParents.set(sender, h.createAuxiliaryWindow());
+  sender.destroyed = true;
+  await assertCancelled();
+});
 
 test('concurrent main creation shares the asynchronous construction and one registered native window', async () => {
   const h = await harness();

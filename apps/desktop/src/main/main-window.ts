@@ -240,6 +240,15 @@ export function createMainWindowController(deps: MainWindowControllerDeps): Main
     await browserViews?.disposeAll();
   }
 
+  function resolveDialogParent(sender?: Electron.WebContents): BrowserWindow | undefined {
+    if (!sender) return workspaceWindowRegistry.active()?.window;
+    const workspace = workspaceWindowRegistry.forSender(sender);
+    if (workspace) return workspace.window;
+    if (!auxiliaryWindowRegistry.rendererParent(sender)) return undefined;
+    const parent = BrowserWindow.fromWebContents(sender);
+    return parent && !parent.isDestroyed() ? parent : undefined;
+  }
+
   return {
     ...main,
     registry: workspaceWindowRegistry,
@@ -283,12 +292,12 @@ export function createMainWindowController(deps: MainWindowControllerDeps): Main
       workspaceWindowRegistry.forSender(sender)?.controller.setTitleBarOverlayTheme(sender, theme);
     },
     showOpenDialog(options, sender) {
-      const parent = sender ? workspaceWindowRegistry.forSender(sender)?.window : workspaceWindowRegistry.active()?.window;
+      const parent = resolveDialogParent(sender);
       if (sender && !parent) return Promise.resolve({ canceled: true, filePaths: [] });
       return parent ? dialog.showOpenDialog(parent, options) : dialog.showOpenDialog(options);
     },
     showSaveDialog(options, sender) {
-      const parent = sender ? workspaceWindowRegistry.forSender(sender)?.window : workspaceWindowRegistry.active()?.window;
+      const parent = resolveDialogParent(sender);
       if (sender && !parent) return Promise.resolve({ canceled: true, filePath: '' });
       return parent ? dialog.showSaveDialog(parent, options) : dialog.showSaveDialog(options);
     },
