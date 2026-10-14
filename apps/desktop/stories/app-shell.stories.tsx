@@ -438,6 +438,14 @@ function ComposedShell(props: {
         sidebarCollapsed={collapsed}
         onToggleSidebar={() => setCollapsed((current) => !current)}
         onOpenSearchModal={noop}
+        // Production supplies the connected workbar through the `workbar` prop;
+        // the story fills the same slot with its environment-free view.
+        workbarActions={props.workbarToggle && (
+          <WorkbarTitlebarActionsView
+            togglePosition="titlebar"
+            model={{ activeId: active?.id, hidden: !active, rightCollapsed: props.workbarToggle.collapsed, onToggleRightPanel: props.workbarToggle.onToggle }}
+          />
+        )}
       >
         {/* Derived from the same session and project catalog the sidebar reads,
             not hand-passed: a story cannot show a project the session does not
@@ -459,14 +467,6 @@ function ComposedShell(props: {
               const parent = sessions.find((item) => item.id === active.parentSessionId);
               return parent ? { name: parent.name, onOpen: noop } : undefined;
             })()}
-          />
-        )}
-        {/* Production renders this through the titlebar's `workbar` prop, after
-            the children; the story supplies its own model to the view. */}
-        {props.workbarToggle && (
-          <WorkbarTitlebarActionsView
-            togglePosition="titlebar"
-            model={{ activeId: active?.id, hidden: !active, rightCollapsed: props.workbarToggle.collapsed, onToggleRightPanel: props.workbarToggle.onToggle }}
           />
         )}
       </AppShellTitlebar>

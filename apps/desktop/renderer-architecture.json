@@ -539,7 +539,7 @@
           "@maka/ui": 1
         },
         "importSpecifiers": 0,
-        "nonTriviaTokens": 122
+        "nonTriviaTokens": 117
       },
       "src/renderer/app-shell-command-actions.ts": {
         "importDeclarations": 4,

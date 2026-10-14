@@ -22,6 +22,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Search,
+  SquareArrowDownLeft,
 } from '@maka/ui/icons';
 import {
   IconButton,
@@ -126,6 +127,7 @@ export function WindowTitlebar(props: ComponentProps<typeof AppShellTopbarAction
   modalOpen: boolean;
   settingsOpen: boolean;
   children: ReactNode;
+  workbarActions?: ReactNode;
 }) {
   return (
     <header className="maka-window-titlebar" aria-hidden={props.obscured || undefined} inert={props.modalOpen || undefined}>
@@ -135,12 +137,13 @@ export function WindowTitlebar(props: ComponentProps<typeof AppShellTopbarAction
         {props.standalone && props.onOpenInMainWindow && (
           <div className="maka-open-main-window">
             <Tooltip content={props.copy.openInMainWindow}>
-              <IconButton label={props.copy.openInMainWindow ?? ''} icon={<ChromeIcon icon={PanelLeftOpen} />}
+              <IconButton label={props.copy.openInMainWindow ?? ''} icon={<ChromeIcon icon={SquareArrowDownLeft} />}
                 variant="ghost" size="sm" className="maka-titlebar-action"
                 isDisabled={props.returningToMain} onClick={props.onOpenInMainWindow} />
             </Tooltip>
           </div>
         )}
+        {props.workbarActions}
       </>}
     </header>
   );

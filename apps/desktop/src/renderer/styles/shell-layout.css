@@ -590,10 +590,13 @@ dialog:modal {
   grid-template-columns: 0px minmax(0, 1fr) auto auto;
 }
 .maka-open-main-window {
-  grid-column: 4;
+  grid-column: 3;
   grid-row: 1;
   display: flex;
   -webkit-app-region: no-drag;
+}
+.appFrame[data-window-kind='session'] .maka-workspace-top-actions {
+  grid-column: 4;
 }
 
 .maka-session-window-empty {
