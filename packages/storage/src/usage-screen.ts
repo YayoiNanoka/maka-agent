@@ -353,12 +353,19 @@ function readHeatmap(db: DatabaseSync, range: UsageScreenQuery['heatmap']): Usag
   // Reuse the model accounting projections. Joining each source to the small
   // day table before UNION lets SQLite seek its timestamp index once per day;
   // joining days to MODEL_ROWS would materialize and rescan the entire year.
+  // Project only aggregate inputs before UNION so SQLite skips unused log
+  // fields, including JSON extraction for every legacy call.
   const rows = db
     .prepare(`WITH days AS (
       SELECT value AS start, COALESCE(LEAD(value) OVER (ORDER BY key), ?) AS through,
         LEAD(value) OVER (ORDER BY key) IS NULL AS isLast
       FROM json_each(?)
-    ), rows AS (${[SOURCES[0], SOURCES[1]].map((source) => rangeRows(source, true)).join(' UNION ALL ')})
+    ), rows AS (${[SOURCES[0], SOURCES[1]]
+      .map(
+        (source) => `SELECT dayStart, incompleteUsage, totalTokens, status
+          FROM (${rangeRows(source, true)})`,
+      )
+      .join(' UNION ALL ')})
     SELECT dayStart AS start, SUM(totalTokens) AS tokens,
       SUM(status = 'success') AS successfulRequests, MAX(incompleteUsage) AS incompleteUsage
     FROM rows GROUP BY dayStart`)
