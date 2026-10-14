@@ -23,9 +23,7 @@ import { act, useState, type ComponentProps } from 'react';
 import { deferred } from '@maka/core/test-only/async-primitives';
 import type { ComposerHandle } from '@maka/ui';
 import type { SessionWorkspaceSnapshot } from '../../shared/session-workspace-state.js';
-import type { SessionWindowServices } from '../../renderer/features/session-windows/ports.js';
-import { SessionWindowServicesProvider } from '../../renderer/features/session-windows/services-context.js';
-import { SessionWindowBinding } from '../../renderer/features/session-windows/ui/session-window-binding.js';
+import { SessionWindowBinding, SessionWindowServicesProvider, type SessionWindowServices } from '../../renderer/features/session-windows/index.js';
 import { cleanupFakeDom, installReactRenderer } from './fake-dom.js';
 
 type BindingProps = ComponentProps<typeof SessionWindowBinding>;
