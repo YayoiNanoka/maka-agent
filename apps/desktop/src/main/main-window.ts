@@ -388,7 +388,11 @@ function createWorkspaceWindowController(
       e2eFixture || context.kind === 'session' ? Promise.resolve(defaults) : readSavedBounds(workspaceRoot, defaults),
       settingsStore.get().then((settings) => settings.appearance),
     ]);
-    const bounds = clampBoundsToVisibleDisplay(savedBounds);
+    // Sample the main window after async preparation so a move to another
+    // display while settings load is reflected in the new session window.
+    const bounds = context.kind === 'session'
+      ? sessionWindowBounds(defaults)
+      : clampBoundsToVisibleDisplay(savedBounds);
     const persistedTheme = persistedAppearance?.theme ?? 'auto';
     // Quit cleanup permanently closes process-scoped stores. Re-check after
     // asynchronous preparation so an in-flight request cannot attach a new
@@ -480,8 +484,10 @@ function createWorkspaceWindowController(
       // window below the restore minimum. Shares SAFE_MIN_WIDTH and
       // SAFE_MIN_HEIGHT with sanitizeBounds so the resize floor and the restore
       // floor can't drift apart (locked by window-state.test.ts).
-      minWidth: SAFE_MIN_WIDTH,
-      minHeight: SAFE_MIN_HEIGHT,
+      // A session window must still fit when the display's work area is
+      // smaller than the usual resize floor.
+      minWidth: context.kind === 'session' ? Math.min(SAFE_MIN_WIDTH, bounds.width) : SAFE_MIN_WIDTH,
+      minHeight: context.kind === 'session' ? Math.min(SAFE_MIN_HEIGHT, bounds.height) : SAFE_MIN_HEIGHT,
       backgroundColor: initialBg,
       // The window stays hidden until `ready-to-show`, so the first visible
       // frame is already the launch surface — showing it at construction
@@ -833,6 +839,22 @@ function clampBoundsToVisibleDisplay(bounds: SavedBounds): SavedBounds {
   if (visible) return bounds;
   // Off-screen: keep the size but drop the position so Electron centers.
   return { width: bounds.width, height: bounds.height, isMaximized: bounds.isMaximized };
+}
+
+/** Place new session windows near main, using Electron's DIP coordinates. */
+function sessionWindowBounds(defaults: SavedBounds): SavedBounds {
+  const anchor = workspaceWindowRegistry.main()?.controller.windowBounds();
+  const area = (anchor ? screen.getDisplayMatching(anchor) : screen.getPrimaryDisplay()).workArea;
+  const width = Math.min(defaults.width, area.width);
+  const height = Math.min(defaults.height, area.height);
+  const x = anchor ? anchor.x + 32 : area.x + Math.round((area.width - width) / 2);
+  const y = anchor ? anchor.y + 32 : area.y + Math.round((area.height - height) / 2);
+  return {
+    width,
+    height,
+    x: Math.max(area.x, Math.min(x, area.x + area.width - width)),
+    y: Math.max(area.y, Math.min(y, area.y + area.height - height)),
+  };
 }
 
 function e2eFixtureWindowBounds(

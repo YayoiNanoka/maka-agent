@@ -27,15 +27,21 @@ import { test } from 'node:test';
 import { transform } from 'esbuild';
 import { createWorkspaceWindowRegistry } from '../workspace-window-registry.js';
 import { createWindowRevealGate } from '../window-reveal.js';
+import { SAFE_MIN_HEIGHT, SAFE_MIN_WIDTH } from '../window-state.js';
 import type { MainWindowController } from '../main-window.js';
+
+type TestDisplay = { workArea: Electron.Rectangle; scaleFactor: number };
 
 async function harness() {
   const registry = createWorkspaceWindowRegistry();
   const windows: FakeWindow[] = [];
   let settingsReads = 0;
   let releaseSettings!: () => void;
-  const settings = new Promise<void>((resolve) => { releaseSettings = resolve; });
+  let settings = new Promise<void>((resolve) => { releaseSettings = resolve; });
   const closedCounts: number[] = [];
+  const primary: TestDisplay = { workArea: { x: 0, y: 0, width: 1500, height: 1000 }, scaleFactor: 1 };
+  const displays = { primary, matching: primary };
+  const matchingCalls: Electron.Rectangle[] = [];
   class Contents extends EventEmitter {
     session = {};
     destroyed = false;
@@ -51,20 +57,24 @@ async function harness() {
     private readonly contents = new Contents();
     destroyed = false;
     visible = false;
+    private bounds: Electron.Rectangle;
     readonly contentView = {};
     get webContents() {
       if (this.destroyed) throw new Error('Object has been destroyed');
       return this.contents;
     }
     constructor(readonly options: Electron.BrowserWindowConstructorOptions) {
-      super(); windows.push(this);
+      super();
+      this.bounds = { x: options.x ?? 0, y: options.y ?? 0, width: options.width ?? 1240, height: options.height ?? 820 };
+      windows.push(this);
     }
     isDestroyed() { return this.destroyed; }
     isVisible() { return this.visible; }
     isFocused() { return false; }
     isMinimized() { return false; }
     isMaximized() { return false; }
-    getBounds() { return { x: 0, y: 0, width: 1240, height: 820 }; }
+    getBounds() { return { ...this.bounds }; }
+    setBounds(bounds: Electron.Rectangle) { this.bounds = { ...bounds }; }
     getNormalBounds() { return this.getBounds(); }
     async loadURL(url: string) { this.contents.url = url; this.contents.emit('did-finish-load'); this.emit('ready-to-show'); }
     destroy() {
@@ -74,14 +84,18 @@ async function harness() {
   }
   const modules: Record<string, unknown> = {
     electron: { app: {}, BrowserWindow: FakeWindow, nativeTheme: { shouldUseDarkColors: false },
-      screen: { getAllDisplays: () => [{ workArea: { x: 0, y: 0, width: 1500, height: 1000 } }] } },
+      screen: {
+        getAllDisplays: () => [displays.primary, displays.matching],
+        getPrimaryDisplay: () => displays.primary,
+        getDisplayMatching: (bounds: Electron.Rectangle) => { matchingCalls.push(bounds); return displays.matching; },
+      } },
     'node:fs/promises': { mkdir: async () => undefined },
     'node:path': path,
     '@maka/core/settings': { appIconForTheme: () => 'default' },
     './main-window-drop-guard.js': { MAIN_WINDOW_DROP_GUARD_SCRIPT: '' },
     './app-icon-surface.js': { applyInitialWindowAppIcon() {}, readableAppIconPath: () => '' },
     './external-link-guard.js': { isExternalUrl: () => false },
-    './window-state.js': { readSavedBounds: async (_root: string, defaults: unknown) => defaults, writeSavedBounds: async () => undefined, SAFE_MIN_WIDTH: 600, SAFE_MIN_HEIGHT: 400 },
+    './window-state.js': { readSavedBounds: async (_root: string, defaults: unknown) => defaults, writeSavedBounds: async () => undefined, SAFE_MIN_WIDTH, SAFE_MIN_HEIGHT },
     './browser/controller.js': {}, './browser/view-manager.js': {},
     './main-window-permission-policy.js': { installMainWindowPermissionPolicy() {} },
     './main-renderer-loader.js': { resolveMainRendererEntry: () => ({ url: 'http://localhost/index.html' }), loadMainRenderer: (window: FakeWindow) => window.loadURL('http://localhost/index.html') },
@@ -108,7 +122,12 @@ async function harness() {
     onRendererProcessGone() {},
     onClosed: () => { closedCounts.push(registry.entries().length); },
   });
-  return { controller, registry, windows, releaseSettings, closedCounts, settingsReads: () => settingsReads };
+  return {
+    controller, registry, windows, displays, matchingCalls, closedCounts,
+    releaseSettings: () => releaseSettings(),
+    pauseSettings: () => { settings = new Promise<void>((resolve) => { releaseSettings = resolve; }); },
+    settingsReads: () => settingsReads,
+  };
 }
 
 test('concurrent main creation shares the asynchronous construction and one registered native window', async () => {
@@ -145,4 +164,96 @@ test('closing the last session window invokes the shared workspace lifecycle cal
   h.windows[1]!.destroy();
   assert.deepEqual(h.closedCounts, [1, 0]);
   assert.equal(h.controller.hasOpenWindows(), false);
+});
+
+test('session windows follow the main window on a negative-coordinate HiDPI display in DIP', async () => {
+  const h = await harness();
+  h.releaseSettings();
+  const signal = new AbortController().signal;
+  await h.controller.createWindow(signal);
+  h.displays.matching = { workArea: { x: -2560, y: -1440, width: 2560, height: 1400 }, scaleFactor: 2 };
+  const mainBounds = { x: -2400, y: -1300, width: 1240, height: 820 };
+  h.windows[0]!.setBounds(mainBounds);
+
+  await h.controller.createSessionWindow({ kind: 'session', initialSessionId: 'A', group: { hostId: 'local', groupId: 'A', sessionIds: ['A'] } }, signal);
+
+  assert.deepEqual(h.matchingCalls, [mainBounds]);
+  assert.deepEqual(h.windows[1]!.getBounds(), { x: -2368, y: -1268, width: 1240, height: 820 });
+});
+
+test('session window placement clamps every edge to the main display work area', async () => {
+  const h = await harness();
+  h.releaseSettings();
+  const signal = new AbortController().signal;
+  await h.controller.createWindow(signal);
+  h.displays.matching = { workArea: { x: 1500, y: 40, width: 1600, height: 900 }, scaleFactor: 1 };
+  h.windows[0]!.setBounds({ x: 2600, y: 700, width: 1240, height: 820 });
+
+  await h.controller.createSessionWindow({ kind: 'session', initialSessionId: 'A', group: { hostId: 'local', groupId: 'A', sessionIds: ['A'] } }, signal);
+  assert.deepEqual(h.windows[1]!.getBounds(), { x: 1860, y: 120, width: 1240, height: 820 });
+
+  h.windows[0]!.setBounds({ x: 1400, y: -40, width: 1240, height: 820 });
+  await h.controller.createSessionWindow({ kind: 'session', initialSessionId: 'B', group: { hostId: 'local', groupId: 'B', sessionIds: ['B'] } }, signal);
+  assert.deepEqual(h.windows[2]!.getBounds(), { x: 1500, y: 40, width: 1240, height: 820 });
+});
+
+test('session windows shrink only dimensions larger than the available work area', async () => {
+  const h = await harness();
+  h.releaseSettings();
+  const signal = new AbortController().signal;
+  await h.controller.createWindow(signal);
+  h.displays.matching = { workArea: { x: -1000, y: 40, width: 1000, height: 1000 }, scaleFactor: 1 };
+  h.windows[0]!.setBounds({ x: -900, y: 100, width: 1240, height: 820 });
+
+  await h.controller.createSessionWindow({ kind: 'session', initialSessionId: 'A', group: { hostId: 'local', groupId: 'A', sessionIds: ['A'] } }, signal);
+
+  assert.deepEqual(h.windows[1]!.getBounds(), { x: -1000, y: 132, width: 1000, height: 820 });
+  assert.equal(h.windows[1]!.options.minWidth, SAFE_MIN_WIDTH);
+  assert.equal(h.windows[1]!.options.minHeight, SAFE_MIN_HEIGHT);
+});
+
+test('session window minimum sizes cannot expand it beyond a small display work area', async () => {
+  const h = await harness();
+  h.releaseSettings();
+  const signal = new AbortController().signal;
+  await h.controller.createWindow(signal);
+  h.displays.matching = { workArea: { x: 1500, y: 40, width: 480, height: 240 }, scaleFactor: 1 };
+  h.windows[0]!.setBounds({ x: 1500, y: 40, width: 1240, height: 820 });
+
+  await h.controller.createSessionWindow({ kind: 'session', initialSessionId: 'A', group: { hostId: 'local', groupId: 'A', sessionIds: ['A'] } }, signal);
+
+  assert.deepEqual(h.windows[1]!.getBounds(), { x: 1500, y: 40, width: 480, height: 240 });
+  assert.equal(h.windows[1]!.options.minWidth, 480);
+  assert.equal(h.windows[1]!.options.minHeight, 240);
+});
+
+test('session placement uses the current main window position after asynchronous preparation', async () => {
+  const h = await harness();
+  h.releaseSettings();
+  const signal = new AbortController().signal;
+  await h.controller.createWindow(signal);
+  h.windows[0]!.setBounds({ x: 50, y: 50, width: 1240, height: 820 });
+  h.pauseSettings();
+  const child = h.controller.createSessionWindow({ kind: 'session', initialSessionId: 'A', group: { hostId: 'local', groupId: 'A', sessionIds: ['A'] } }, signal);
+  assert.equal(h.settingsReads(), 2);
+  assert.equal(h.windows.length, 1);
+  h.displays.matching = { workArea: { x: 1500, y: 40, width: 2000, height: 1200 }, scaleFactor: 1 };
+  const movedBounds = { x: 1700, y: 140, width: 1240, height: 820 };
+  h.windows[0]!.setBounds(movedBounds);
+  h.releaseSettings();
+  await child;
+
+  assert.deepEqual(h.matchingCalls, [movedBounds]);
+  assert.deepEqual(h.windows[1]!.getBounds(), { x: 1732, y: 172, width: 1240, height: 820 });
+});
+
+test('session windows center within the primary display work area when no main window exists', async () => {
+  const h = await harness();
+  h.releaseSettings();
+  h.displays.primary = { workArea: { x: 0, y: 40, width: 1600, height: 1000 }, scaleFactor: 2 };
+
+  await h.controller.createSessionWindow({ kind: 'session', initialSessionId: 'A', group: { hostId: 'local', groupId: 'A', sessionIds: ['A'] } }, new AbortController().signal);
+
+  assert.equal(h.matchingCalls.length, 0);
+  assert.deepEqual(h.windows[0]!.getBounds(), { x: 180, y: 130, width: 1240, height: 820 });
 });
