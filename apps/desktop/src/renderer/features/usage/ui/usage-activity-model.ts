@@ -17,9 +17,9 @@
  * under the License.
  */
 
-import type { UsageStats } from '@maka/core/settings';
+import type { UsageHeatmap } from '@maka/core/settings';
 
-export type UsageActivityDay = UsageStats['heatmap']['days'][number];
+export type UsageActivityDay = UsageHeatmap['days'][number];
 export type UsageActivityView = 'daily' | 'weekly';
 
 export type UsageActivityWeek = {

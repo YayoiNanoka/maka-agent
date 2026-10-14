@@ -184,7 +184,6 @@ for (const [count, mixed] of [
       range: { from: 0, to: count },
       search: '',
       status: 'all',
-      heatmap: { dayStarts: [0], to: count },
     };
     const inputs = [
       { name: 'matching-search', query: { ...query, search: 'model' } },

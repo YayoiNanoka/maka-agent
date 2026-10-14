@@ -33,6 +33,7 @@ export type UsageSettingsCopy = {
   heatmap: {
     title: string; period: string; viewAria: string;
     tokens: string; requests: string; daily: string; weekly: string;
+    loadFailed: string; stale: string; refreshHelp: string;
     loading: string; unavailable: string; less: string; more: string; weeklyScale: string;
     keyboardHelp: string; incomplete: string; currentWeek(date: string): string;
   };
@@ -48,6 +49,7 @@ const settingsUsageCopyZhCn: UsageSettingsCopy = {
     heatmap: {
       title: 'Token 活动', period: '最近 12 个月', viewAria: '活动统计粒度',
       tokens: 'Token', requests: '请求数', daily: '每天', weekly: '每周',
+      loadFailed: '无法加载使用活动', stale: '使用活动已更新', refreshHelp: '请刷新以重新加载使用活动。其他统计仍可查看。',
       loading: '正在加载使用活动', unavailable: '暂无使用活动数据', less: '少', more: '多', weeklyScale: '每列为一周，按 Token 总量显示高度',
       keyboardHelp: '使用方向键查看日期或周，Home 跳到开头，End 跳到末尾。',
       incomplete: '部分记录的用量不完整，实际用量可能更高。', currentWeek: (date) => `当周截至 ${date}`,
@@ -81,6 +83,7 @@ const settingsUsageCopyZhTw: UsageSettingsCopy = {
     heatmap: {
       title: 'Token 活動', period: '最近 12 個月', viewAria: '活動統計粒度',
       tokens: 'Token', requests: '請求數', daily: '每天', weekly: '每週',
+      loadFailed: '無法載入使用活動', stale: '使用活動已更新', refreshHelp: '請重新整理以載入使用活動。其他統計仍可查看。',
       loading: '正在載入使用活動', unavailable: '暫無使用活動資料', less: '少', more: '多', weeklyScale: '每欄為一週，按 Token 總量顯示高度',
       keyboardHelp: '使用方向鍵查看日期或週，Home 跳到開頭，End 跳到末尾。',
       incomplete: '部分記錄的用量不完整，實際用量可能更高。', currentWeek: (date) => `當週截至 ${date}`,
@@ -114,6 +117,7 @@ const settingsUsageCopyEn: UsageSettingsCopy = {
     heatmap: {
       title: 'Token activity', period: 'Last 12 months', viewAria: 'Activity interval',
       tokens: 'Tokens', requests: 'Requests', daily: 'Daily', weekly: 'Weekly',
+      loadFailed: 'Unable to load usage activity', stale: 'Usage activity has changed', refreshHelp: 'Refresh to reload usage activity. The other statistics remain available.',
       loading: 'Loading usage activity', unavailable: 'No usage activity data', less: 'Less', more: 'More', weeklyScale: 'Each column is a week; height shows its token total',
       keyboardHelp: 'Use arrow keys to explore days or weeks, Home for the beginning, and End for the end.',
       incomplete: 'Some records have incomplete usage, so actual usage may be higher.', currentWeek: (date) => `Week through ${date}`,

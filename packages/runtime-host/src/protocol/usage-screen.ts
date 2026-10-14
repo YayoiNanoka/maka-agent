@@ -55,29 +55,27 @@ function timestamp(value: unknown): number {
   return value;
 }
 function query(value: unknown): UsageScreenQuery {
-  const v = requireExactRecord(value, 'Usage screen query', [
-    'range',
-    'search',
-    'status',
-    'heatmap',
-  ]);
+  const v = requireExactRecord(value, 'Usage screen query', ['range', 'search', 'status']);
   const range = requireExactRecord(v.range, 'Usage range', ['from', 'to']);
   const from = timestamp(range.from);
   const to = timestamp(range.to);
   if (from > to || !['all', 'success', 'error', 'aborted'].includes(String(v.status)))
     return fail();
   if (!isUsageScreenSearch(v.search)) return fail();
-  const heatmap = requireExactRecord(v.heatmap, 'Usage heatmap range', ['dayStarts', 'to']);
-  if (!isUsageHeatmapRange(heatmap)) return fail();
   return {
     range: { from, to },
     search: v.search,
     status: v.status as UsageScreenQuery['status'],
-    heatmap: { dayStarts: [...heatmap.dayStarts], to: heatmap.to },
   };
 }
 
-function assertHeatmap(value: unknown, range: UsageHeatmapRange): void {
+function heatmapRange(value: unknown): UsageHeatmapRange {
+  const range = requireExactRecord(value, 'Usage heatmap range', ['dayStarts', 'to']);
+  if (!isUsageHeatmapRange(range)) return fail();
+  return { dayStarts: [...range.dayStarts], to: range.to };
+}
+
+function assertHeatmap(value: unknown, range?: UsageHeatmapRange): void {
   const heatmap = requireExactRecord(value, 'Usage heatmap', [
     'days',
     'through',
@@ -85,27 +83,38 @@ function assertHeatmap(value: unknown, range: UsageHeatmapRange): void {
   ]);
   if (
     !Array.isArray(heatmap.days) ||
-    heatmap.days.length !== range.dayStarts.length ||
-    timestamp(heatmap.through) !== range.to ||
+    heatmap.days.length < 1 ||
+    heatmap.days.length > 366 ||
     typeof heatmap.hasIncompleteUsage !== 'boolean'
   )
     return fail();
-  for (const [index, value] of heatmap.days.entries()) {
+  const dayStarts: number[] = [];
+  for (const value of heatmap.days) {
     const day = requireExactRecord(value, 'Usage heatmap day', [
       'start',
       'tokens',
       'successfulRequests',
     ]);
-    if (timestamp(day.start) !== range.dayStarts[index]) return fail();
+    dayStarts.push(timestamp(day.start));
     requireCount(day.tokens, 'Usage heatmap tokens');
     requireCount(day.successfulRequests, 'Usage heatmap successful requests');
   }
+  const actual = heatmapRange({ dayStarts, to: heatmap.through });
+  if (
+    range &&
+    (actual.to !== range.to || JSON.stringify(dayStarts) !== JSON.stringify(range.dayStarts))
+  )
+    return fail();
 }
 export function decodeUsageScreenRequest(value: unknown): UsageScreenRequest {
   const v = requireRecord(value, 'Usage screen request');
   if (v.kind === 'screen') {
     requireExactRecord(v, 'Usage screen request', ['kind', 'query']);
     return { kind: 'screen', query: query(v.query) };
+  }
+  if (v.kind === 'heatmap') {
+    requireExactRecord(v, 'Usage heatmap request', ['kind', 'range', 'revision']);
+    return { kind: 'heatmap', range: heatmapRange(v.range), revision: token(v.revision) };
   }
   requireExactRecord(v, 'Usage activity request', [
     'kind',
@@ -159,6 +168,11 @@ function freezeResult(value: unknown): void {
 function measureResult(value: UsageScreenResult): number | UsageScreenFailure {
   const known = measuredResults.get(value);
   if (known !== undefined) return known;
+  if (value.kind === 'heatmap') {
+    if (value.heatmap.days.length > 366 || bytes(value.heatmap) > USAGE_SCREEN_SECTION_MAX_BYTES)
+      return { kind: 'screen_response_too_large', section: 'heatmap' };
+    return bytes(value);
+  }
   if (value.kind !== 'screen' && value.kind !== 'activity') return bytes(value);
   const page = value.kind === 'screen' ? value.screen : value.page;
   const tooLarge = (
@@ -166,10 +180,6 @@ function measureResult(value: UsageScreenResult): number | UsageScreenFailure {
   ): UsageScreenFailure => ({ kind: 'screen_response_too_large', section });
   let collectionBytes = 0;
   if (value.kind === 'screen') {
-    const heatmapBytes = bytes(value.screen.heatmap);
-    if (value.screen.heatmap.days.length > 366 || heatmapBytes > USAGE_SCREEN_SECTION_MAX_BYTES)
-      return tooLarge('heatmap');
-    collectionBytes += heatmapBytes - 4;
     for (const [key, section, limit] of [
       ['byProvider', 'provider_breakdown', 100],
       ['byModel', 'model_breakdown', 100],
@@ -205,7 +215,6 @@ function measureResult(value: UsageScreenResult): number | UsageScreenFailure {
             byModel: [],
             byTool: [],
             pricing: [],
-            heatmap: null,
             logs: [],
           },
         }) +
@@ -238,6 +247,14 @@ export function decodeUsageScreenResult(value: unknown): UsageScreenResult {
       return fail();
     return v as unknown as UsageScreenResult;
   }
+  if (v.kind === 'heatmap') {
+    requireExactRecord(v, 'Usage heatmap result', ['kind', 'revision', 'heatmap']);
+    token(v.revision);
+    assertHeatmap(v.heatmap);
+    const result = v as unknown as UsageScreenResult;
+    if (usageScreenCapacity(result)) return fail();
+    return result;
+  }
   const isScreen = v.kind === 'screen';
   if (!isScreen && v.kind !== 'activity') return fail();
   requireExactRecord(v, 'Usage result', ['kind', isScreen ? 'screen' : 'page']);
@@ -251,7 +268,6 @@ export function decodeUsageScreenResult(value: unknown): UsageScreenResult {
           'query',
           'activityTotal',
           'summary',
-          'heatmap',
           'byProvider',
           'byModel',
           'byTool',
@@ -307,8 +323,7 @@ export function decodeUsageScreenResult(value: unknown): UsageScreenResult {
       return fail();
   }
   if (isScreen) {
-    const screenQuery = query(p.query);
-    assertHeatmap(p.heatmap, screenQuery.heatmap);
+    query(p.query);
     requireCount(p.activityTotal, 'Usage activity total');
     const summary = requireExactRecord(p.summary, 'Usage summary', [
       'totalRequests',
@@ -355,7 +370,10 @@ export function assertUsageScreenResult(
       JSON.stringify(output.screen.query) !== JSON.stringify(input.query)
     )
       return fail();
-    assertHeatmap(output.screen.heatmap, input.query.heatmap);
+  } else if (input.kind === 'heatmap') {
+    if (output.kind === 'revision_changed') return;
+    if (output.kind !== 'heatmap' || output.revision !== input.revision) return fail();
+    assertHeatmap(output.heatmap, input.range);
   } else if (output.kind !== 'revision_changed') {
     if (
       output.kind !== 'activity' ||

@@ -23,6 +23,8 @@ import {
   isUsageHeatmapRange,
   isUsageScreenSearch,
   isUsageTimestamp,
+  type UsageHeatmap,
+  type UsageHeatmapRange,
   type UsageScreen,
   type UsageScreenQuery,
   type UsageScreenRequest,
@@ -127,7 +129,7 @@ interface CachedRangeStatistics {
 interface CachedHeatmap {
   revision: string;
   identity: string;
-  heatmap: UsageScreen['heatmap'];
+  heatmap: UsageHeatmap;
 }
 
 export function createUsageScreenReader(root: string) {
@@ -150,7 +152,12 @@ export function createUsageScreenReader(root: string) {
     },
     read: (input: UsageScreenRequest): UsageScreenResult =>
       lease.transaction('read', () => {
-        validateQuery(input.query);
+        if (input.kind === 'heatmap') {
+          if (!isUsageHeatmapRange(input.range))
+            throw new TelemetryQueryValidationError('Invalid Usage heatmap range');
+        } else {
+          validateQuery(input.query);
+        }
         const state = db
           .prepare(
             'SELECT incarnation, CAST(revision AS TEXT) AS revision FROM usage_screen_revision WHERE singleton = 1',
@@ -159,9 +166,26 @@ export function createUsageScreenReader(root: string) {
         if (!state || typeof state.incarnation !== 'string' || typeof state.revision !== 'string')
           throw new Error('Invalid Usage revision authority');
         const revision = hash([generation, state.incarnation, state.revision]);
+        if (input.kind !== 'screen' && revision !== input.revision)
+          return { kind: 'revision_changed' };
+        if (input.kind === 'heatmap') {
+          const identity = hash(input.range);
+          const hit =
+            cachedHeatmap?.revision === revision && cachedHeatmap.identity === identity
+              ? cachedHeatmap
+              : undefined;
+          const heatmap = hit?.heatmap ?? readHeatmap(db, input.range);
+          if (!hit) {
+            // Nested reads may see writes that later roll back and reuse this
+            // revision. Publish only after the outermost transaction commits.
+            lease.onTransactionSettled((committed) => {
+              if (committed && !closed) cachedHeatmap = { revision, identity, heatmap };
+            });
+          }
+          return { kind: 'heatmap', revision, heatmap: structuredClone(heatmap) };
+        }
         const queryIdentity = hash(input.query);
         if (input.kind === 'activity') {
-          if (revision !== input.revision) return { kind: 'revision_changed' };
           if (queryIdentity !== input.queryIdentity)
             throw new TelemetryQueryValidationError('Usage query changed');
           return {
@@ -176,12 +200,6 @@ export function createUsageScreenReader(root: string) {
             : undefined;
         const statistics = hit?.statistics ?? readRangeStatistics(db, input.query.range);
         if ('kind' in statistics) return statistics;
-        const heatmapIdentity = hash(input.query.heatmap);
-        const heatmapHit =
-          cachedHeatmap?.revision === revision && cachedHeatmap.identity === heatmapIdentity
-            ? cachedHeatmap
-            : undefined;
-        const heatmap = heatmapHit?.heatmap ?? readHeatmap(db, input.query.heatmap);
         // Complete range statistics already counted every readable model/tool
         // row. Only activity filters need a separate exact count.
         const activityTotal =
@@ -197,7 +215,6 @@ export function createUsageScreenReader(root: string) {
           // Host projects identities and freezes replies; returned objects must
           // never share mutable rows or arrays with another cached response.
           ...structuredClone(statistics),
-          heatmap: structuredClone(heatmap),
           // Count and page share this read snapshot: zero proves there is no
           // matching activity, so an empty search needs only one range scan.
           ...(activityTotal === 0 ? { logs: [], nextCursor: null } : activity(db, input.query)),
@@ -207,12 +224,6 @@ export function createUsageScreenReader(root: string) {
           // same revision counter. Publish only after the outermost commit.
           lease.onTransactionSettled((committed) => {
             if (committed && !closed) cached = { revision, from, to, statistics };
-          });
-        }
-        if (!heatmapHit) {
-          lease.onTransactionSettled((committed) => {
-            if (committed && !closed)
-              cachedHeatmap = { revision, identity: heatmapIdentity, heatmap };
           });
         }
         return { kind: 'screen', screen };
@@ -349,7 +360,7 @@ function readProjectionCoverage(db: DatabaseSync, range: UsageScreenQuery['range
   return { unreadable, pending };
 }
 
-function readHeatmap(db: DatabaseSync, range: UsageScreenQuery['heatmap']): UsageScreen['heatmap'] {
+function readHeatmap(db: DatabaseSync, range: UsageHeatmapRange): UsageHeatmap {
   // Reuse the model accounting projections. Joining each source to the small
   // day table before UNION lets SQLite seek its timestamp index once per day;
   // joining days to MODEL_ROWS would materialize and rescan the entire year.
@@ -392,7 +403,6 @@ function validateQuery(query: UsageScreenQuery): void {
     !isUsageTimestamp(query.range.from) ||
     !isUsageTimestamp(query.range.to) ||
     query.range.to < query.range.from ||
-    !isUsageHeatmapRange(query.heatmap) ||
     !isUsageScreenSearch(query.search) ||
     !['all', 'success', 'error', 'aborted'].includes(query.status)
   ) {

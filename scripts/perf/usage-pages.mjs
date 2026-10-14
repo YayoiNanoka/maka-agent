@@ -196,7 +196,6 @@ for (const [count, mixed, tied] of [
       range: { from: 0, to: count },
       search: '',
       status: 'all',
-      heatmap: { dayStarts: [0], to: count },
     };
     const screens = [];
     for (const version of versions) {

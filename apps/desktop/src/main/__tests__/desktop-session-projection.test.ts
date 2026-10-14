@@ -208,7 +208,6 @@ test('projects queued Session attachments into the Desktop host namespace', () =
 
 test('projects only present Usage Session ids into the Desktop host namespace', () => {
   const stats: UsageStats = {
-    heatmap: {days:[{start:0,tokens:0,successfulRequests:2}],through:1,hasIncompleteUsage:false},
     summary: {
       totalRequests: 2,
       totalCostUsd: 0,

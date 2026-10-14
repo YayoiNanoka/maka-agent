@@ -658,7 +658,6 @@ export interface UsageSummary {
 }
 
 export interface UsageStats {
-  heatmap: UsageHeatmap;
   navigation?: {
     activityTotal: number;
     revision: string;
@@ -710,7 +709,6 @@ export interface UsageStats {
 
 /** A fixed query; activity filters never change headline accounting. */
 export interface UsageScreenQuery {
-  heatmap: UsageHeatmapRange;
   range: { from: number; to: number };
   search: string;
   status: 'all' | 'success' | 'error' | 'aborted';
@@ -745,6 +743,7 @@ export type UsageScreenFailure =
 
 export type UsageScreenRequest =
   | { kind: 'screen'; query: UsageScreenQuery }
+  | { kind: 'heatmap'; range: UsageHeatmapRange; revision: string }
   | {
       kind: 'activity';
       query: UsageScreenQuery;
@@ -755,6 +754,7 @@ export type UsageScreenRequest =
 
 export type UsageScreenResult =
   | { kind: 'screen'; screen: UsageScreen }
+  | { kind: 'heatmap'; revision: string; heatmap: UsageHeatmap }
   | { kind: 'activity'; page: UsageActivityPage }
   | UsageScreenFailure;
 

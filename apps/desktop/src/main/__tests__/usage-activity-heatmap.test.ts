@@ -167,11 +167,11 @@ function setupDom() {
 }
 
 
-function activityTree(heatmap: Parameters<typeof UsageActivityHeatmap>[0]['heatmap']) {
+function activityTree(heatmap: import('@maka/core/settings').UsageHeatmap | null) {
   return createElement(LocaleProvider, {
     locale: 'en',
     children: createElement(AstryxLocaleProvider, {
-      children: createElement(UsageActivityHeatmap, { heatmap }),
+      children: createElement(UsageActivityHeatmap, { state: heatmap ? {status: 'ready', value: heatmap} : {status: 'loading'} }),
     }),
   });
 }

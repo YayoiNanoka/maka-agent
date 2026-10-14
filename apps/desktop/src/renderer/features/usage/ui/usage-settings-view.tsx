@@ -127,6 +127,7 @@ export function UsageSettingsView(props: {
   // A retained complete result stays bound to its original query until replacement.
   const {
     stats,
+    heatmap,
     reload,
     targetKey,
     state,
@@ -374,7 +375,7 @@ export function UsageSettingsView(props: {
         </div>
       </div>
 
-      <UsageActivityHeatmap heatmap={stats?.heatmap ?? null} />
+      <UsageActivityHeatmap state={heatmap} onRefresh={() => void refresh()} refreshing={refreshing} />
 
       <div className="settingsUsageBreakdown">
         <div className="settingsUsageTabsBar">

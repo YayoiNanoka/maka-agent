@@ -18,8 +18,14 @@
  */
 
 import assert from 'node:assert/strict';
+import { createUsageScreenReader } from '../usage-screen.js';
 import { DatabaseSync } from 'node:sqlite';
-import type { UsageScreen, UsageScreenQuery, UsageScreenRequest } from '@maka/core/settings';
+import type {
+  UsageScreen,
+  UsageScreenQuery,
+  UsageScreenRequest,
+  UsageHeatmapRange,
+} from '@maka/core/settings';
 import {
   copyFile,
   mkdir,
@@ -977,9 +983,12 @@ function appendModelCallAuthorityEvent(
   }
 }
 
+const heatmapRange: UsageHeatmapRange = {
+  dayStarts: [Date.UTC(2026, 0, 1)],
+  to: Date.UTC(2026, 0, 2) - 1,
+};
 const screenQuery = {
   range: { from: 0, to: Date.UTC(2030, 0, 1) },
-  heatmap: { dayStarts: [Date.UTC(2026, 0, 1)], to: Date.UTC(2026, 0, 2) - 1 },
   search: '',
   status: 'all' as const,
 };
@@ -1019,6 +1028,26 @@ async function initialScreen(
   assert.equal(result.kind, 'screen');
   assert.ok(result.kind === 'screen');
   return result.screen;
+}
+async function loadHeatmap(
+  stores: Awaited<ReturnType<typeof openInteractiveUsageStoresForWrite>>,
+  screen: UsageScreen,
+  range: UsageHeatmapRange = heatmapRange,
+) {
+  const result = await stores.readUsageScreen({
+    kind: 'heatmap',
+    revision: screen.revision,
+    range,
+  });
+  assert.ok(result.kind === 'heatmap');
+  assert.equal(result.revision, screen.revision);
+  return result;
+}
+async function initialHeatmap(
+  stores: Awaited<ReturnType<typeof openInteractiveUsageStoresForWrite>>,
+  range: UsageHeatmapRange = heatmapRange,
+) {
+  return loadHeatmap(stores, await initialScreen(stores), range);
 }
 async function seedScreen(stores: Awaited<ReturnType<typeof openInteractiveUsageStoresForWrite>>) {
   for (let i = 0; i < 61; i++)
@@ -1499,14 +1528,14 @@ describe('revision-consistent Usage screen', () => {
         const screen = await initialScreen(stores, { ...screenQuery, search: 'gpt' });
         assert.ok(committed);
         assert.ok(screen.summary.totalCostUsd < 1);
-        assert.equal(screen.heatmap.days[0]?.tokens, 61 * 30);
+        assert.equal(screen.summary.totalTokens, 61 * 30);
         assert.ok(screen.logs.every((row) => row.costUsd === 0.001));
         assert.deepEqual(await stores.readUsageScreen(continuation(screen)), {
           kind: 'revision_changed',
         });
         const refreshed = await initialScreen(stores);
         assert.equal(refreshed.summary.totalCostUsd, 61 * 99);
-        assert.equal(refreshed.heatmap.days[0]?.tokens, 61 * 999);
+        assert.equal(refreshed.summary.totalTokens, 61 * 999);
       } finally {
         external.close();
         lease.close();
@@ -1617,10 +1646,6 @@ describe('Usage range statistics reuse', () => {
       first.pricing[0]!.inputPerMTokUsd = 999;
       first.provenance.coverage.attempts = 999;
       first.provenance.pendingRepairs = 999;
-      first.heatmap.days[0]!.tokens = 999;
-      first.heatmap.days[0]!.successfulRequests = 999;
-      first.heatmap.hasIncompleteUsage = true;
-      first.query.heatmap.dayStarts[0] = 0;
       first.query.range.to = 0;
       const freeze = (value: unknown): void => {
         if (!value || typeof value !== 'object') return;
@@ -1698,7 +1723,7 @@ describe('Usage range statistics reuse', () => {
         const committed = await initialScreen(stores);
         assert.equal(committed.byTool[0]?.tool, 'Committed');
         assert.equal(committed.logs[0]?.toolName, 'Committed');
-        assert.equal(committed.heatmap.days[0]?.tokens, 60);
+        assert.equal(committed.summary.totalTokens, 60);
         assert.ok(aggregateQueries >= 4, 'rolled-back statistics are recomputed');
         aggregateQueries = 0;
         assert.deepEqual(
@@ -1834,7 +1859,7 @@ describe('Usage range statistics reuse', () => {
         const refreshed = await initialScreen(stores);
         assert.notEqual(refreshed.revision, first.revision);
         assert.equal(refreshed.summary.totalCostUsd, 122);
-        assert.equal(refreshed.heatmap.days[0]?.tokens, 61 * 90);
+        assert.equal(refreshed.summary.totalTokens, 61 * 90);
         assert.ok(refreshed.logs.every((row) => row.costUsd === 2));
       } finally {
         lease.database.function('usage_screen_lower', { deterministic: true }, (value) =>
@@ -1871,6 +1896,156 @@ describe('Usage range statistics reuse', () => {
 });
 
 describe('Usage heatmap accounting', () => {
+  test('screen queries never aggregate annual usage and stale annual requests do not scan', async () => {
+    await withScreenStores(async (stores, root) => {
+      await seedScreen(stores);
+      const lease = acquireOperationalStateDatabase(await realpath(root));
+      const prepare = lease.database.prepare;
+      let dailyAggregations = 0;
+      let failAnnual = true;
+      lease.database.prepare = function (sql) {
+        if (sql.startsWith('WITH days AS')) {
+          dailyAggregations++;
+          if (failAnnual) throw new Error('annual aggregation unavailable');
+        }
+        return prepare.call(this, sql);
+      };
+      try {
+        const screen = await initialScreen(stores);
+        assert.equal(screen.summary.totalRequests, 61);
+        assert.equal('heatmap' in screen, false);
+        assert.equal(dailyAggregations, 0);
+        const request = {
+          kind: 'heatmap' as const,
+          range: heatmapRange,
+          revision: screen.revision,
+        };
+        await assert.rejects(stores.readUsageScreen(request), /annual aggregation unavailable/);
+        assert.equal(dailyAggregations, 1);
+        assert.equal((await initialScreen(stores)).summary.totalRequests, 61);
+        failAnnual = false;
+        await stores.telemetry.recordLlmCall(llmRecord({ id: 'new' }));
+        assert.deepEqual(await stores.readUsageScreen(request), { kind: 'revision_changed' });
+        assert.equal(dailyAggregations, 1, 'revision mismatch returns before the annual scan');
+        const annual = await initialHeatmap(stores);
+        assert.equal(annual.heatmap.days[0]?.successfulRequests, 62);
+        assert.equal(dailyAggregations, 2);
+      } finally {
+        lease.database.prepare = prepare;
+        lease.close();
+      }
+    });
+  });
+
+  test('annual revision and aggregates share one snapshot across an external WAL commit', async () => {
+    await withScreenStores(async (stores, root) => {
+      await seedScreen(stores);
+      const screen = await initialScreen(stores);
+      const lease = acquireOperationalStateDatabase(await realpath(root));
+      const external = new DatabaseSync(lease.databasePath);
+      const prepare = lease.database.prepare;
+      let committed = false;
+      lease.database.prepare = function (sql) {
+        if (sql.startsWith('WITH days AS') && !committed) {
+          committed = true;
+          external.exec(
+            "UPDATE usage_llm_calls SET record_json = json_set(record_json, '$.totalTokens', 99)",
+          );
+        }
+        return prepare.call(this, sql);
+      };
+      try {
+        const annual = await loadHeatmap(stores, screen);
+        assert.ok(committed);
+        assert.equal(annual.heatmap.days[0]?.tokens, 61 * 30);
+        assert.deepEqual(
+          await stores.readUsageScreen({
+            kind: 'heatmap',
+            range: heatmapRange,
+            revision: screen.revision,
+          }),
+          { kind: 'revision_changed' },
+        );
+        assert.equal((await initialHeatmap(stores)).heatmap.days[0]?.tokens, 61 * 99);
+      } finally {
+        lease.database.prepare = prepare;
+        external.close();
+        lease.close();
+      }
+    });
+  });
+
+  test('mutating or freezing annual results cannot change the cached aggregate', async () => {
+    await withScreenStores(async (stores) => {
+      await seedScreen(stores);
+      const screen = await initialScreen(stores);
+      const first = await loadHeatmap(stores, screen);
+      const expected = structuredClone(first.heatmap);
+      first.heatmap.days[0]!.tokens = 999;
+      first.heatmap.days[0]!.successfulRequests = 999;
+      first.heatmap.hasIncompleteUsage = true;
+      Object.freeze(first.heatmap.days[0]);
+      Object.freeze(first.heatmap.days);
+      Object.freeze(first.heatmap);
+      const second = await loadHeatmap(stores, screen);
+      assert.deepEqual(second.heatmap, expected);
+      assert.equal(Object.isFrozen(second.heatmap.days[0]), false);
+    });
+  });
+
+  test('annual cache is not published when its outer write transaction rolls back', async () => {
+    await withScreenStores(async (stores, root) => {
+      await stores.telemetry.recordLlmCall(llmRecord());
+      const lease = acquireOperationalStateDatabase(await realpath(root));
+      const reader = createUsageScreenReader(await realpath(root));
+      let rolledBackRevision: string | undefined;
+      try {
+        assert.throws(
+          () =>
+            lease.transaction('write', () => {
+              lease.database.exec(
+                "UPDATE usage_llm_calls SET record_json = json_set(record_json, '$.totalTokens', 90)",
+              );
+              const screen = reader.read({ kind: 'screen', query: screenQuery });
+              assert.ok(screen.kind === 'screen');
+              rolledBackRevision = screen.screen.revision;
+              const annual = reader.read({
+                kind: 'heatmap',
+                range: heatmapRange,
+                revision: rolledBackRevision,
+              });
+              assert.ok(annual.kind === 'heatmap');
+              assert.equal(annual.heatmap.days[0]?.tokens, 90);
+              throw new Error('rollback annual read');
+            }),
+          /rollback annual read/,
+        );
+        lease.transaction('write', () =>
+          lease.database.exec(
+            "UPDATE usage_llm_calls SET record_json = json_set(record_json, '$.totalTokens', 60)",
+          ),
+        );
+        const screen = reader.read({ kind: 'screen', query: screenQuery });
+        assert.ok(screen.kind === 'screen');
+        assert.equal(
+          screen.screen.revision,
+          rolledBackRevision,
+          'the committed write reuses the counter rolled back above',
+        );
+        const annual = reader.read({
+          kind: 'heatmap',
+          range: heatmapRange,
+          revision: screen.screen.revision,
+        });
+        assert.ok(annual.kind === 'heatmap');
+        assert.equal(annual.heatmap.days[0]?.tokens, 60);
+      } finally {
+        reader.close();
+        lease.close();
+      }
+    });
+  });
+
   test('client day boundaries include successful model requests and all reported tokens across DST', async () => {
     await withScreenStores(async (stores, root) => {
       // New York local midnights: March 8 has 23 hours. The storage process's
@@ -1917,10 +2092,7 @@ describe('Usage heatmap accounting', () => {
       } finally {
         lease.close();
       }
-      const screen = await initialScreen(stores, {
-        ...screenQuery,
-        heatmap: { dayStarts, to },
-      });
+      const screen = await initialHeatmap(stores, { dayStarts, to });
       assert.deepEqual(screen.heatmap, {
         days: dayStarts.map((start, index) => ({
           start,
@@ -1939,9 +2111,10 @@ describe('Usage heatmap accounting', () => {
       await stores.telemetry.recordLlmCall(llmRecord({ id: 'failed', status: 'error' }));
       await stores.telemetry.recordLlmCall(llmRecord({ id: 'aborted', status: 'aborted' }));
       await stores.telemetry.recordToolInvocation(toolRecord());
-      const first = await initialScreen(stores);
-      assert.equal(first.logs.length, 50);
-      assert.ok(first.nextCursor);
+      const screen = await initialScreen(stores);
+      assert.equal(screen.logs.length, 50);
+      assert.ok(screen.nextCursor);
+      const first = await loadHeatmap(stores, screen);
       assert.equal(first.heatmap.days[0]?.successfulRequests, 61);
       assert.equal(first.heatmap.days[0]?.tokens, 63 * 30);
       const filtered = await initialScreen(stores, {
@@ -1952,7 +2125,7 @@ describe('Usage heatmap accounting', () => {
       });
       assert.equal(filtered.summary.totalRequests, 0);
       assert.deepEqual(filtered.logs, []);
-      assert.deepEqual(filtered.heatmap, first.heatmap);
+      assert.deepEqual((await loadHeatmap(stores, filtered)).heatmap, first.heatmap);
     });
   });
 
@@ -1965,13 +2138,13 @@ describe('Usage heatmap accounting', () => {
         if (sql.startsWith('WITH days AS')) {
           const plan = prepare
             .call(this, `EXPLAIN QUERY PLAN ${sql}`)
-            .all(screenQuery.heatmap.to, JSON.stringify(screenQuery.heatmap.dayStarts));
+            .all(heatmapRange.to, JSON.stringify(heatmapRange.dayStarts));
           plans.push(...plan.map((row) => String(row.detail)));
         }
         return prepare.call(this, sql);
       };
       try {
-        await initialScreen(stores);
+        await initialHeatmap(stores);
         assert.ok(
           plans.some((detail) => /SEARCH usage_model_call_attempts USING INDEX/.test(detail)),
         );
@@ -1986,7 +2159,7 @@ describe('Usage heatmap accounting', () => {
 
   test('heatmap cache follows its own window and invalidates on accounting writes', async () => {
     await withScreenStores(async (stores, root) => {
-      const start = screenQuery.heatmap.dayStarts[0]!;
+      const start = heatmapRange.dayStarts[0]!;
       await stores.telemetry.recordLlmCall(llmRecord({ id: 'early', ts: start, totalTokens: 40 }));
       await stores.telemetry.recordLlmCall(
         llmRecord({ id: 'late', ts: start + 100, totalTokens: 60 }),
@@ -1999,7 +2172,7 @@ describe('Usage heatmap accounting', () => {
         return prepare.call(this, sql);
       };
       try {
-        const first = await initialScreen(stores);
+        const first = await initialHeatmap(stores);
         assert.equal(first.heatmap.days[0]?.tokens, 100);
         assert.equal(dailyAggregations, 1);
         for (const query of [
@@ -2007,25 +2180,25 @@ describe('Usage heatmap accounting', () => {
           { ...screenQuery, status: 'error' as const },
           { ...screenQuery, range: { from: 1, to: 2 } },
         ]) {
-          assert.deepEqual((await initialScreen(stores, query)).heatmap, first.heatmap);
+          assert.deepEqual(
+            (await loadHeatmap(stores, await initialScreen(stores, query))).heatmap,
+            first.heatmap,
+          );
         }
         assert.equal(dailyAggregations, 1);
-        const earlier = {
-          ...screenQuery,
-          heatmap: { dayStarts: [start], to: start + 99 },
-        };
-        assert.equal((await initialScreen(stores, earlier)).heatmap.days[0]?.tokens, 40);
+        const earlier = { dayStarts: [start], to: start + 99 };
+        assert.equal((await initialHeatmap(stores, earlier)).heatmap.days[0]?.tokens, 40);
         assert.equal(dailyAggregations, 2);
         await stores.telemetry.recordLlmCall(
           llmRecord({ id: 'early', ts: start, totalTokens: 70, status: 'error' }),
         );
-        const refreshed = await initialScreen(stores, earlier);
+        const refreshed = await initialHeatmap(stores, earlier);
         assert.equal(refreshed.heatmap.days[0]?.tokens, 70);
         assert.equal(refreshed.heatmap.days[0]?.successfulRequests, 0);
         assert.equal(dailyAggregations, 3);
         assert.notEqual(refreshed.revision, first.revision);
         lease.transaction('write', () => lease.database.exec('DELETE FROM usage_llm_calls'));
-        assert.deepEqual((await initialScreen(stores, earlier)).heatmap.days, [
+        assert.deepEqual((await initialHeatmap(stores, earlier)).heatmap.days, [
           { start, tokens: 0, successfulRequests: 0 },
         ]);
         assert.equal(dailyAggregations, 4);
@@ -2038,41 +2211,41 @@ describe('Usage heatmap accounting', () => {
 
   test('incomplete, missing, pending and unreadable usage remain visible alongside known totals', async () => {
     await withScreenStores(async (stores, root) => {
-      const start = screenQuery.heatmap.dayStarts[0]!;
+      const start = heatmapRange.dayStarts[0]!;
       const lease = acquireOperationalStateDatabase(await realpath(root));
       try {
-        assert.equal((await initialScreen(stores)).heatmap.hasIncompleteUsage, false);
+        assert.equal((await initialHeatmap(stores)).heatmap.hasIncompleteUsage, false);
         appendModelCallAuthorityEvent(root, {
           ...modelCallAttempt('heatmap-source'),
           startedAt: start,
           completedAt: start + 1,
         });
-        const pending = await initialScreen(stores);
+        const pending = await initialHeatmap(stores);
         assert.equal(pending.heatmap.hasIncompleteUsage, true);
         assert.equal(pending.heatmap.days[0]?.tokens, 0);
         await stores.modelCalls.catchUpModelCallProjection();
-        const repaired = await initialScreen(stores);
+        const repaired = await initialHeatmap(stores);
         assert.equal(repaired.heatmap.hasIncompleteUsage, false);
         assert.equal(repaired.heatmap.days[0]?.tokens, 2);
         assert.equal(repaired.heatmap.days[0]?.successfulRequests, 1);
         lease.database.exec("UPDATE usage_model_call_attempts SET usage_basis = 'partial'");
-        assert.equal((await initialScreen(stores)).heatmap.hasIncompleteUsage, true);
+        assert.equal((await initialHeatmap(stores)).heatmap.hasIncompleteUsage, true);
         lease.database.exec(`UPDATE usage_model_call_attempts SET usage_basis = 'missing',
           input_tokens = NULL, output_tokens = NULL`);
-        const missing = await initialScreen(stores);
+        const missing = await initialHeatmap(stores);
         assert.equal(missing.heatmap.hasIncompleteUsage, true);
         assert.equal(missing.heatmap.days[0]?.tokens, 0);
         assert.equal(missing.heatmap.days[0]?.successfulRequests, 1);
         lease.database.exec(`UPDATE usage_model_call_attempts SET usage_basis = 'reported',
           input_tokens = 1, output_tokens = 1`);
-        assert.equal((await initialScreen(stores)).heatmap.hasIncompleteUsage, false);
+        assert.equal((await initialHeatmap(stores)).heatmap.hasIncompleteUsage, false);
         lease.database.exec('UPDATE usage_model_call_attempts SET output_tokens = NULL');
-        assert.equal((await initialScreen(stores)).heatmap.hasIncompleteUsage, true);
+        assert.equal((await initialHeatmap(stores)).heatmap.hasIncompleteUsage, true);
         lease.database.exec('UPDATE usage_model_call_attempts SET output_tokens = 1');
         lease.database
           .prepare('INSERT INTO usage_model_call_attempts(attempt_id, completed_at) VALUES (?, ?)')
           .run('unreadable', start + 2);
-        const unreadable = await initialScreen(stores);
+        const unreadable = await initialHeatmap(stores);
         assert.equal(unreadable.heatmap.hasIncompleteUsage, true);
         assert.equal(unreadable.heatmap.days[0]?.tokens, 2);
         lease.database.exec(
@@ -2081,16 +2254,16 @@ describe('Usage heatmap accounting', () => {
         lease.database.exec(
           'UPDATE usage_model_call_projection_checkpoints SET unreadable_events = 1',
         );
-        assert.equal((await initialScreen(stores)).heatmap.hasIncompleteUsage, true);
+        assert.equal((await initialHeatmap(stores)).heatmap.hasIncompleteUsage, true);
         lease.database.exec(
           'UPDATE usage_model_call_projection_checkpoints SET unreadable_events = 0',
         );
-        assert.equal((await initialScreen(stores)).heatmap.hasIncompleteUsage, false);
+        assert.equal((await initialHeatmap(stores)).heatmap.hasIncompleteUsage, false);
         await stores.telemetry.recordLlmCall(llmRecord());
         lease.database.exec(
           "UPDATE usage_llm_calls SET record_json = json_remove(record_json, '$.totalTokens')",
         );
-        assert.equal((await initialScreen(stores)).heatmap.hasIncompleteUsage, true);
+        assert.equal((await initialHeatmap(stores)).heatmap.hasIncompleteUsage, true);
       } finally {
         lease.close();
       }
@@ -2107,8 +2280,9 @@ describe('Usage heatmap accounting', () => {
       ]) {
         await assert.rejects(
           stores.readUsageScreen({
-            kind: 'screen',
-            query: { ...screenQuery, heatmap } as UsageScreenQuery,
+            kind: 'heatmap',
+            revision: 'invalid',
+            range: heatmap as UsageHeatmapRange,
           }),
           TelemetryQueryValidationError,
         );
@@ -2118,6 +2292,6 @@ describe('Usage heatmap accounting', () => {
 });
 
 function rangeStatistics(screen: UsageScreen) {
-  const { summary, byProvider, byModel, byTool, pricing, provenance, heatmap } = screen;
-  return { summary, byProvider, byModel, byTool, pricing, provenance, heatmap };
+  const { summary, byProvider, byModel, byTool, pricing, provenance } = screen;
+  return { summary, byProvider, byModel, byTool, pricing, provenance };
 }

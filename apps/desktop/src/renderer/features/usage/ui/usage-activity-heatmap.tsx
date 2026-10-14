@@ -19,9 +19,10 @@
 
 import { useId, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { EmptyState, SegmentedControl, SegmentedControlItem, Skeleton, Tooltip, VisuallyHidden } from '@astryxdesign/core';
-import { resolveUsageHeatmapRange, type UsageStats } from '@maka/core/settings';
+import { resolveUsageHeatmapRange } from '@maka/core/settings';
 import { uiLocaleToIntlLocale } from '@maka/core/ui-locale';
-import { useUiLocale } from '@maka/ui';
+import { Banner, Button, useUiLocale } from '@maka/ui';
+import type { UsageHeatmapState } from '../services-context.js';
 import { getUsageSettingsCopy } from '../../../locales/settings-usage-copy.js';
 import {
   buildUsageActivityWeeks,
@@ -33,7 +34,12 @@ import {
   type UsageActivityView,
 } from './usage-activity-model.js';
 
-export function UsageActivityHeatmap({ heatmap }: { heatmap: UsageStats['heatmap'] | null }) {
+export function UsageActivityHeatmap({ state, onRefresh, refreshing }: {
+  state: UsageHeatmapState;
+  onRefresh?(): void;
+  refreshing?: boolean;
+}) {
+  const heatmap = state.status === 'ready' ? state.value : null;
   const locale = useUiLocale();
   const copy = getUsageSettingsCopy(locale).heatmap;
   const [view, setView] = useState<UsageActivityView>('daily');
@@ -121,7 +127,15 @@ export function UsageActivityHeatmap({ heatmap }: { heatmap: UsageStats['heatmap
       </div>
       <VisuallyHidden id={helpId}>{copy.keyboardHelp}</VisuallyHidden>
       <div className="settingsUsageActivityScroll">
-        {!heatmap ? (
+        {state.status === 'error' || state.status === 'stale' ? (
+          <Banner
+            status={state.status === 'stale' ? 'info' : 'warning'}
+            role="status"
+            title={state.status === 'stale' ? copy.stale : copy.loadFailed}
+            description={state.status === 'error' && state.message ? state.message : copy.refreshHelp}
+            endContent={onRefresh ? <Button variant="secondary" size="sm" label={getUsageSettingsCopy(locale).refreshAria} onClick={onRefresh} isLoading={refreshing} /> : undefined}
+          />
+        ) : !heatmap ? (
           <div className="settingsUsageActivityCanvas" style={chartStyle} role="status" aria-label={copy.loading}>
             <div className="settingsUsageActivityGrid" aria-hidden="true">
               {Array.from({ length: loadingWeekCount }, (_, column) => (
@@ -132,7 +146,7 @@ export function UsageActivityHeatmap({ heatmap }: { heatmap: UsageStats['heatmap
                 </div>
               ))}
             </div>
-            <div className="settingsUsageActivityMonths" aria-hidden="true"><Skeleton width={40} height={12} /></div>
+            <div className="settingsUsageActivityMonths" aria-hidden="true"><span style={{gridColumn: '1 / -1'}}>{copy.loading}</span></div>
           </div>
         ) : weeks.length === 0 ? <EmptyState title={copy.unavailable} isCompact /> : (
           <div className="settingsUsageActivityCanvas" style={chartStyle}>
