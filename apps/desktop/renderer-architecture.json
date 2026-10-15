@@ -356,7 +356,6 @@
         "createComposerStagingCommands",
         "createComposerSubmissionCommands",
         "createComposerSurfaceOwner",
-        "createComposerUriDispatcher",
         "createExecutorSessionActivator",
         "resolveTaskReadinessModelTarget",
         "useActiveExecutionBoundary",
@@ -417,6 +416,17 @@
       ],
       "composition": [
         "OverlaysServicesProvider"
+      ]
+    },
+    "src/renderer/features/personal-assistant/index.tsx": {
+      "appShell": [
+        "MemoryOriginalHost",
+        "PersonalAssistantEntry",
+        "createInternalUriDispatcher"
+      ],
+      "composition": [
+        "PersonalAssistantServicesProvider",
+        "createPersonalAssistantServices"
       ]
     },
     "src/renderer/features/runtime-host-management/index.ts": {
@@ -711,6 +721,7 @@
           "./features/goals": 1,
           "./features/module-hub": 1,
           "./features/overlays/index.js": 1,
+          "./features/personal-assistant/index.js": 1,
           "./features/runtime-host-management/index.js": 1,
           "./features/session-collaboration": 1,
           "./features/session-navigation": 1,
@@ -747,7 +758,7 @@
           "react": 1
         },
         "importSpecifiers": 42,
-        "nonTriviaTokens": 7276
+        "nonTriviaTokens": 7282
       },
       "src/renderer/use-app-shell-session-list.ts": {
         "importDeclarations": 3,
@@ -2013,6 +2024,7 @@
         "dependencyPaths": {
           "../features/jev-settings": 1,
           "../features/network-proxy/index.js": 1,
+          "../features/personal-assistant/index.js": 1,
           "../locales/settings-preferences-copy.js": 1,
           "../locales/settings-shared-copy.js": 1,
           "../locales/settings-test-result-copy.js": 1,
@@ -2985,6 +2997,7 @@
           "../browser-storage": 1,
           "../features/connection-settings": 1,
           "../features/external-agent-settings/index.js": 1,
+          "../features/personal-assistant/index.js": 1,
           "../features/session-bundle": 1,
           "../features/session-navigation": 1,
           "../locales/settings-navigation-copy.js": 1,

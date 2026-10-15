@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { MemoryOriginalHost, PersonalAssistantEntry, createInternalUriDispatcher } from './features/personal-assistant/index.js';
 import { WorkHubControlOverlay, WorkHubDock, WorkHubMainNavigation } from './features/workhub';
 import { WorkHubEnablementWatch } from './application/contracts/workhub-workspace/workhub-enablement.js';
 import { RuntimeHostHandoffOverlay } from './features/runtime-host-management/index.js';
@@ -758,20 +759,14 @@ function AppShellContent({
   };
   const {
     revisionNavigation,
-    activeParentSession,
+    titlebarParentSession,
     layout: { collapsed: sessionListCollapsed, width: sessionListWidth },
   } = useSessionNavigationReads({
     catalog: sessionCatalogController,
     activeSessionId: activeId,
+    openSession: openSessionInChat,
   });
   const sessionSideNavHandleRef = sessionRailLayoutStore.collapseHandleRef;
-  const titlebarParentSession = useMemo(() => {
-    if (!activeParentSession) return undefined;
-    return {
-      name: activeParentSession.name,
-      onOpen: () => openSessionInChatRef.current(activeParentSession.id),
-    };
-  }, [activeParentSession]);
   const archivedTasksBridge = useMemo<ArchivedTasksBridge>(
     () => ({
       catalog: sessionCatalogController,
@@ -838,7 +833,7 @@ function AppShellContent({
 
   function bootstrapSessions() { return sessionWindow.bootstrap(refreshSessions, readSelectionRevision, openSession); }
 
-  const dispatchMakaUri = Conversation.createComposerUriDispatcher(openSettingsSection, composerEditing);
+  const dispatchMakaUri = createInternalUriDispatcher(ownerActiveId, openSettingsSection, composerEditing);
 
   function closeSettings() {
     overlays.commands.closeSettings();
@@ -1171,10 +1166,12 @@ function AppShellContent({
           <ModuleHub.ModuleHubScheduledTasksBoundary
             render={(scheduledTasks) => (
               <SessionNavigationProvider
+                personalAssistantNavigation={<PersonalAssistantEntry activeSessionId={workHubActive || shellObscured ? undefined : activeId} openSession={openSession} />}
                 historyBlocked={shellObscured}
                 scheduledTasks={scheduledTasks}
                 catalog={sessionCatalogController}
                 activeSessionId={activeId}
+                surfaceObscured={shellObscured}
                 hiddenSessionIds={selectors.hiddenSessionIds}
                 projectScopes={taskEntry.selectors.projectScopes}
                 streamingSessions={sessionUiReads.streaming}
@@ -1214,6 +1211,8 @@ function AppShellContent({
               which is correct: those surfaces shouldn't be a
               navigation entry point. */}
           <MakaUriContext.Provider value={dispatchMakaUri}>
+          <MemoryOriginalHost sessionId={ownerActiveId} />
+
           <div className="maka-detail-with-artifacts">
             <Conversation.ConversationHomeSurface className="mainColumn" eligible={homeSurfaceEligible}
               inert={switchingSession || undefined}

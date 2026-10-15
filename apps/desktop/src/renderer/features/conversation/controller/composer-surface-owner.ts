@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import type { NavSelection, MakaUriDest } from '@maka/ui';
+import type { NavSelection } from '@maka/ui';
 
 export interface ComposerSurfaceOwner {
   sessionId: string | undefined;
@@ -45,18 +45,4 @@ export function createComposerSurfaceOwner(input: {
   const isNewChatSendSurfaceActive = (owner: ComposerSurfaceOwner) =>
     owner.sessionId === undefined && isComposerImportOwnerActive(owner);
   return { captureComposerImportOwner, isShellSurfaceOwnerActive, isComposerImportOwnerActive, isNewChatSendSurfaceActive };
-}
-
-/** Internal compose links only edit the draft; settings links use shell routing. */
-export function createComposerUriDispatcher(
-  openSettings: (section: Extract<MakaUriDest, { kind: 'settings' }>['section']) => void,
-  editing: { replaceText(text: string): void; focus(): void },
-) {
-  return (destination: MakaUriDest): void => {
-    switch (destination.kind) {
-      case 'settings': openSettings(destination.section); return;
-      case 'compose': editing.replaceText(destination.text); editing.focus(); return;
-      default: { const unreachable: never = destination; return unreachable; }
-    }
-  };
 }

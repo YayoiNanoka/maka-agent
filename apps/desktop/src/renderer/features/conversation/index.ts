@@ -83,4 +83,4 @@ export { ComposerSubmissionProvider } from './ui/composer-submission-provider.js
 
 export { ConversationWindowState } from './ui/conversation-window-state.js';
 
-export { createComposerSurfaceOwner, createComposerUriDispatcher } from './controller/composer-surface-owner.js';
+export { createComposerSurfaceOwner } from './controller/composer-surface-owner.js';
