@@ -306,6 +306,7 @@ test('drives the renderer Session catalog facade through real UDS framing', asyn
       completeDesktopInteractionTurn() {},
       notifyRun: async () => {},
       createSessionCopyCleanup: () => ({
+        adopt: async () => {},
         ownCreation: (_creation, operation) => operation(),
         rejectCreation: async () => undefined,
         cleanup: async () => undefined,
@@ -634,6 +635,7 @@ function ipcHarness() {
 
 function unusedSessionCopyCleanup() {
   return {
+    adopt: async () => {},
     ownCreation: async <T>(_creation: unknown, operation: () => Promise<T>) => operation(),
     async rejectCreation() {},
     async cleanup() {},

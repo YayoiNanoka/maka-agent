@@ -76,7 +76,7 @@ type RuntimeHostSessionDomainClient = RuntimeHostShellRunsClient &
 
 export interface RuntimeHostSessionDomainsIpcDeps {
   terminalCloses: import('./terminal-close-intents.js').TerminalCloseIntents;
-  canUseSession?: (target: import('./runtime-host-session-observer.js').RuntimeHostSessionObserverTarget, sessionId: string) => boolean;
+  canUseSession?: (target: import('./runtime-host-session-observer.js').RuntimeHostSessionObserverTarget, sessionId: string) => boolean | Promise<boolean>;
   client: RuntimeHostSessionDomainClient;
   emitModeChanged(sessionId: string): void;
   sessionObserver: Pick<RuntimeHostSessionObserver, 'observe' | 'unobserve'>;

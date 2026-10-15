@@ -64,6 +64,7 @@ import {
   applyCompanionInteractionEvent,
   createCompanionDismissalGuard,
   dismissCompanionCopy,
+  detachCompanionCopy,
   companionRunEventEffect,
   ensureCompanionFork,
   performCompanionTurn,
@@ -1027,7 +1028,7 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
         if (existing) {
           const sourceId = sourceSessionIdRef.current;
           if (!sourceId) return { status: 'error', code: 'fork_setup_failed' };
-          const cleaned = await dismissCompanionCopy(sideChat, sourceId, panelId, existing.id);
+          const cleaned = await dismissCompanionCopy(sideChat, sourceId, panelId, existing.id, recoveryAttachmentIds);
           if (!cleaned) return { status: 'error', code: 'fork_setup_failed' };
           unsubscribeRef.current?.();
           unsubscribeRef.current = null;
@@ -1811,7 +1812,10 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
       const sessionId = companionIdRef.current;
       return sessionId ? { sessionId, ownTurnIds: [...ownTurnIdsRef.current], queueOwnedMessageIds: [...queueOwnedMessageIdsRef.current] } : undefined;
     },
-    detachWorkspace() { detachWorkspaceRef.current = true; },
+    detachWorkspace() {
+      detachWorkspaceRef.current = true;
+      if (sourceSessionIdRef.current) detachCompanionCopy(sourceSessionIdRef.current, panelId);
+    },
     resumeWorkspace() { detachWorkspaceRef.current = false; },
     companionSession: companion,
     hasContent,

@@ -40,7 +40,6 @@ function harness(selected = 'A') {
     clear: (ids, selection) => { events.push(`clear:${ids.join(',')}`); if (selection) active = undefined; },
     restore: () => { events.push('restore'); },
     navigate: async ({ sessionId }) => { events.push(`navigate:${sessionId}`); active = sessionId; },
-    save: async () => { events.push('save'); },
     detach: () => { events.push('detach'); },
     resume: () => { events.push('resume-resources'); },
   });
@@ -66,18 +65,20 @@ test('handoff freezes before capture and activates the destination before restor
   assert.equal(state.active(), 'child');
 });
 
-test('close flush confirms saving before detaching resources', async () => {
+test('close captures without detaching until main accepts custody', async () => {
   const state = harness();
   await state.handler({ requestId: 'flush', kind: 'flush' });
-  assert.deepEqual(state.events, ['freeze', 'capture:A,B', 'save', 'detach']);
+  assert.deepEqual(state.events, ['freeze', 'capture:A,B']);
+  await state.handler({ requestId: 'detach', kind: 'detach' });
+  assert.equal(state.events.at(-1), 'detach');
 });
 
-test('a failed close save resumes the source without detaching or discarding it', async () => {
+test('a failed close capture resumes the source without detaching or discarding it', async () => {
   const events: string[] = [];
   const handler = createSessionWindowCommandHandler({
     freeze: (value) => { events.push(value ? 'freeze' : 'thaw'); }, activeSessionId: () => 'A', sessionIds: () => ['A'],
-    capture: async () => snapshot, clear: () => { throw new Error('unexpected clear'); }, restore: () => undefined,
-    navigate: async () => undefined, save: async () => { throw new Error('attachment unavailable'); },
+    capture: async () => { throw new Error('attachment unavailable'); }, clear: () => { throw new Error('unexpected clear'); }, restore: () => undefined,
+    navigate: async () => undefined,
     detach: () => { events.push('detach'); }, resume: () => { events.push('resume'); },
   });
   await assert.rejects(handler({ requestId: 'flush', kind: 'flush' }), /attachment unavailable/);
@@ -161,7 +162,7 @@ test('releasing a pending task revokes late transcript publication while preserv
   assert.equal(workspace.activeIdRef.current, 'B');
   const handler = createSessionWindowCommandHandler({
     freeze() {}, activeSessionId: () => workspace.activeIdRef.current, sessionIds: () => ['B'],
-    capture: async () => snapshot, restore() {}, navigate: async () => {}, save: async () => {}, detach() {}, resume() {},
+    capture: async () => snapshot, restore() {}, navigate: async () => {}, detach() {}, resume() {},
     clear: (ids) => { for (const id of ids) workspace.commands.clearOwnedSessionState(id); },
   });
   await handler({ requestId: 'release-a', kind: 'clear', group });

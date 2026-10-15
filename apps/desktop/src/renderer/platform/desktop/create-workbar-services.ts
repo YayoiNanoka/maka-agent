@@ -190,8 +190,8 @@ export function createDesktopWorkbarServices(
         dependencies.readSettledMessages(bridge, sessionId, options),
       branchFromTurn: (sessionId, input) =>
         bridge.sessions.branchFromTurn(sessionId, input),
-      cleanupSessionCopy: (sessionId) =>
-        bridge.sessions.cleanupSessionCopy(sessionId),
+      cleanupSessionCopy: (sessionId, recovery) =>
+        bridge.sessions.cleanupSessionCopy(sessionId, recovery),
       abandonSessionCopy: (sourceSessionId, copyId) =>
         bridge.sessions.abandonSessionCopy(sourceSessionId, copyId),
       compact: (sessionId) => bridge.sessions.compact(sessionId),

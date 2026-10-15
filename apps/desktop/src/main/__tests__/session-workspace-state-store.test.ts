@@ -20,6 +20,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createSessionCopyCleanupAuthority } from '@maka/storage/session-copy-cleanup';
+import { adoptWorkspaceCopies } from '../session-workspace-custody.js';
 import { test } from 'node:test';
 import { createAttachmentApprovalRegistry } from '../attachment-approval.js';
 import { SessionLocalAttachmentRecovery } from '../session-local-attachment-recovery.js';
@@ -325,3 +327,81 @@ test('a failed multi-Host window capture releases earlier partitions instead of 
   assert.equal(store.load(owner, [key('unrelated')]).drafts[0]!.text, 'closed window keeps this');
   assert.equal(store.load(other, [otherKey]).drafts[0]!.text, '');
 });
+
+
+test('ordinary close retains text and valid attachments while reporting each expired or missing source', async (t) => {
+  let now = 0;
+  const { store, approvals, dir, recovery } = fixture(t, () => now);
+  const expired = approvals.issueApprovals(owner.senderId, [{ path: join(dir, 'expired.txt'), name: 'expired.txt', size: 1 }])[0]!;
+  now = 31 * 60 * 1000;
+  const missing = approvals.issueApprovals(owner.senderId, [{ path: join(dir, 'missing.txt'), name: 'missing.txt', size: 1 }])[0]!;
+  const valid = recovery.issue({ ...owner, sessionId: 'a' }, [{ name: 'valid.txt', mimeType: 'text/plain', content: Buffer.from('valid') }])[0]!;
+  const state = snapshot({ ...emptyDraft(), text: 'keep unsent text', attachments: [
+    { type: 'approval', ...expired }, { type: 'approval', ...missing }, { type: 'approval', ...valid },
+  ] });
+  await assert.rejects(store.save(owner, state));
+  const losses: string[] = [];
+  await store.save(owner, state, (loss) => losses.push(loss));
+  const restored = store.load({ ...owner, senderId: 22 }, [key('a')]);
+  assert.equal(restored.drafts[0]!.text, 'keep unsent text');
+  assert.equal(restored.drafts[0]!.attachments.length, 1);
+  assert.equal((restored.drafts[0]!.attachments[0] as { name: string }).name, 'valid.txt');
+  assert.equal(losses.length, 2);
+  assert.match(losses[0]!, /expired.txt/);
+  assert.match(losses[1]!, /missing.txt/);
+  assert.equal(state.drafts[0]!.attachments.length, 3, 'cancel leaves the original renderer contents intact');
+});
+
+
+for (const closing of [false, true]) {
+  test(`${closing ? 'close retains valid state' : 'handoff rolls back custody'} when the second side conversation cannot be adopted`, async (t) => {
+    const { store, dir } = fixture(t);
+    const removed: string[] = [];
+    const authority = createSessionCopyCleanupAuthority({ workspaceRoot: dir, removeSession: async (id) => { removed.push(id); } });
+    for (const id of ['fork-a', 'fork-b']) await authority.ownCreation({ sessionId: id, sourceSessionId: 'a', kind: 'branch',
+      intent: 'side_conversation', ownerId: 'web-contents:11' }, async () => {});
+    await authority.cleanup('fork-b');
+    removed.length = 0;
+    const state: SessionWorkspaceSnapshot = {
+      ...snapshot({ ...emptyDraft(), text: 'Unsent A' }),
+      sideConversations: ['fork-a', 'fork-b'].map((id) => ({
+        panel: { id, sourceSessionId: key('a'), quotes: [] }, hasContent: true, active: false,
+        companion: { sessionId: key(id), ownTurnIds: [], queueOwnedMessageIds: [] },
+        draft: { ...emptyDraft(id), text: `Unsent ${id}` },
+      })),
+    };
+    const resolve = (side: SessionWorkspaceSnapshot['sideConversations'][number]) => ({ authority, sourceSessionId: 'a', sessionId: side.panel.id });
+    await store.save(owner, state);
+    const losses: string[] = [];
+    const transfer = adoptWorkspaceCopies(state, {
+      ownerId: 'workspace', previousOwnerId: 'web-contents:11', resolve,
+      ...(closing ? { unavailable: (side: SessionWorkspaceSnapshot['sideConversations'][number]) => {
+        losses.push(side.panel.id);
+        store.releaseUnavailableCompanion(owner.partition, side.panel.sourceSessionId, side.panel.id, state.capturedAt);
+      } } : {}),
+    });
+    if (!closing) {
+      await assert.rejects(transfer, /no longer available/);
+      store.forget(owner.partition, [key('a')], state.capturedAt);
+      await authority.abandonOwner('web-contents:11');
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(removed, ['fork-a'], 'failed handoff restores cleanup to the source');
+      assert.equal(state.drafts[0]!.text, 'Unsent A');
+      return;
+    }
+    await transfer;
+    await authority.abandonOwner('web-contents:11');
+    assert.deepEqual(removed, [], 'valid copy remains with the retained workspace');
+    assert.deepEqual(losses, ['fork-b']);
+    const restored = store.load({ ...owner, senderId: 22 }, [key('a')]);
+    assert.equal(restored.drafts[0]!.text, 'Unsent A');
+    assert.equal(restored.sideConversations[0]!.companion?.sessionId, key('fork-a'));
+    assert.equal(restored.sideConversations[1]!.companion, undefined);
+    assert.equal(restored.sideConversations[1]!.draft.text, 'Unsent fork-b');
+    assert.equal(restored.sideConversations[1]!.draft.sessionId, key('a'));
+    await adoptWorkspaceCopies(restored, { ownerId: 'web-contents:22', previousOwnerId: 'workspace', resolve });
+    await authority.abandonOwner('web-contents:22');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(removed, ['fork-a']);
+  });
+}

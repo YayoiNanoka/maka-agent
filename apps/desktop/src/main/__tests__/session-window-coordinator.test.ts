@@ -30,6 +30,8 @@ const group: SessionWindowGroup = { hostId: 'local', groupId: 'A', sessionIds: [
 
 function harness() {
   const registry = createWorkspaceWindowRegistry();
+  const mainCommands: string[] = [];
+  let closeGate: { started(): void; wait: Promise<void> } | undefined;
   const commands: Array<{ windowId: string; command: SessionWindowCommand }> = [];
   const errors: unknown[] = [];
   const migrations: string[] = [];
@@ -44,6 +46,10 @@ function harness() {
   let failRestore: 'main' | 'session' | undefined;
   let prepareWait: Promise<void> | undefined;
   let failSave = false;
+  let failAdopt = false;
+  let failConfirmation = false;
+  let closeAnyway = false;
+  const closeWarnings: readonly string[][] = [];
   let failLoad = false;
   let failRelease = false;
   let nextId = 0;
@@ -54,7 +60,7 @@ function harness() {
       id: Number(this.id),
       isDestroyed: () => this.destroyed,
       send: (channel: string, command: SessionWindowCommand) => {
-        if (channel !== 'session-window:command') return;
+        if (channel !== 'session-window:command') { mainCommands.push(channel); return; }
         commands.push({ windowId: this.id, command });
         queueMicrotask(async () => {
           if (command.kind === 'prepare-transfer' && prepareWait) await prepareWait;
@@ -75,6 +81,7 @@ function harness() {
               for (const draft of command.snapshot.drafts) this.drafts.set(draft.sessionId, draft.text);
               this.active = command.navigation.sessionId;
             } else if (command.kind === 'navigate') this.active = command.navigation.sessionId;
+            else if (command.kind === 'resume' && command.navigation !== undefined) this.active = command.navigation?.sessionId;
           }
           coordinator.reply(this.contents as never, shouldFail
             ? { requestId: command.requestId, ok: false, error: 'restore failed' }
@@ -125,6 +132,21 @@ function harness() {
     ensureMainWindow: async () => { if (!registry.main()) add({ kind: 'main' }); },
     resolveGroup: async (id) => group.sessionIds.includes(id) ? group : { hostId: 'local', groupId: id, sessionIds: [id] },
     saveSnapshot: async (sender, state) => { if (failSave) throw new Error('attachment unavailable'); saves.push(String(sender.id)); for (const draft of state.drafts) drafts.set(draft.sessionId, draft.text); },
+    saveForClose: async (sender, state) => {
+      saves.push(String(sender.id));
+      for (const draft of state.drafts) drafts.set(draft.sessionId, draft.text);
+      return { snapshot: state, losses: failSave ? ['attachment unavailable'] : [] };
+    },
+    confirmClose: async (_sender, losses) => {
+      (closeWarnings as string[][]).push([...losses]);
+      if (closeGate) { const gate = closeGate; closeGate = undefined; gate.started(); await gate.wait; }
+      if (failConfirmation) throw new Error('confirmation failed');
+      return closeAnyway;
+    },
+    adoptSnapshot: async (_sender, snapshot) => {
+      if (failAdopt) throw new Error('copy no longer available');
+      for (const draft of snapshot.drafts) drafts.delete(draft.sessionId);
+    },
     loadSnapshot: async (sender, ids) => { if (failLoad) throw new Error('recovery capacity'); loads.push(String(sender.id)); return toSnapshot([...drafts].filter(([id]) => ids.includes(id))); },
     forgetSnapshot: (_sender, snapshot) => { for (const draft of snapshot.drafts) drafts.delete(draft.sessionId); },
     releaseSnapshot: (sender) => { released.push(String(sender.id)); },
@@ -145,11 +167,21 @@ function harness() {
       restoreGate = { started, wait };
       return { entered, release };
     },
-    drafts,
+    drafts, closeWarnings, mainCommands,
+    pauseCloseConfirmation() {
+      let started!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => { started = resolve; });
+      closeGate = { started, wait: new Promise<void>((resolve) => { release = resolve; }) };
+      return { entered, release };
+    },
+    closeAnyway: () => { closeAnyway = true; },
     failRestore: () => { failRestore = 'session'; },
     failMainRestore: () => { failRestore = 'main'; },
     delayPrepare: (wait: Promise<void>) => { prepareWait = wait; },
     failSave: () => { failSave = true; },
+    failAdopt: () => { failAdopt = true; },
+    failConfirmation: () => { failConfirmation = true; },
     failLoad: () => { failLoad = true; },
     failRelease: () => { failRelease = true; },
   };
@@ -226,7 +258,7 @@ test('normal close saves workspace before releasing ownership and does not close
   assert.equal(await h.coordinator.routeSession(h.main.webContents as never, { sessionId: 'A' }), 'local');
 });
 
-test('failed final save keeps the child and its ownership with a visible error callback', async () => {
+test('canceling a close with attachment losses keeps the child and its ownership', async () => {
   const h = harness();
   await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
   h.failSave();
@@ -234,7 +266,7 @@ test('failed final save keeps the child and its ownership with a visible error c
   await settle();
   assert.equal(h.windows[1]!.destroyed, false);
   assert.equal(h.coordinator.ownerForSession('A'), h.windows[1]!.webContents);
-  assert.equal(h.errors.length, 1);
+  assert.deepEqual(h.closeWarnings, [['attachment unavailable']]);
 });
 
 test('closing main leaves the session window and return recreates main', async () => {
@@ -258,10 +290,8 @@ test('failed return restores child ownership and the main window previous task',
   await assert.rejects(h.coordinator.openInMainWindow(h.windows[1]!.webContents as never), /restore failed/);
   assert.equal(h.coordinator.ownerForSession('A'), h.windows[1]!.webContents);
   assert.equal(h.windows[1]!.destroyed, false);
-  const mainRestores = h.commands.filter(({ windowId, command }) => windowId === '1' && command.kind === 'restore');
-  const last = mainRestores.at(-1)?.command;
-  assert.equal(last?.kind, 'restore');
-  if (last?.kind === 'restore') assert.equal(last.navigation.sessionId, 'B');
+  assert.equal(h.main.active, 'B');
+  assert.equal(h.commands.at(-1)?.command.kind, 'resume');
 });
 
 test('reloaded child restores the last viewed group member without opening another window', async () => {
@@ -323,8 +353,8 @@ test('concurrent groups returning to a recreated main preserve both drafts and s
   await gate.entered;
   assert.equal(h.windows.length, 4, 'one replacement main window is shared by both returns');
   const main = h.windows[3]!;
-  assert.equal(h.commands.filter(({ windowId, command }) => windowId === main.id && command.kind === 'flush').length, 1,
-    'B must wait until A has restored before it captures the shared main workspace');
+  assert.equal(h.commands.filter(({ windowId, command }) => windowId === main.id && command.kind === 'prepare-navigation').length, 1,
+    'B must wait until A has restored before switching the shared main workspace');
   gate.release();
   await returning;
   assert.equal(a.destroyed, true);
@@ -360,7 +390,7 @@ test('failed handoff before source clear and failed normal close discard stale c
       h.failLoad();
       await assert.rejects(h.coordinator.openSessionWindow(h.main.webContents as never, 'A'), /recovery capacity/);
     } else {
-      h.failRelease();
+      h.failSave();
       h.main.close();
       await settle();
     }
@@ -394,5 +424,102 @@ test('late replies cannot discard a snapshot belonging to another window', async
   h.coordinator.reply(h.main.webContents as never, { requestId: 'invented', ok: true, result: { snapshot: retained } });
   await settle();
   assert.equal(h.drafts.get('A'), 'child draft');
-  assert.match(String(h.errors.at(-1)), /another window/);
+  assert.equal(h.errors.length, 0, 'late replies have no side effects');
+});
+
+
+test('confirmed attachment loss closes once and still runs native close finalization', async () => {
+  const h = harness();
+  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
+  const child = h.windows[1]!;
+  let nativeFinalizations = 0;
+  child.on('close', (event) => { if (!event.defaultPrevented) nativeFinalizations += 1; });
+  h.failSave();
+  h.closeAnyway();
+  child.close();
+  await settle();
+  assert.equal(child.destroyed, true);
+  assert.equal(nativeFinalizations, 1);
+  assert.equal(h.closeWarnings.length, 1);
+  assert.equal(h.commands.filter(({ windowId, command }) => windowId === child.id && command.kind === 'flush').length, 1);
+});
+
+test('closing B does not wait for A restoring into Main', async () => {
+  const h = harness();
+  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
+  await h.coordinator.openSessionWindow(h.main.webContents as never, 'B');
+  const a = h.windows[1]!;
+  const b = h.windows[2]!;
+  const gate = h.pauseNextMainRestore();
+  const returning = h.coordinator.openInMainWindow(a.webContents as never);
+  await gate.entered;
+  b.close();
+  await settle();
+  assert.equal(b.destroyed, true);
+  assert.equal(a.destroyed, false);
+  gate.release();
+  await returning;
+});
+
+test('returning A never exports unrelated B drafts in Main', async () => {
+  const h = harness();
+  h.main.drafts.set('A', 'A draft');
+  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
+  h.main.active = 'B';
+  h.main.drafts.set('B', 'B draft with an unavailable attachment');
+  const previousSaves = h.saves.length;
+  await h.coordinator.openInMainWindow(h.windows[1]!.webContents as never);
+  assert.deepEqual(h.saves.slice(previousSaves), ['2']);
+  assert.equal(h.main.drafts.get('B'), 'B draft with an unavailable attachment');
+  assert.equal(h.main.active, 'A');
+});
+
+
+test('main commands cannot enter Main while its close confirmation is pending', async () => {
+  const h = harness();
+  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
+  h.failSave();
+  h.closeAnyway();
+  const gate = h.pauseCloseConfirmation();
+  h.main.close();
+  await gate.entered;
+  const child = h.windows[1]!;
+  for (const command of ['newTask', 'openSettings', 'openHelp'] as const) {
+    await assert.rejects(h.coordinator.commandMain(child.webContents as never, command), /closing/);
+  }
+  assert.deepEqual(h.mainCommands, []);
+  gate.release();
+  await settle();
+  assert.equal(h.main.destroyed, true);
+  assert.equal(child.destroyed, false);
+});
+
+test('failed cancellation retains the recovery snapshot when custody cannot return to its renderer', async () => {
+  const h = harness();
+  h.main.drafts.set('A', 'recoverable unsent text');
+  h.failSave();
+  const gate = h.pauseCloseConfirmation();
+  h.main.close();
+  await gate.entered;
+  h.failAdopt(); // A companion becomes unavailable while confirmation is open.
+  gate.release();
+  await settle();
+  assert.equal(h.main.destroyed, false);
+  assert.equal(h.drafts.get('A'), 'recoverable unsent text');
+  assert.equal(h.commands.at(-1)?.command.kind, 'resume');
+  assert.match(String(h.errors.at(-1)), /copy no longer available/);
+});
+
+test('a rejected close dialog returns custody and resumes the source', async () => {
+  const h = harness();
+  h.main.drafts.set('A', 'unsent text');
+  h.failSave();
+  h.failConfirmation();
+  h.main.close();
+  await settle();
+  assert.equal(h.main.destroyed, false);
+  assert.equal(h.drafts.size, 0, 'successful return to renderer releases the retained snapshot');
+  assert.equal(h.main.drafts.get('A'), 'unsent text');
+  assert.equal(h.commands.at(-1)?.command.kind, 'resume');
+  assert.match(String(h.errors.at(-1)), /confirmation failed/);
 });

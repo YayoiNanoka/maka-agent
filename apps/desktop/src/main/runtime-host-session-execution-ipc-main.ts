@@ -327,6 +327,30 @@ async function observationIpcResult<T>(
   }
 }
 
+const observedCopyOwners = new WeakMap<SessionCopyCleanupAuthority, Set<number>>();
+
+/** A restored panel adopts the same cleanup lease as a newly created panel. */
+export function bindSessionCopyOwner(authority: SessionCopyCleanupAuthority, sender: IpcMainInvokeEvent['sender'], onError: (error: unknown) => void): string {
+  const owners = observedCopyOwners.get(authority) ?? new Set<number>();
+  observedCopyOwners.set(authority, owners);
+  const ownerId = `web-contents:${sender.id}`;
+  if (!owners.has(sender.id)) {
+    owners.add(sender.id);
+    const abandon = () => {
+      if (!owners.delete(sender.id)) return;
+      sender.removeListener('render-process-gone', abandon);
+      sender.removeListener('destroyed', abandon);
+      sender.removeListener('did-start-navigation', onNavigation);
+      void authority.abandonOwner(ownerId).catch(onError);
+    };
+    const onNavigation = (_event: unknown, _url: string, inPlace: boolean, mainFrame: boolean) => { if (mainFrame && !inPlace) abandon(); };
+    sender.on('did-start-navigation', onNavigation);
+    sender.once('render-process-gone', abandon);
+    sender.once('destroyed', abandon);
+  }
+  return ownerId;
+}
+
 /**
  * Project Host-owned Session execution onto the Desktop renderer IPC contract.
  * The adapter owns client validation and presentation events, never Runtime
@@ -336,22 +360,6 @@ export function registerRuntimeHostSessionExecutionIpc(
   deps: RuntimeHostSessionExecutionIpcDeps,
   ipcMain: ReconnectableReadIpcMain,
 ): (sessionId: string) => Promise<void> {
-  const observedCopyOwners = new Set<string>();
-  const bindCopyOwner = (event: IpcMainInvokeEvent): string => {
-    const ownerId = `web-contents:${event.sender.id}`;
-    if (!observedCopyOwners.has(ownerId)) {
-      observedCopyOwners.add(ownerId);
-      const abandon = () => {
-        if (!observedCopyOwners.delete(ownerId)) return;
-        event.sender.removeListener('render-process-gone', abandon);
-        event.sender.removeListener('destroyed', abandon);
-        void deps.sessionCopyCleanup.abandonOwner(ownerId).catch(deps.onBackgroundError);
-      };
-      event.sender.once('render-process-gone', abandon);
-      event.sender.once('destroyed', abandon);
-    }
-    return ownerId;
-  };
   const newId = deps.newId ?? randomUUID;
   const stopSession = createRuntimeHostSessionStop(deps, newId);
 
@@ -834,7 +842,7 @@ export function registerRuntimeHostSessionExecutionIpc(
                   ? {}
                   : { sourceTurnId: normalized.sourceTurnId }),
                 intent: 'side_conversation',
-                ownerId: bindCopyOwner(event),
+                ownerId: bindSessionCopyOwner(deps.sessionCopyCleanup, event.sender, deps.onBackgroundError),
               },
               createBranch,
             )

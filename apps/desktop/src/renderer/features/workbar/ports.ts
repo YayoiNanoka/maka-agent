@@ -232,7 +232,7 @@ export interface SideChatSessionPort {
     | { ok: true; session: SessionSummary }
     | { ok: false; reason: 'session_busy' | 'operation_unavailable' }
   >;
-  cleanupSessionCopy(sessionId: string): Promise<void>;
+  cleanupSessionCopy(sessionId: string, recovery?: { sourceSessionId: string; attachmentIds: readonly string[] }): Promise<void>;
   abandonSessionCopy(sourceSessionId: string, copyId: string): Promise<void>;
   compact(sessionId: string): Promise<ContextCompactResult>;
   send(

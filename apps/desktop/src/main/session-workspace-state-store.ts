@@ -66,7 +66,7 @@ export class SessionWorkspaceStateStore {
     return { ...owner, sessionId: ref.sessionId };
   }
 
-  async #prepareDraft(owner: SessionWorkspaceOwner, draft: SessionWorkspaceDraft): Promise<{ draft: StoredDraft; bytes: AttachmentBytes[]; revalidate(): void }> {
+  async #prepareDraft(owner: SessionWorkspaceOwner, draft: SessionWorkspaceDraft, onLoss?: (message: string) => void): Promise<{ draft: StoredDraft; bytes: AttachmentBytes[]; revalidate(): void }> {
     this.#recoveryOwner(owner, draft.sessionId);
     if (typeof draft.text !== 'string' || draft.text.length > 2_000_000 || !Array.isArray(draft.references) ||
         !Array.isArray(draft.quotes) || !Array.isArray(draft.directoryReferences) || !Array.isArray(draft.attachments) ||
@@ -78,6 +78,14 @@ export class SessionWorkspaceStateStore {
     const seen = new Set<string>();
     const revalidations: Array<() => void> = [];
     for (const attachment of draft.attachments) {
+      const byteStart = bytes.length;
+      const attachmentStart = attachments.length;
+      const validationStart = revalidations.length;
+      const lost = (error: unknown) => {
+        const name = attachment.type === 'retained' ? attachment.attachment.name : attachment.name;
+        onLoss!(`${name ?? 'Attachment'}: ${error instanceof Error ? error.message : String(error)}`);
+      };
+      try {
       if (attachment.type === 'retained') {
         if (!isAttachmentRef(attachment.attachment)) throw new Error('Invalid retained workspace attachment');
         attachments.push(structuredClone(attachment));
@@ -113,7 +121,26 @@ export class SessionWorkspaceStateStore {
       bytes.push(saved);
       if (bytes.reduce((sum, entry) => sum + entry.content.byteLength, 0) > MAX_LOCAL_MESSAGE_BYTES)
         throw new AttachmentIngestBlockedError('total_size_exceeded');
-      attachments.push({ type: 'stored', ordinal: bytes.length - 1, name: saved.name, mimeType: saved.mimeType, size: saved.content.byteLength });
+      const stored: StoredAttachment = { type: 'stored', ordinal: bytes.length - 1, name: saved.name, mimeType: saved.mimeType, size: saved.content.byteLength };
+      attachments.push(stored);
+      if (onLoss) {
+        const checks = revalidations.splice(validationStart);
+        revalidations.push(() => {
+          try { for (const check of checks) check(); }
+          catch (error) {
+            attachments.splice(attachments.indexOf(stored), 1);
+            bytes[stored.ordinal] = { ...saved, content: new Uint8Array() };
+            lost(error);
+          }
+        });
+      }
+      } catch (error) {
+        if (!onLoss) throw error;
+        bytes.splice(byteStart);
+        attachments.splice(attachmentStart);
+        revalidations.splice(validationStart);
+        lost(error);
+      }
     }
     const safeDraft: StoredDraft = {
       sessionId: draft.sessionId, text: draft.text, references: structuredClone(draft.references),
@@ -127,9 +154,9 @@ export class SessionWorkspaceStateStore {
   }
 
   /** A window may contain several Hosts; a failed flush leaves all drafts with it. */
-  async saveAll(workspaces: readonly { owner: SessionWorkspaceOwner; snapshot: SessionWorkspaceSnapshot }[]): Promise<void> {
+  async saveAll(workspaces: readonly { owner: SessionWorkspaceOwner; snapshot: SessionWorkspaceSnapshot }[], onLoss?: (message: string) => void): Promise<void> {
     try {
-      for (const { owner, snapshot } of workspaces) await this.save(owner, snapshot);
+      for (const { owner, snapshot } of workspaces) await this.save(owner, snapshot, onLoss);
     } catch (error) {
       for (const { owner, snapshot } of workspaces) {
         this.forget(owner.partition, snapshot.drafts.map((draft) => draft.sessionId), snapshot.capturedAt);
@@ -138,20 +165,20 @@ export class SessionWorkspaceStateStore {
     }
   }
 
-  save(owner: SessionWorkspaceOwner, snapshot: SessionWorkspaceSnapshot): Promise<void> {
+  save(owner: SessionWorkspaceOwner, snapshot: SessionWorkspaceSnapshot, onLoss?: (message: string) => void): Promise<void> {
     if (this.#closed) return Promise.reject(new Error('Workspace handoff store is closed'));
     // Serialize asynchronous file reads so a slow earlier transfer cannot
     // overwrite the state captured when its source window closes.
     const pendingKey = JSON.stringify([owner.partition, owner.scope.hostId]);
     const revision = this.#revision;
     const previous = this.#pending.get(pendingKey) ?? Promise.resolve();
-    const next = previous.catch(() => {}).then(() => this.#save(owner, snapshot, revision));
+    const next = previous.catch(() => {}).then(() => this.#save(owner, snapshot, revision, onLoss));
     this.#pending.set(pendingKey, next);
     void next.finally(() => { if (this.#pending.get(pendingKey) === next) this.#pending.delete(pendingKey); }).catch(() => {});
     return next;
   }
 
-  async #save(owner: SessionWorkspaceOwner, snapshot: SessionWorkspaceSnapshot, revision: number): Promise<void> {
+  async #save(owner: SessionWorkspaceOwner, snapshot: SessionWorkspaceSnapshot, revision: number, onLoss?: (message: string) => void): Promise<void> {
     if (!snapshot || !Array.isArray(snapshot.drafts) || !Array.isArray(snapshot.sideConversations) || !Number.isFinite(snapshot.capturedAt))
       throw new Error('Invalid workspace snapshot');
     const revalidations: Array<{ source: string; validate(): void }> = [];
@@ -160,7 +187,7 @@ export class SessionWorkspaceStateStore {
     for (const draft of snapshot.drafts) {
       if (!members.has(draft.sessionId)) continue;
       let prepared;
-      try { prepared = await this.#prepareDraft(owner, draft); }
+      try { prepared = await this.#prepareDraft(owner, draft, onLoss); }
       catch (error) {
         if (this.#wasDeleted(owner.partition, draft.sessionId)) continue;
         throw error;
@@ -172,7 +199,7 @@ export class SessionWorkspaceStateStore {
       if (this.#wasDeleted(owner.partition, side.panel.sourceSessionId)) continue;
       if (!members.has(side.panel.sourceSessionId)) throw new Error('Side conversation is outside the workspace snapshot');
       let prepared;
-      try { prepared = await this.#prepareDraft(owner, side.draft); }
+      try { prepared = await this.#prepareDraft(owner, side.draft, onLoss); }
       catch (error) {
         if (this.#wasDeleted(owner.partition, side.panel.sourceSessionId)) continue;
         throw error;
@@ -205,6 +232,19 @@ export class SessionWorkspaceStateStore {
     };
     countBytes(next);
     for (const [partition, workspaces] of this.#workspaces) if (partition !== owner.partition) countBytes(workspaces);
+    if (onLoss && storedBytes > 256 * 1024 * 1024) {
+      for (const entry of entries) {
+        if (!next.get(entry.source)?.entries.includes(entry)) continue;
+        const draft = entry.kind === 'draft' ? entry.payload as StoredDraft : (entry.payload as StoredSide).draft;
+        draft.attachments = draft.attachments.filter((attachment) => {
+          if (attachment.type !== 'stored' || storedBytes <= 256 * 1024 * 1024) return true;
+          storedBytes -= entry.bytes[attachment.ordinal]!.content.byteLength;
+          entry.bytes[attachment.ordinal]!.content = new Uint8Array();
+          onLoss(`${attachment.name}: workspace attachment capacity exceeded`);
+          return false;
+        });
+      }
+    }
     if (storedBytes > 256 * 1024 * 1024) throw new AttachmentIngestBlockedError('total_size_exceeded');
     // Publish only after every draft and attachment succeeds, preserving the
     // previous snapshot for a failed transfer's rollback.
@@ -253,6 +293,19 @@ export class SessionWorkspaceStateStore {
     } catch (error) {
       this.sources.recovery.release(owner.senderId, issued);
       throw error;
+    }
+  }
+
+  /** A failed copy can lose its history while its unsent draft remains recoverable. */
+  releaseUnavailableCompanion(partition: string, sourceSessionId: string, panelId: string, capturedAt: number): void {
+    const workspace = this.#workspaces.get(partition)?.get(sourceSessionId);
+    if (!workspace || workspace.capturedAt !== capturedAt) return;
+    for (const entry of workspace.entries) {
+      if (entry.kind !== 'side') continue;
+      const side = entry.payload as StoredSide;
+      if (side.panel.id !== panelId) continue;
+      const { companion: _companion, ...retained } = side;
+      entry.payload = { ...retained, active: false, hasContent: false, draft: { ...side.draft, sessionId: sourceSessionId } };
     }
   }
 

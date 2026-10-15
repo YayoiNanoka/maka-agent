@@ -29,6 +29,17 @@ export type WindowGroupSession = Pick<SessionSummary,
 export class SessionWindowGroups {
   readonly #catalogs = new Map<string, Map<string, WindowGroupSession>>();
 
+  has(sessionKey: string): boolean {
+    const { hostId, sessionId } = parseDesktopSessionKey(sessionKey);
+    return this.#catalogs.get(hostId)?.has(sessionId) ?? false;
+  }
+
+  update(hostId: string, sessions: readonly WindowGroupSession[]): void {
+    let catalog = this.#catalogs.get(hostId);
+    if (!catalog) this.#catalogs.set(hostId, catalog = new Map());
+    for (const session of sessions) catalog.set(session.id, session);
+  }
+
   resolve(sessionKey: string, sessions: readonly WindowGroupSession[]): SessionWindowGroup {
     const { hostId, sessionId } = parseDesktopSessionKey(sessionKey);
     let catalog = this.#catalogs.get(hostId);

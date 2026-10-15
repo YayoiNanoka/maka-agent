@@ -51,6 +51,8 @@ interface PersistedSessionCopyLease {
   creation?: Omit<SessionCopyCreationLease, 'sessionId' | 'ownerId'>;
 }
 
+type CopyOwner = { ownerId: string; processId: string; lifetimeRef?: string };
+
 interface SessionCopyCleanupStore {
   list(): Promise<PersistedSessionCopyLease[]>;
   read(sessionId: string): Promise<PersistedSessionCopyLease | undefined>;
@@ -60,7 +62,11 @@ interface SessionCopyCleanupStore {
     ownerLifetimeRef?: string,
   ): Promise<PersistedSessionCopyLease>;
   markLive(sessionId: string): Promise<PersistedSessionCopyLease | undefined>;
-  requestCleanup(sessionId: string): Promise<PersistedSessionCopyLease>;
+  setOwner(sessionId: string, ownerId: string): Promise<void>;
+  requestCleanup(
+    sessionId: string,
+    owner?: CopyOwner,
+  ): Promise<PersistedSessionCopyLease | undefined>;
   markCleanup(sessionId: string): Promise<PersistedSessionCopyLease | undefined>;
   forget(sessionId: string): Promise<void>;
 }
@@ -73,6 +79,8 @@ export interface SessionCopyCleanupRecovery {
 }
 
 export interface SessionCopyCleanupAuthority {
+  /** Move a live copy between a renderer and process-local workspace custody. */
+  adopt(sessionId: string, sourceSessionId: string, ownerId: string): Promise<void>;
   ownCreation<T>(creation: SessionCopyCreationLease, operation: () => Promise<T>): Promise<T>;
   rejectCreation(sessionId: string): Promise<void>;
   cleanup(sessionId: string): Promise<void>;
@@ -150,6 +158,25 @@ class SessionCopyCleanupAuthorityImpl implements SessionCopyCleanupAuthority {
     return task;
   }
 
+  async adopt(sessionId: string, sourceSessionId: string, ownerId: string): Promise<void> {
+    const id = normalizeSessionId(sessionId);
+    const owner = normalizeOwnerId(ownerId);
+    await this.creations.get(id)?.operation;
+    const record = await this.store.read(id);
+    const current = this.processLifetimeOwner
+      ? record?.ownerLifetimeRef === this.processLifetimeOwner.reference
+      : record?.ownerProcessId === this.processId;
+    if (
+      !current ||
+      record?.phase !== 'live' ||
+      record.cancelRequested ||
+      record.creation?.sourceSessionId !== normalizeSessionId(sourceSessionId)
+    ) {
+      throw new Error('Session copy is no longer available for adoption');
+    }
+    await this.store.setOwner(id, owner);
+  }
+
   async rejectCreation(sessionId: string): Promise<void> {
     const normalized = normalizeSessionId(sessionId);
     await this.creations.get(normalized)?.operation.catch(() => undefined);
@@ -187,7 +214,18 @@ class SessionCopyCleanupAuthorityImpl implements SessionCopyCleanupAuthority {
         : record.ownerProcessId === this.processId;
       return currentIncarnation && record.ownerId === normalizedOwnerId;
     });
-    await Promise.all(owned.map((record) => this.schedule(record.sessionId)));
+    await Promise.all(
+      owned.map(async (record) => {
+        const requested = await this.store.requestCleanup(record.sessionId, {
+          ownerId: normalizedOwnerId,
+          processId: this.processId,
+          ...(this.processLifetimeOwner
+            ? { lifetimeRef: this.processLifetimeOwner.reference }
+            : {}),
+        });
+        if (requested) void this.settleCleanup(record.sessionId).catch(() => undefined);
+      }),
+    );
   }
 
   async recover(): Promise<SessionCopyCleanupRecovery> {
@@ -372,26 +410,46 @@ class SqliteSessionCopyCleanupStore implements SessionCopyCleanupStore {
     });
   }
 
+  async setOwner(sessionId: string, ownerId: string): Promise<void> {
+    this.mutate(sessionId, (current) => {
+      if (!current || current.phase !== 'live' || current.cancelRequested)
+        throw new Error('Session copy is being cleaned up');
+      return { ...current, ownerId };
+    });
+  }
+
   async markLive(sessionId: string): Promise<PersistedSessionCopyLease | undefined> {
     return this.mutateOptional(sessionId, (current) =>
       current.phase === 'creating' ? { ...current, phase: 'live' } : current,
     );
   }
 
-  async requestCleanup(sessionId: string): Promise<PersistedSessionCopyLease> {
-    return this.mutate(sessionId, (current) => {
-      if (!current) {
-        return {
-          version: 1,
-          sessionId,
-          trackedAt: Date.now(),
-          phase: 'cleanup',
-          cancelRequested: true,
-        };
-      }
-      return current.phase === 'creating'
-        ? { ...current, cancelRequested: true }
-        : { ...current, phase: 'cleanup', cancelRequested: true };
+  async requestCleanup(
+    sessionId: string,
+    owner?: CopyOwner,
+  ): Promise<PersistedSessionCopyLease | undefined> {
+    return this.withDatabase('write', (database) => {
+      const current = readLease(database, sessionId);
+      // Recheck inside the write transaction: a window may have released its
+      // copy to workspace custody after abandonOwner read the owner list.
+      if (
+        owner &&
+        (!current ||
+          current.ownerId !== owner.ownerId ||
+          (owner.lifetimeRef
+            ? current.ownerLifetimeRef !== owner.lifetimeRef
+            : current.ownerProcessId !== owner.processId))
+      )
+        return undefined;
+      const next: PersistedSessionCopyLease = current
+        ? {
+            ...current,
+            phase: current.phase === 'creating' ? 'creating' : 'cleanup',
+            cancelRequested: true,
+          }
+        : { version: 1, sessionId, trackedAt: Date.now(), phase: 'cleanup', cancelRequested: true };
+      writeLease(database, next);
+      return next;
     });
   }
 

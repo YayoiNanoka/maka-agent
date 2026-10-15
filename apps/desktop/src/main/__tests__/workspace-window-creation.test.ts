@@ -28,6 +28,8 @@ import { transform } from 'esbuild';
 import { createWorkspaceWindowRegistry } from '../workspace-window-registry.js';
 import { createWindowRevealGate } from '../window-reveal.js';
 import { SAFE_MIN_HEIGHT, SAFE_MIN_WIDTH } from '../window-state.js';
+import { createSessionWindowCoordinator } from '../session-window-coordinator.js';
+import type { SessionWindowCommand } from '../../shared/session-window-contract.js';
 import type { MainWindowController } from '../main-window.js';
 
 type TestDisplay = { workArea: Electron.Rectangle; scaleFactor: number };
@@ -39,6 +41,7 @@ async function harness() {
   let releaseSettings!: () => void;
   let settings = new Promise<void>((resolve) => { releaseSettings = resolve; });
   const closedCounts: number[] = [];
+  const savedBounds: Electron.Rectangle[] = [];
   const primary: TestDisplay = { workArea: { x: 0, y: 0, width: 1500, height: 1000 }, scaleFactor: 1 };
   const displays = { primary, matching: primary };
   const matchingCalls: Electron.Rectangle[] = [];
@@ -53,7 +56,7 @@ async function harness() {
     setWindowOpenHandler() {}
     getURL() { return this.url; }
     executeJavaScript() { return Promise.resolve(); }
-    send() {}
+    send(_channel: string, command: SessionWindowCommand) { this.emit('command', command); }
   }
   class FakeWindow extends EventEmitter {
     static fromWebContents(contents: Contents) {
@@ -84,6 +87,11 @@ async function harness() {
     setBounds(bounds: Electron.Rectangle) { this.bounds = { ...bounds }; }
     getNormalBounds() { return this.getBounds(); }
     async loadURL(url: string) { this.contents.url = url; this.contents.emit('did-finish-load'); this.emit('ready-to-show'); }
+    close() {
+      const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+      this.emit('close', event);
+      if (!event.defaultPrevented) this.destroy();
+    }
     destroy() {
       this.destroyed = true; this.contents.destroyed = true;
       this.contents.emit('destroyed'); this.emit('closed');
@@ -106,7 +114,7 @@ async function harness() {
     './main-window-drop-guard.js': { MAIN_WINDOW_DROP_GUARD_SCRIPT: '' },
     './app-icon-surface.js': { applyInitialWindowAppIcon() {}, readableAppIconPath: () => '' },
     './external-link-guard.js': { isExternalUrl: () => false },
-    './window-state.js': { readSavedBounds: async (_root: string, defaults: unknown) => defaults, writeSavedBounds: async () => undefined, SAFE_MIN_WIDTH, SAFE_MIN_HEIGHT },
+    './window-state.js': { readSavedBounds: async (_root: string, defaults: unknown) => defaults, writeSavedBounds: async (_root: string, bounds: Electron.Rectangle) => { savedBounds.push(bounds); }, SAFE_MIN_WIDTH, SAFE_MIN_HEIGHT },
     './browser/controller.js': {}, './browser/view-manager.js': {},
     './main-window-permission-policy.js': { installMainWindowPermissionPolicy() {} },
     './main-renderer-loader.js': { resolveMainRendererEntry: () => ({ url: 'http://localhost/index.html' }), loadMainRenderer: (window: FakeWindow) => window.loadURL('http://localhost/index.html') },
@@ -137,7 +145,7 @@ async function harness() {
     onClosed: () => { closedCounts.push(registry.entries().length); },
   });
   return {
-    controller, registry, windows, displays, matchingCalls, closedCounts,
+    controller, registry, windows, displays, matchingCalls, closedCounts, savedBounds,
     dialogCalls, auxiliaryRenderers, nativeParents,
     createRenderer: () => new Contents(),
     createAuxiliaryWindow: () => new FakeWindow({ show: false }),
@@ -328,4 +336,33 @@ test('session windows center within the primary display work area when no main w
 
   assert.equal(h.matchingCalls.length, 0);
   assert.deepEqual(h.windows[0]!.getBounds(), { x: 180, y: 130, width: 1240, height: 820 });
+});
+
+
+test('coordinated immediate close saves final Main bounds through native close finalization', async () => {
+  const h = await harness();
+  const snapshot = { capturedAt: 1, drafts: [], sideConversations: [] };
+  const coordinator = createSessionWindowCoordinator({
+    windows: h.controller, signal: new AbortController().signal, ensureMainWindow: async () => {},
+    resolveGroup: async (id) => ({ hostId: 'host', groupId: id, sessionIds: [id] }),
+    saveSnapshot: async () => {}, saveForClose: async () => ({ snapshot, losses: [] }), confirmClose: async () => false,
+    adoptSnapshot: async () => {}, forgetSnapshot: () => {}, loadSnapshot: async () => snapshot,
+    releaseSnapshot: () => {}, transferResources: async () => {}, releaseResources: () => {},
+    isQuitting: () => false, onError: (error) => { throw error; },
+  });
+  h.releaseSettings();
+  await h.controller.createWindow(new AbortController().signal);
+  const main = h.windows[0]!;
+  const sender = main.webContents;
+  sender.on('command', (command: SessionWindowCommand) => queueMicrotask(() => coordinator.reply(sender as never,
+    { requestId: command.requestId, ok: true, result: { snapshot } })));
+  coordinator.sessionWindowReady(sender as never);
+  const bounds = { x: 230, y: 140, width: 1100, height: 760 };
+  main.setBounds(bounds);
+  main.emit('move');
+  main.close();
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  assert.equal(main.destroyed, true);
+  assert.deepEqual(h.savedBounds.map(({ x, y, width, height }) => ({ x, y, width, height })), [bounds]);
+  coordinator.dispose();
 });

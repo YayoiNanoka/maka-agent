@@ -1463,7 +1463,7 @@ export interface MakaBridge {
       sessionIds: readonly string[],
       options?: { measureBytes?: boolean; requireArchived?: boolean },
     ): Promise<SessionRemovePreviewResult>;
-    cleanupSessionCopy(sessionId: string): Promise<void>;
+    cleanupSessionCopy(sessionId: string, recovery?: { sourceSessionId: string; attachmentIds: readonly string[] }): Promise<void>;
     abandonSessionCopy(sourceSessionId: string, copyId: string): Promise<void>;
   };
   transcripts: {

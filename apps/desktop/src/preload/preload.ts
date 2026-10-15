@@ -2778,8 +2778,12 @@ const makaBridge = {
     ): Promise<SessionRemovePreviewResult> {
       return previewDesktopSessionRemoval(sessionIds, options);
     },
-    cleanupSessionCopy(sessionId: string): Promise<void> {
-      return invokeSessionRuntimeHost('sessions:cleanupSessionCopy', sessionId);
+    async cleanupSessionCopy(sessionId, recovery): Promise<void> {
+      const session = await runtimeHostSessionRef(sessionId);
+      const source = recovery && parseDesktopSessionKey(recovery.sourceSessionId);
+      if (source && source.hostId !== session.scope.hostId) throw new Error('Side conversation belongs to another Host');
+      return invokeWhenReady('sessions:cleanupSessionCopy', session.scope, session.sessionId,
+        recovery && { sourceSessionId: source!.sessionId, attachmentIds: recovery.attachmentIds });
     },
     async abandonSessionCopy(sourceSessionId: string, copyId: string): Promise<void> {
       const source = await runtimeHostSessionRef(sourceSessionId);
@@ -3889,7 +3893,6 @@ const makaBridge = {
       return () => ipcRenderer.off('session-window:command', listener);
     },
     ackSessionWindowCommand: (reply) => invokeWhenReady('session-window:reply', reply),
-    saveWorkspaceSnapshot: (snapshot) => invokeWhenReady('session-window:save', snapshot),
     adoptWorkspaceSnapshot: (snapshot) => invokeWhenReady('session-window:adopt', snapshot),
     loadWorkspaceSnapshot: (sessionIds) => invokeWhenReady('session-window:load', sessionIds),
     commandMain: (command) => invokeWhenReady('session-window:command-main', command),

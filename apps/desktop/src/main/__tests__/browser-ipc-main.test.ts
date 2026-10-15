@@ -389,7 +389,8 @@ test('browser IPC isolates owned renderer documents and their native parents', a
     assert.doesNotThrow(() => child.destroy());
     assert.equal(mainController.disposed, false, 'closing a workspace preserves the task browser page');
     assert.equal(mainController.parent, parkingParent, 'pages leave the destroyed window');
-    assert.equal(await browserViewHost().canDrive(mainKey, 'observe'), true);
+    assert.equal(await browserViewHost().canDrive(mainKey, 'observe'), false);
+    assert.equal(await browserViewHost().canDrive(mainKey, 'mutate'), false);
     await browserIpc.retireTarget(scope);
     assert.equal(mainController.disposed, true, 'retiring the Host still releases its browser resources');
     assert.equal(mainWindow.listenerCount('close'), 0, 'renderer teardown removes window listeners');

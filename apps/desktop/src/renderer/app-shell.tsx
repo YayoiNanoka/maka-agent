@@ -738,9 +738,9 @@ function AppShellContent({
       }),
     [exitWorkHub, setNavSelection, setActiveId, setSearchScrollTarget],
   );
-  const openSession = useCallback((sessionId: string, turnId?: string, sequence?: number) => {
-    sessionWindow.openSession({ sessionId, turnId, sequence }, () => openLocalSession(sessionId, turnId, sequence));
-  }, [sessionWindow.openSession, openLocalSession]);
+  const openSession = useCallback((sessionId: string, turnId?: string, sequence?: number) =>
+    sessionWindow.openSession({ sessionId, turnId, sequence }, () => openLocalSession(sessionId, turnId, sequence)),
+  [sessionWindow.openSession, openLocalSession]);
   useLayoutEffect(() => {
     openSessionInChatRef.current = openSession;
   }, [openSession]);

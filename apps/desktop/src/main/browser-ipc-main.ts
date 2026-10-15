@@ -61,7 +61,6 @@ export function registerBrowserIpc(deps: BrowserIpcDeps): BrowserIpcController {
   const selections = new Map<Electron.WebContents, RendererSelection>();
   const observedRenderers = new WeakSet<Electron.WebContents>();
   const rendererParents = new WeakMap<Electron.WebContents, Electron.View>();
-  const detachedSessions = new Set<string>();
   const ownsRenderer = (contents: Electron.WebContents): boolean =>
     !contents.isDestroyed() && (deps.mainWindowController.isWorkspaceRenderer(contents) ||
       deps.auxiliaryWindowRegistry.rendererParent(contents) !== undefined);
@@ -104,7 +103,6 @@ export function registerBrowserIpc(deps: BrowserIpcDeps): BrowserIpcController {
   };
   const canRunInBackground = (sessionId: string): boolean => {
     const ref = parseDesktopSessionResourceKey(sessionId);
-    if (detachedSessions.has(sessionId)) return deps.isHostActive(ref);
     const owner = ownerForSession(sessionId);
     if (!owner || !browserParentForRenderer(owner)) return false;
     return isWorkHubCoordinationSessionId(ref.sessionId) && deps.isHostActive(ref);
@@ -169,7 +167,6 @@ export function registerBrowserIpc(deps: BrowserIpcDeps): BrowserIpcController {
       if (!view?.hasOwner(parent)) continue;
       view.setOwner(deps.parkingParent);
       view.park();
-      detachedSessions.add(sessionId);
     }
     clearRendererSelection(contents);
   };
@@ -404,7 +401,6 @@ export function registerBrowserIpc(deps: BrowserIpcDeps): BrowserIpcController {
         const view = views.get(sessionId)!;
         view.setOwner(parent);
         view.park();
-        detachedSessions.add(sessionId);
       }
       const selection = source && selections.get(source);
       if (selection?.sessionId && members.has(desktopSessionKey(parseDesktopSessionResourceKey(selection.sessionId)))) {
@@ -424,7 +420,6 @@ export function registerBrowserIpc(deps: BrowserIpcDeps): BrowserIpcController {
       const retired = views.sessionIds().filter((sessionId) => {
         return belongsToTarget(sessionId, scope);
       });
-      for (const sessionId of retired) detachedSessions.delete(sessionId);
       await Promise.all(retired.map((sessionId) => releaseBrowserSession(sessionId)));
     },
   };

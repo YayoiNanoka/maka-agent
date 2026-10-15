@@ -52,7 +52,9 @@ export type SessionWindowCommand =
       readonly snapshot: SessionWorkspaceSnapshot;
     }
   | { readonly requestId: string; readonly kind: 'navigate'; readonly navigation: SessionWindowNavigation; readonly group: SessionWindowGroup }
-  | { readonly requestId: string; readonly kind: 'resume'; readonly group?: SessionWindowGroup }
+  | { readonly requestId: string; readonly kind: 'prepare-navigation' }
+  | { readonly requestId: string; readonly kind: 'resume'; readonly group?: SessionWindowGroup; readonly navigation?: SessionWindowNavigation | null }
+  | { readonly requestId: string; readonly kind: 'detach' }
   | { readonly requestId: string; readonly kind: 'flush' };
 
 export interface SessionWindowCommandResult {
@@ -73,7 +75,6 @@ export interface SessionWindowBridge {
   sessionWindowReady(): Promise<void>;
   subscribeSessionWindowCommand(handler: (command: SessionWindowCommand) => void): () => void;
   ackSessionWindowCommand(reply: SessionWindowCommandReply): Promise<void>;
-  saveWorkspaceSnapshot(snapshot: SessionWorkspaceSnapshot): Promise<void>;
   /** Release main-process custody after the renderer adopts a handoff snapshot. */
   adoptWorkspaceSnapshot(snapshot: SessionWorkspaceSnapshot): Promise<void>;
   loadWorkspaceSnapshot(sessionIds: readonly string[]): Promise<SessionWorkspaceSnapshot>;

@@ -638,6 +638,7 @@ test("sends Side Conversation intent and metadata atomically to Runtime Host", a
   const backgroundErrors: unknown[] = [];
   const ipc = ipcHarness();
   const sessionCopyCleanup = {
+    adopt: async () => {},
     ownCreation: <T>(_creation: unknown, operation: () => Promise<T>) => operation(),
     async rejectCreation() {},
     async cleanup() {},
@@ -2436,6 +2437,7 @@ function registerExecutionIpc(
 
 function unusedSessionCopyCleanup(): RuntimeHostSessionExecutionIpcDeps['sessionCopyCleanup'] {
   return {
+    adopt: async () => {},
     ownCreation: async (_creation, operation) => operation(),
     async rejectCreation() {},
     async cleanup() {},

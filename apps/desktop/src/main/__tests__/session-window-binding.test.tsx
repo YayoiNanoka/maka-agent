@@ -67,7 +67,6 @@ async function mountBinding(options: {
     sessionWindowReady: async () => {},
     subscribeSessionWindowCommand: () => () => {},
     ackSessionWindowCommand: async () => {},
-    saveWorkspaceSnapshot: async () => {},
     loadWorkspaceSnapshot: async (ids) => {
       assert.deepEqual(ids, ['a']);
       state.loads += 1;
@@ -116,7 +115,7 @@ async function mountBinding(options: {
       context: { kind: 'main', windowId: 'main' }, lifecycle,
       frozen: restoring, returning: false, standalone: false,
       setFrozen() {}, setRestoring,
-      bootstrap: async () => {}, openSession() {}, openInNewWindow: async () => {},
+      bootstrap: async () => {}, openSession: async () => true, openInNewWindow: async () => {},
       openInMainWindow() {}, commandMain() {},
     };
     return <SessionWindowServicesProvider value={services}>

@@ -34,7 +34,7 @@ export interface SessionWindowProjection {
   setFrozen(frozen: boolean): void;
   setRestoring(restoring: boolean): void;
   bootstrap(refresh: () => Promise<SessionSummary[]>, revision: () => number, open: (id: string) => void): Promise<void>;
-  openSession(navigation: SessionWindowNavigation, activate: () => void): void;
+  openSession(navigation: SessionWindowNavigation, activate: () => void): Promise<boolean>;
   openInNewWindow(sessionId: string): Promise<void>;
   openInMainWindow(): void;
   commandMain(command: 'newTask' | 'openSettings' | 'openHelp'): void;
@@ -81,7 +81,7 @@ export function SessionWindowRoot(props: { children(window: SessionWindowProject
         return bootstrapSessionWindow({ kind: context?.kind, refresh, revision, open });
       },
       openSession(navigation: SessionWindowNavigation, activate: () => void) {
-        void navigator.open(navigation, activate).catch(report);
+        return navigator.open(navigation, activate).catch((error) => { report(error); return false; });
       },
       async openInNewWindow(sessionId: string) {
         try { await services.openSessionWindow(sessionId); } catch (error) { report(error); }

@@ -29,7 +29,6 @@ export function createSessionWindowCommandHandler(deps: {
   clear(sessionIds: readonly string[], clearSelection: boolean): void;
   restore(snapshot: SessionWorkspaceSnapshot): void;
   navigate(navigation: SessionWindowNavigation, loadSnapshot?: boolean): Promise<void>;
-  save(snapshot: SessionWorkspaceSnapshot): Promise<void>;
   detach(sessionIds: readonly string[]): void;
   resume(): void;
 }) {
@@ -52,7 +51,15 @@ export function createSessionWindowCommandHandler(deps: {
         case 'navigate':
           await deps.navigate(command.navigation);
           return;
+        case 'prepare-navigation':
+          deps.freeze(true);
+          return { activeSessionId: deps.activeSessionId() };
+        case 'detach':
+          deps.detach(deps.sessionIds());
+          return;
         case 'resume':
+          if (command.navigation === null) deps.clear([], true);
+          else if (command.navigation) await deps.navigate(command.navigation);
           deps.resume();
           deps.freeze(false);
           return;
@@ -60,8 +67,6 @@ export function createSessionWindowCommandHandler(deps: {
           deps.freeze(true);
           const ids = deps.sessionIds();
           const snapshot = await deps.capture(ids);
-          await deps.save(snapshot);
-          deps.detach(ids);
           return { snapshot, activeSessionId: deps.activeSessionId() };
         }
       }

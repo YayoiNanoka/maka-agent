@@ -128,7 +128,6 @@ export function SessionWindowBinding(props: {
       freeze, capture, navigate,
       activeSessionId: () => current.current.conversation.readActiveSessionId(),
       sessionIds: () => [...visited.current],
-      save: services.saveWorkspaceSnapshot,
       restore: (snapshot) => flushSync(() => restore(snapshot)),
       clear: (sessionIds, clearSelection) => {
         for (const id of sessionIds) released.current.add(id);

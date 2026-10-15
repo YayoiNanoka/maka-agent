@@ -36,6 +36,9 @@ export interface SessionWindowCoordinatorDeps {
   readonly ensureMainWindow: () => Promise<void>;
   readonly resolveGroup: (sessionId: string) => Promise<SessionWindowGroup>;
   readonly saveSnapshot: (sender: WebContents, snapshot: SessionWorkspaceSnapshot) => Promise<void>;
+  readonly saveForClose: (sender: WebContents, snapshot: SessionWorkspaceSnapshot) => Promise<{ snapshot: SessionWorkspaceSnapshot; losses: readonly string[] }>;
+  readonly confirmClose: (sender: WebContents, losses: readonly string[]) => Promise<boolean>;
+  readonly adoptSnapshot: (sender: WebContents, snapshot: SessionWorkspaceSnapshot) => Promise<void>;
   readonly forgetSnapshot: (sender: WebContents, snapshot: SessionWorkspaceSnapshot) => void;
   readonly loadSnapshot: (sender: WebContents, sessionIds: readonly string[]) => Promise<SessionWorkspaceSnapshot>;
   readonly releaseSnapshot: (sender: WebContents, snapshot: SessionWorkspaceSnapshot) => void;
@@ -60,13 +63,14 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
   let mainPresentation: Promise<unknown> = Promise.resolve();
   const ready = new Set<string>();
   const selections = new Map<string, SessionWindowNavigation>();
-  const readyWaiters = new Map<string, Set<() => void>>();
+  const readyWaiters = new Map<string, Set<(error?: Error) => void>>();
   const pending = new Map<string, {
     windowId: string;
     resolve: (result: SessionWindowCommandResult) => void;
     reject: (error: Error) => void;
   }>();
   const closing = new Set<string>();
+  const finalized = new Set<string>();
   const timeoutMs = deps.commandTimeoutMs ?? 20_000;
   const groupKey = (group: SessionWindowGroup): string => JSON.stringify([group.hostId, group.groupId]);
   const reportError = (error: unknown, sender?: WebContents): void => deps.onError(error, sender);
@@ -79,6 +83,8 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
 
   function rejectWindowRequests(windowId: string): void {
     ready.delete(windowId);
+    for (const complete of readyWaiters.get(windowId) ?? []) complete(new Error('The workspace window closed'));
+    readyWaiters.delete(windowId);
     for (const operation of pending.values()) {
       if (operation.windowId === windowId) operation.reject(new Error('The workspace window closed'));
     }
@@ -99,26 +105,49 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
       void Promise.resolve().then(() => deps.releaseResources(sender)).catch((error) => reportError(error, sender));
       for (const [key, owner] of owners) if (owner === windowId) owners.delete(key);
       selections.delete(windowId);
+      finalized.delete(windowId);
     });
     entry.window.on('close', (event) => {
-      if (deps.isQuitting() || !ready.has(windowId)) return;
+      if (deps.isQuitting() || finalized.has(windowId) || !ready.has(windowId)) return;
       event.preventDefault();
       if (closing.has(windowId)) return;
       closing.add(windowId);
       let retainedSnapshot: SessionWorkspaceSnapshot | undefined;
       void (async () => {
-        // Wait for transfers involving this window before taking its final snapshot.
-        await Promise.allSettled([...queues.values(), mainPresentation]);
+        // Only the owning group's queue can touch a child. Other children may
+        // close while a transfer to Main is still waiting for its renderer.
+        const key = entry.context.kind === 'session' && memberGroups.get(entry.context.initialSessionId);
+        await Promise.allSettled(entry.context.kind === 'main' ? [mainPresentation] : key ? [queues.get(key)] : []);
         if (entry.window.isDestroyed()) return;
-        const result = await request(entry, { kind: 'flush' });
-        if (!result.snapshot) throw new Error('The window did not confirm its saved workspace');
-        await saveSnapshot(sender, result.snapshot);
-        retainedSnapshot = result.snapshot;
-        await deps.releaseResources(sender);
-        entry.window.destroy();
+        const losses: string[] = [];
+        try {
+          const result = await request(entry, { kind: 'flush' });
+          if (!result.snapshot) throw new Error('The window did not confirm its workspace');
+          await requireSnapshotOwner(sender, result.snapshot);
+          const retained = await deps.saveForClose(sender, result.snapshot);
+          losses.push(...retained.losses);
+          retainedSnapshot = retained.snapshot;
+        } catch (error) {
+          losses.push(error instanceof Error ? error.message : String(error));
+        }
+        const confirmed = !losses.length || await deps.confirmClose(sender, losses).catch((error) => {
+          reportError(error, sender);
+          return false;
+        });
+        if (!confirmed) {
+          if (retainedSnapshot) await deps.adoptSnapshot(sender, retainedSnapshot);
+          await request(entry, { kind: 'resume' });
+          return;
+        }
+        // Detach only after custody has been saved (or the user accepted loss).
+        // A stalled renderer must not prevent an explicitly confirmed close.
+        await request(entry, { kind: 'detach' }).catch(() => undefined);
+        finalized.add(windowId);
+        entry.window.close();
       })().catch(async (error) => {
-        if (retainedSnapshot && !entry.window.isDestroyed()) deps.forgetSnapshot(sender, retainedSnapshot);
-        if (!entry.window.isDestroyed()) await request(entry, { kind: 'resume', ...(entry.context.kind === 'session' ? { group: entry.context.group } : {}) }).catch(() => undefined);
+        // A failed cancellation rolls copy custody back to the workspace. Keep
+        // its snapshot until a later successful adoption can release both.
+        if (!entry.window.isDestroyed()) await request(entry, { kind: 'resume' }).catch(() => undefined);
         reportError(error, sender);
       }).finally(() => closing.delete(windowId));
     });
@@ -165,8 +194,8 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
     const id = entry.context.windowId;
     if (ready.has(id)) return;
     await new Promise<void>((resolve, reject) => {
-      const complete = (): void => { clearTimeout(timer); waiters.delete(complete); resolve(); };
-      const waiters = readyWaiters.get(id) ?? new Set<() => void>();
+      const complete = (error?: Error): void => { clearTimeout(timer); waiters.delete(complete); if (error) reject(error); else resolve(); };
+      const waiters = readyWaiters.get(id) ?? new Set<(error?: Error) => void>();
       readyWaiters.set(id, waiters);
       waiters.add(complete);
       const timer = setTimeout(() => {
@@ -212,7 +241,8 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
   }
 
   async function navigate(entry: WorkspaceWindowEntry, group: SessionWindowGroup, navigation: SessionWindowNavigation): Promise<void> {
-    const apply = () => navigateNow(entry, group, navigation);
+    assertOpen(entry);
+    const apply = () => { assertOpen(entry); return navigateNow(entry, group, navigation); };
     return entry.context.kind === 'main' ? withMainPresentation(apply) : apply();
   }
 
@@ -243,11 +273,21 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
 
   async function adoptSnapshot(sender: WebContents, snapshot: SessionWorkspaceSnapshot): Promise<void> {
     await requireSnapshotOwner(sender, snapshot);
-    deps.forgetSnapshot(sender, snapshot);
+    await deps.adoptSnapshot(sender, snapshot);
+  }
+
+  function assertOpen(entry: WorkspaceWindowEntry): void {
+    if (entry.window.isDestroyed() || closing.has(entry.context.windowId)) throw new Error('The workspace window is closing');
   }
 
   function transfer(group: SessionWindowGroup, navigation: SessionWindowNavigation, target: WorkspaceWindowEntry, source?: WorkspaceWindowEntry): Promise<void> {
-    return withMainPresentation(() => transferNow(group, navigation, target, source));
+    assertOpen(target);
+    if (source) assertOpen(source);
+    return withMainPresentation(() => {
+      assertOpen(target);
+      if (source) assertOpen(source);
+      return transferNow(group, navigation, target, source);
+    });
   }
 
   async function transferNow(group: SessionWindowGroup, navigation: SessionWindowNavigation, target: WorkspaceWindowEntry, source?: WorkspaceWindowEntry): Promise<void> {
@@ -268,10 +308,7 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
       await waitReady(target);
       if (target.context.kind === 'main') {
         targetPrepared = true;
-        const retained = await request(target, { kind: 'flush' });
-        targetRetained = retained;
-        if (!retained.snapshot) throw new Error('The main window did not save its current workspace');
-        await saveSnapshot(targetSender, retained.snapshot);
+        targetRetained = await request(target, { kind: 'prepare-navigation' });
       }
       if (source) {
         sourcePrepared = true;
@@ -294,8 +331,7 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
       resourcesMoved = true;
       await deps.transferResources({ group, source: sourceSender, target: targetSender });
       await request(target, { kind: 'restore', group, navigation, snapshot });
-      deps.forgetSnapshot(targetSender, snapshot);
-      if (targetRetained?.snapshot) deps.forgetSnapshot(targetSender, targetRetained.snapshot);
+      await deps.adoptSnapshot(targetSender, snapshot);
       selections.set(target.context.windowId, navigation);
       target.controller.reveal();
       target.controller.focus();
@@ -317,24 +353,18 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
           const restored = await deps.loadSnapshot(sourceSender!, group.sessionIds);
           try {
             await request(source, { kind: 'restore', group, navigation: { sessionId: activeSessionId }, snapshot: restored });
-            deps.forgetSnapshot(sourceSender!, restored);
+            await deps.adoptSnapshot(sourceSender!, restored);
           }
           catch (restoreError) { deps.releaseSnapshot(sourceSender!, restored); throw restoreError; }
         } else if (sourcePrepared) {
-          if (!sourceCleared && sourceSnapshot) deps.forgetSnapshot(sourceSender!, sourceSnapshot);
+          if (!sourceCleared && sourceSnapshot) await deps.adoptSnapshot(sourceSender!, sourceSnapshot);
           await request(source, { kind: 'resume', group });
         }
       }
       if (target.context.kind === 'main' && !target.window.isDestroyed() && targetPrepared) {
-        if (committed && targetRetained?.activeSessionId && targetRetained.snapshot) {
-          const previousGroup = await resolveGroup(targetRetained.activeSessionId);
-          await request(target, { kind: 'restore', group: previousGroup,
-            navigation: { sessionId: targetRetained.activeSessionId }, snapshot: targetRetained.snapshot });
-          deps.forgetSnapshot(targetSender, targetRetained.snapshot);
-        } else {
-          if (targetRetained?.snapshot) deps.forgetSnapshot(targetSender, targetRetained.snapshot);
-          await request(target, { kind: 'resume', group });
-        }
+        await request(target, { kind: 'resume',
+          ...(committed ? { navigation: targetRetained?.activeSessionId ? { sessionId: targetRetained.activeSessionId } : null } : {}),
+        });
       }
       throw error;
     }
@@ -342,8 +372,10 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
 
   async function routeSession(sender: WebContents, navigation: SessionWindowNavigation): Promise<'local' | 'routed'> {
     const origin = requireWindow(sender);
+    assertOpen(origin);
     const group = await resolveGroup(navigation.sessionId);
     return serial(groupKey(group), async () => {
+      assertOpen(origin);
       const destination = owner(group);
       if (destination) {
         if (destination === origin) { selections.set(origin.context.windowId, navigation); return 'local'; }
@@ -351,6 +383,7 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
         return 'routed';
       }
       if (origin.context.kind === 'main') return withMainPresentation(async () => {
+        assertOpen(origin);
         selections.set(origin.context.windowId, navigation);
         return 'local' as const;
       });
@@ -377,6 +410,7 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
 
   async function openInMainWindow(sender: WebContents): Promise<void> {
     const origin = requireWindow(sender);
+    assertOpen(origin);
     if (origin.context.kind !== 'session') return;
     const initial = origin.context.initialSessionId;
     const group = await resolveGroup(initial);
@@ -445,12 +479,7 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
     reply(sender: WebContents, reply: SessionWindowCommandReply): void {
       const entry = requireWindow(sender);
       const operation = pending.get(reply.requestId);
-      if (!operation) {
-        // A timed-out flush can finish saving after its window has resumed.
-        // Reuse the normal ownership check; an arbitrary reply is not authority.
-        if (reply.ok && reply.result?.snapshot) void adoptSnapshot(sender, reply.result.snapshot).catch((error) => reportError(error, sender));
-        return;
-      }
+      if (!operation) return; // Capture alone never transfers custody; ignore late replies.
       if (operation.windowId !== entry.context.windowId) return;
       if (reply.ok) operation.resolve(reply.result ?? {});
       else operation.reject(new Error(reply.error));
@@ -460,15 +489,20 @@ export function createSessionWindowCoordinator(deps: SessionWindowCoordinatorDep
       await serial(groupKey(group), async () => navigate(owner(group) ?? await ensureMain(), group, { sessionId }));
     },
     async commandMain(sender: WebContents, command: 'newTask' | 'openSettings' | 'openHelp'): Promise<void> {
-      requireWindow(sender);
+      const origin = requireWindow(sender);
+      assertOpen(origin);
       const entry = await ensureMain();
       await withMainPresentation(async () => {
+        assertOpen(origin);
+        assertOpen(entry);
         entry.window.webContents.send('window:command', { id: command });
         entry.controller.focus();
       });
     },
     dispose(): void {
       unsubscribe();
+      for (const callbacks of readyWaiters.values()) for (const complete of callbacks) complete(new Error('Window coordination stopped'));
+      readyWaiters.clear();
       for (const operation of pending.values()) operation.reject(new Error('Window coordination stopped'));
     },
   };
@@ -494,7 +528,6 @@ export function registerSessionWindowIpc(coordinator: SessionWindowCoordinator, 
     if (!input.ok && (!('error' in input) || typeof input.error !== 'string')) throw new TypeError('Invalid window reply');
     return coordinator.reply(sender, input as SessionWindowCommandReply);
   });
-  handle('save', (sender, input) => coordinator.saveSnapshot(sender, input));
   handle('adopt', (sender, input) => coordinator.adoptSnapshot(sender, input));
   handle('load', (sender, input: unknown) => {
     if (!Array.isArray(input)) throw new TypeError('Invalid session list');

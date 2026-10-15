@@ -17,6 +17,10 @@
  * under the License.
  */
 
+import { linkedSubagentParentSessionId } from '@maka/core/session';
+import { isSideConversationSession } from '@maka/core/side-conversation';
+import { adoptWorkspaceCopies } from './session-workspace-custody.js';
+import { bindSessionCopyOwner } from './runtime-host-session-execution-ipc-main.js';
 import { resolveDesktopWslHostHandoff } from './runtime-host-wsl-handoff.js';
 import {
   app,
@@ -509,7 +513,7 @@ function workspaceOwner(sender: Pick<WebContents, 'id'>, hostId: string) {
     scope: { hostId, targetEpoch: state.epoch },
   };
 }
-async function saveWorkspaceSnapshot(sender: WebContents, snapshot: SessionWorkspaceSnapshot): Promise<void> {
+async function saveWorkspaceSnapshot(sender: WebContents, snapshot: SessionWorkspaceSnapshot, onLoss?: (message: string) => void): Promise<SessionWorkspaceSnapshot> {
   const keys = [
     ...snapshot.drafts.map((draft) => draft.sessionId),
     ...snapshot.sideConversations.map((side) => side.panel.sourceSessionId),
@@ -526,8 +530,40 @@ async function saveWorkspaceSnapshot(sender: WebContents, snapshot: SessionWorks
       readingAnchors: Object.fromEntries(Object.entries(snapshot.readingAnchors ?? {}).filter(([key]) => belongs(key))),
     } };
   });
-  await sessionWorkspaceStore.saveAll(workspaces);
+  await sessionWorkspaceStore.saveAll(workspaces, onLoss);
+  const unavailable = new Set<string>();
+  try {
+    await moveWorkspaceCopies(snapshot, 'workspace', sender, onLoss ? (side, error) => {
+      const { hostId } = parseDesktopSessionKey(side.panel.sourceSessionId);
+      sessionWorkspaceStore.releaseUnavailableCompanion(workspaceOwner(sender, hostId).partition, side.panel.sourceSessionId, side.panel.id, snapshot.capturedAt);
+      unavailable.add(side.panel.id);
+      onLoss(`Side conversation history: ${error instanceof Error ? error.message : String(error)}`);
+    } : undefined);
+  } catch (error) { forgetWorkspaceSnapshot(sender, snapshot); throw error; }
+  return { ...snapshot, sideConversations: snapshot.sideConversations.map((side) => {
+    if (!unavailable.has(side.panel.id)) return side;
+    const { companion: _companion, ...retained } = side;
+    return { ...retained, active: false, hasContent: false, draft: { ...side.draft, sessionId: side.panel.sourceSessionId } };
+  }) };
 }
+async function moveWorkspaceCopies(
+  snapshot: SessionWorkspaceSnapshot, owner: 'workspace' | WebContents, previousOwner: 'workspace' | WebContents,
+  unavailable?: (side: SessionWorkspaceSnapshot['sideConversations'][number], error: unknown) => void,
+): Promise<void> {
+  const ownerId = (value: 'workspace' | WebContents) => value === 'workspace' ? value : `web-contents:${value.id}`;
+  await adoptWorkspaceCopies(snapshot, {
+    ownerId: ownerId(owner), previousOwnerId: ownerId(previousOwner), unavailable,
+    resolve: (side) => {
+      const { hostId, sessionId } = parseDesktopSessionKey(side.companion!.sessionId);
+      const state = runtimeHostManager?.entries().find((entry) => entry.hostId === hostId);
+      const authority = state?.readiness === 'ready' ? state.candidate.sessionCopyCleanup : undefined;
+      if (!authority) throw new Error('Side conversation cleanup authority is unavailable');
+      if (owner !== 'workspace') bindSessionCopyOwner(authority, owner, (error) => console.error('[session-copy]', error));
+      return { authority, sessionId, sourceSessionId: parseDesktopSessionKey(side.panel.sourceSessionId).sessionId };
+    },
+  });
+}
+
 function forgetWorkspaceSnapshot(sender: WebContents, snapshot: SessionWorkspaceSnapshot): void {
   const hosts = new Map<string, string[]>();
   for (const draft of snapshot.drafts) {
@@ -894,13 +930,47 @@ const sessionWindows = createSessionWindowCoordinator({
     const state = runtimeHostManager?.entries().find((entry) => entry.hostId === hostId);
     if (!state) throw new Error('Session Host is unavailable');
     const cached = sessionLocal.catalog().find((entry) => entry.scope.hostId === hostId)?.sessions ?? [];
-    const sessions = state.readiness === 'ready'
-      ? [...cached, ...(await state.candidate.client.listSessions()).map((session) => projectSessionCatalogSummary(session))]
-      : cached;
-    return sessionWindowGroups.resolve(id, sessions);
+    sessionWindowGroups.update(hostId, cached);
+    // The existing local catalog supplies known ancestry. Only a newly created
+    // member missing from that catalog needs a targeted Host read.
+    let missing: string | undefined = id;
+    const seen = new Set<string>();
+    while (missing && !sessionWindowGroups.has(missing) && !seen.has(missing)) {
+      seen.add(missing);
+      if (state.readiness !== 'ready') throw new Error('Session is unavailable');
+      const session = await state.candidate.client.getSession(parseDesktopSessionKey(missing).sessionId);
+      if (!session) throw new Error('Session is unavailable');
+      sessionWindowGroups.update(hostId, [projectSessionCatalogSummary(session)]);
+      const parent = linkedSubagentParentSessionId(session)
+        ?? session.revisionRootSessionId ?? (isSideConversationSession(session.labels) ? session.parentSessionId : undefined);
+      missing = parent ? desktopSessionKey({ hostId, sessionId: parent }) : undefined;
+    }
+    return sessionWindowGroups.resolve(id, []);
   },
-  saveSnapshot: saveWorkspaceSnapshot,
+  saveSnapshot: async (sender, snapshot) => { await saveWorkspaceSnapshot(sender, snapshot); },
+  saveForClose: async (sender, snapshot) => {
+    const losses: string[] = [];
+    const retained = await saveWorkspaceSnapshot(sender, snapshot, (message) => losses.push(message));
+    return { snapshot: retained, losses };
+  },
+  confirmClose: async (sender, losses) => {
+    const zh = (await desktopLocale.resolve()).startsWith('zh');
+    const options = {
+      type: 'warning' as const, title: 'Maka',
+      message: zh ? '部分内容无法保留，仍要关闭窗口吗？' : 'Some content could not be retained. Close the window anyway?',
+      detail: (zh ? '已尽量保留草稿。以下内容无法保留：\n' : 'Drafts have been retained where possible. The following could not be retained:\n') + losses.join('\n'),
+      buttons: zh ? ['取消', '仍然关闭'] : ['Cancel', 'Close anyway'],
+      defaultId: 0, cancelId: 0,
+    };
+    const window = mainWindowController.browserWindowFor(sender);
+    const result = await (window ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options));
+    return result.response === 1;
+  },
   forgetSnapshot: forgetWorkspaceSnapshot,
+  adoptSnapshot: async (sender, snapshot) => {
+    await moveWorkspaceCopies(snapshot, sender, 'workspace');
+    forgetWorkspaceSnapshot(sender, snapshot);
+  },
   loadSnapshot: loadWorkspaceSnapshot,
   releaseSnapshot: (sender, snapshot) => sessionWorkspaceStore.releaseSnapshot(sender.id, snapshot),
   transferResources: async ({ group, source, target }) => {
@@ -1335,9 +1405,12 @@ const createLocalRuntimeHostManager = () => createRuntimeHostDesktopManager(
     ...(e2eFixture?.scenario === "chat-partial-history"
       ? { transcriptHistoryBytes: PARTIAL_HISTORY_TRANSCRIPT_BYTES }
       : {}),
-    canUseSession: (senderId, scope, sessionId) => {
+    canUseSession: async (senderId, scope, sessionId) => {
       const sender = mainWindowController.registry.entries().find((entry) => entry.window.webContents.id === senderId)?.window.webContents;
-      return !!sender && sessionWindows.canUseSession(sender, desktopSessionKey({ ...scope, sessionId }));
+      if (!sender) return false;
+      const key = desktopSessionKey({ ...scope, sessionId });
+      await sessionWindows.refreshGroup(key);
+      return sessionWindows.canUseSession(sender, key);
     },
     retireCancelledMessages: (scope, sessionId, messageIds) =>
       sessionLocal.retireCancelledMessages(scope, sessionId, messageIds),
@@ -2267,9 +2340,6 @@ function emitSessionsChanged(
     ...(extra?.modelId ? { modelId: extra.modelId } : {}),
     ...(extra?.turnId ? { turnId: extra.turnId } : {}),
   };
-  if (sessionId && reason !== 'deleted') {
-    void sessionWindows.refreshGroup(desktopSessionKey({ ...scope, sessionId })).catch(() => undefined);
-  }
   mainWindowController.send("sessions:changed", scope, event);
 }
 

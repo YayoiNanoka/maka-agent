@@ -54,13 +54,15 @@ export function createSessionWindowNavigator(deps: {
   blocked(): boolean;
 }) {
   let revision = 0;
-  const open = async (navigation: SessionWindowNavigation, activate: () => void): Promise<void> => {
-    if (deps.blocked()) return;
+  const open = async (navigation: SessionWindowNavigation, activate: () => void): Promise<boolean> => {
+    if (deps.blocked()) return false;
     const ownRevision = ++revision;
     const isCurrent = () => !deps.blocked() && ownRevision === revision;
     const route = await deps.route(navigation);
-    if (route !== 'local' || !isCurrent()) return;
-    await deps.openWorkspace(navigation.sessionId, isCurrent, () => { if (isCurrent()) activate(); });
+    if (route !== 'local' || !isCurrent()) return false;
+    let activated = false;
+    await deps.openWorkspace(navigation.sessionId, isCurrent, () => { if (isCurrent()) { activate(); activated = true; } });
+    return activated && isCurrent();
   };
   return { open, invalidate: () => { revision += 1; } };
 }
