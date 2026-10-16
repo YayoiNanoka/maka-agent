@@ -2327,9 +2327,9 @@ function emitSessionsChanged(
   sessionLocal.changed(scope);
   if (reason === 'deleted' && sessionId) {
     try {
-      const partition = sessionLocal.target(scope).partition;
-      sessionLocalStore.removeSession(partition, sessionId);
-      sessionWorkspaceStore.delete(partition, [desktopSessionKey({ ...scope, sessionId })]);
+      const target = sessionLocal.target(scope);
+      sessionLocal.removeSession(target, sessionId);
+      sessionWorkspaceStore.delete(target.partition, [desktopSessionKey({ ...scope, sessionId })]);
     } catch { /* A retired target cannot repopulate its cache. */ }
   }
   const event: SessionChangedEvent = {
