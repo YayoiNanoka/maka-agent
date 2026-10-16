@@ -38,6 +38,7 @@ export {
   createTranscriptRestoreLifecycle,
   replaceWorkspaceReadingAnchors,
   prepareTranscriptForSend,
+  readCompleteTranscript,
   restoreSessionTranscriptRange,
 } from './controller/transcript-reading-position.js';
 export { localMessagePresentation } from './controller/local-message-presentation.js';

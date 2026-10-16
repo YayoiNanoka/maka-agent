@@ -230,7 +230,7 @@ function AppShellContent({
 }) {
   const toastApi = useToast();
   const {
-    renderPublishedConversation,
+    renderCompleteConversation,
     refreshMessages,
     transcriptEmpty,
     transcriptHasHistory,
@@ -309,7 +309,7 @@ function AppShellContent({
       typeof nextSelection === 'function' ? nextSelection(current.selection) : nextSelection,
     ));
   }, [sessionWindow.standalone]);
-  const navSelectionRef = useRef<NavSelection>(navSelection);
+  const navSelectionRef = useRef(navSelection);
   // Navigation only: whether WorkHub is enabled at all is the client switch
   // the WorkHub enablement authority owns (see WorkHubEnablementWatch below).
   const [workHubActive, setWorkHubActive] = useState(false);
@@ -909,7 +909,7 @@ function AppShellContent({
         : projectCapabilities.viewClientPath,
     connections: defaultHostConnections.snapshot.connections,
     defaultConnection: defaultHostConnections.snapshot.defaultConnection,
-    renderPublishedConversation,
+    renderCompleteConversation,
     newTaskProfileId: taskEntry.selectors.selectedProfileId,
     settingsOpen,
     settingsProfileId: overlays.selectors.settings.request.profileId,

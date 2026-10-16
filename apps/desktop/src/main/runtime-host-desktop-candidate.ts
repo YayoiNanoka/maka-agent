@@ -187,6 +187,7 @@ export interface DesktopRuntimeHostCandidateDeps {
   readonly notifyRun: (input: RunNotificationEvent) => Promise<void>;
   readonly e2eInteractions?: RuntimeHostSessionExecutionIpcDeps["e2eInteractions"];
   readonly transcriptHistoryBytes?: number;
+  readonly transcriptInitialHistoryBytes?: number;
   readonly renderer?: {
     send(channel: string, scope: DesktopTargetScope, payload: unknown): void;
   };
@@ -730,6 +731,7 @@ export async function createDesktopRuntimeHostCandidate(
     const sessionObserver = new RuntimeHostSessionObserver({
       client,
       transcriptHistoryBytes: deps.transcriptHistoryBytes,
+      transcriptInitialHistoryBytes: deps.transcriptInitialHistoryBytes,
       onMessageRetraction: (sessionId, messageIds, proof) => {
         if (target.access !== 'owner' || !isTargetActive()) return;
         // Execution resolution is already positive Host proof. Preserve its

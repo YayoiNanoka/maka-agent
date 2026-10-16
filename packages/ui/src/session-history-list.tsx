@@ -39,13 +39,15 @@ import {
   AlertTriangle,
   Archive,
   FolderOpen,
-  PictureInPicture2,
+  Globe,
   Pencil,
+  PictureInPicture2,
   Pin,
   PinOff,
   Plug,
   Plus,
   SquarePen,
+  SquareTerminal,
   Unarchive,
 } from './icons.js';
 import { RelativeTime } from './relative-time.js';
@@ -170,6 +172,11 @@ export interface SessionHistoryGroup {
   label: string;
   sessions: SessionSummary[];
   project?: ProjectRecord;
+  /** Execution location for groups scoped to a Runtime Host. */
+  host?: {
+    kind: 'local' | 'remote' | 'environment';
+    name: string;
+  };
 }
 
 /**
@@ -283,8 +290,9 @@ export function SessionHistoryList() {
   }
 
   /**
-   * A menu is about a set, so opening one on a row outside the set replaces it
-   * — the way a file list answers a right-click on an unselected file.
+   * A menu on a row outside the picked set acts on that row alone. Drop the old
+   * picks without picking the menu target: its temporary highlight follows
+   * `data-menu-open`, so dismissing the menu leaves no extra selection behind.
    *
    * A row already in the set keeps the set: a run built by dragging must
    * survive the gesture that asks what to do with it. But the set is narrowed
@@ -307,7 +315,7 @@ export function SessionHistoryList() {
       commands.retain(orderedSessionIds());
       return;
     }
-    commands.pick({ sessionId, pick: 'replace', orderedSessionIds: [] });
+    commands.clear();
   }
 
   function handleListClickCapture(event: MouseEvent<HTMLDivElement>) {
@@ -342,13 +350,19 @@ export function SessionHistoryList() {
    * would take the native menu away and leave nothing in its place.
    */
   function handleListContextMenu(event: MouseEvent<HTMLDivElement>) {
-    if (!commands) return;
-    const row = pickableRowOf(event.target);
-    const sessionId = row?.dataset.sessionId;
-    if (!row || !sessionId) return;
-    const trigger = row.querySelector<HTMLElement>('.maka-session-row-action button');
+    // Project wrappers contain their sessions. Resolve the nearest row first
+    // so a session without actions cannot borrow its project's menu.
+    const row = closestFrom(event.target, '.maka-session-row, .maka-project-row');
+    if (!row || row.closest('[inert]')) return;
+    const sessionId = row.dataset.sessionId;
+    if (sessionId && !isPickableRow(row)) return;
+    const trigger = row.querySelector<HTMLElement>(
+      ':scope > .maka-session-row-action button, '
+      + ':scope > div > .maka-project-row-actions .maka-session-row-action button',
+    );
+    if (!trigger) return;
     event.preventDefault();
-    adoptForMenu(sessionId);
+    if (sessionId) adoptForMenu(sessionId);
     // Chromium fires `contextmenu` before the secondary-button pointerup on
     // macOS. Opening a light-dismiss popover here lets that unfinished press
     // dismiss the new menu as soon as the button is released. Other platforms
@@ -358,9 +372,9 @@ export function SessionHistoryList() {
       pendingContextMenuTriggerRef.current = trigger;
       return;
     }
-    // Opening the menu re-enters `handleListClickCapture` with a synthetic
+    // Opening a session menu re-enters `handleListClickCapture` with a synthetic
     // click, so the adoption is dispatched twice — harmless only because both
-    // of its branches are idempotent: `replace` sets the same one row, and
+    // of its branches are idempotent: `clear` drops the picks, and
     // `retain` intersects with the same list. Anything else here needs a guard.
     trigger?.click();
   }
@@ -395,6 +409,7 @@ export function SessionHistoryList() {
             label: g.label,
             sessions: g.sessions,
             project: g.project,
+            host: g.host,
           }))
         : groupSessionsForHistory(rail.sessions, locale).map((g) => ({
             key: g.id,
@@ -428,6 +443,7 @@ function SessionListGroups(props: {
     label: string;
     sessions: SessionSummary[];
     project?: ProjectRecord;
+    host?: SessionHistoryGroup['host'];
   }>;
 }) {
   const rail = useSessionRailData();
@@ -591,6 +607,7 @@ function SessionListGroups(props: {
           groupKey={group.key}
           label={group.label}
           project={project}
+          host={group.host}
           sessions={sessions}
           streamingSessionIds={rail.streamingSessionIds}
           projectActions={actions}
@@ -702,6 +719,7 @@ function ProjectNavRow(props: {
   groupKey: string;
   label: string;
   project?: ProjectRecord;
+  host?: SessionHistoryGroup['host'];
   sessions: SessionSummary[];
   streamingSessionIds?: ReadonlySet<string>;
   projectActions?: ProjectRowActions;
@@ -722,10 +740,14 @@ function ProjectNavRow(props: {
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const hoverDescriptionId = useId();
-  // The same list the row draws its subtree from. A summary counting rows that
-  // were hoisted into the pinned section describes a project row that has no
-  // disclosure and no children, and puts its menu somewhere else than the count
-  // implies.
+  const copy = getSessionHoverCardCopy(useUiLocale());
+  const executionLocation = props.host
+    ? copy.executionLocation[props.host.kind](props.host.name)
+    : undefined;
+  const icon = props.host?.kind === 'remote'
+    ? Globe
+    : props.host?.kind === 'environment' ? SquareTerminal : FolderOpen;
+  // Count only sessions actually under this row; pinned tasks live elsewhere.
   const hoverSummary = useMemo(
     () =>
       createProjectHoverCardSummary(
@@ -735,10 +757,11 @@ function ProjectNavRow(props: {
       ),
     [props.project, props.sessions, props.streamingSessionIds],
   );
-  // Collapsible only when there is a real session subtree. An empty VStack is
-  // still truthy children for Astryx (!!children) and fabricates a disclosure.
+  // An empty VStack is still truthy children for Astryx (!!children), so only
+  // supply children and collapse behavior when there is a real session subtree.
   const hasSessions = props.sessions.length > 0;
   const hasActions = props.project !== undefined && props.projectActions !== undefined;
+  const canCreateTask = props.project?.available === true && props.project.archivedAt === undefined;
   const hasMeta = (props.project !== undefined && !props.project.available) || hasActions;
   const [isDropTarget, setIsDropTarget] = useState(false);
   return (
@@ -747,6 +770,7 @@ function ProjectNavRow(props: {
       data-project-id={props.groupKey}
       data-maka-session-drop-target={props.onDropSession ? 'true' : undefined}
       className="maka-project-row"
+      data-host-kind={props.host?.kind}
       data-drop-target={isDropTarget ? 'true' : undefined}
       onDragOver={(event) => {
         // A drag only lands where the shell says this Session may go, so a row
@@ -773,12 +797,13 @@ function ProjectNavRow(props: {
         key="navigation"
         label={props.label}
         aria-describedby={hoverDescriptionId}
-        icon={FolderOpen}
+        icon={icon}
         collapsible={hasSessions ? { defaultIsCollapsed: false } : undefined}
         endContent={hasMeta ? (
           <ProjectItemMeta
             project={props.project}
             reserveAction={hasActions}
+            reserveNewTask={hasActions && canCreateTask}
           />
         ) : undefined}
         trailingAction={
@@ -787,7 +812,7 @@ function ProjectNavRow(props: {
               project={props.project}
               actions={props.projectActions}
               onStartRename={props.onStartRename}
-              position={hasSessions ? 'before-disclosure' : 'trailing'}
+              canCreateTask={canCreateTask}
             />
           ) : undefined
         }
@@ -802,11 +827,14 @@ function ProjectNavRow(props: {
       <ProjectHoverCardDescription
         id={hoverDescriptionId}
         summary={hoverSummary}
-      />      <ProjectHoverCardLayer
+        executionLocation={executionLocation}
+      />
+      <ProjectHoverCardLayer
         containerRef={containerRef}
         label={props.label}
         project={props.project}
         summary={hoverSummary}
+        executionLocation={executionLocation}
       />
     </div>
   );
@@ -817,6 +845,7 @@ const ProjectHoverCardLayer = memo(function ProjectHoverCardLayer(props: {
   label: string;
   project?: ProjectRecord;
   summary: ProjectHoverCardSummary;
+  executionLocation?: string;
 }) {
   const locale = useUiLocale();
   const copy = getSessionHoverCardCopy(locale);
@@ -836,6 +865,7 @@ const ProjectHoverCardLayer = memo(function ProjectHoverCardLayer(props: {
     <ProjectHoverCardContent
       label={props.label}
       summary={props.summary}
+      executionLocation={props.executionLocation}
       locale={locale}
     />,
   );
@@ -1194,11 +1224,13 @@ function SessionHoverCardContent(props: {
 function ProjectHoverCardDescription(props: {
   id: string;
   summary: ProjectHoverCardSummary;
+  executionLocation?: string;
 }) {
   const locale = useUiLocale();
   const copy = getSessionHoverCardCopy(locale);
   const summary = props.summary;
   const description = [
+    props.executionLocation,
     summary.path,
     copy.taskCount(summary.taskCount),
     summary.runningCount > 0 ? copy.runningTaskCount(summary.runningCount) : undefined,
@@ -1223,6 +1255,7 @@ function ProjectHoverCardDescription(props: {
 function ProjectHoverCardContent(props: {
   label: string;
   summary: ProjectHoverCardSummary;
+  executionLocation?: string;
   locale: UiLocale;
 }) {
   const copy = getSessionHoverCardCopy(props.locale);
@@ -1231,6 +1264,9 @@ function ProjectHoverCardContent(props: {
   return (
     <span className="maka-sidebar-hover-card" data-kind="project">
       <span className="maka-sidebar-hover-card-title">{props.label}</span>
+      {props.executionLocation ? (
+        <span className="maka-sidebar-hover-card-location">{props.executionLocation}</span>
+      ) : null}
       {summary.path ? (
         <span className="maka-sidebar-hover-card-path" title={summary.path}>
           {summary.path}
@@ -1317,6 +1353,7 @@ function preferredProjectPath(project: ProjectRecord | undefined): string | unde
 function ProjectItemMeta(props: {
   project?: ProjectRecord;
   reserveAction: boolean;
+  reserveNewTask: boolean;
 }) {
   const copy = getConversationCopy(useUiLocale()).sessions;
   return (
@@ -1325,7 +1362,11 @@ function ProjectItemMeta(props: {
         <AlertTriangle size={ICON_SIZE.meta} aria-label={copy.projectUnavailable} />
       )}
       {props.reserveAction ? (
-        <span className="maka-session-row-trailing" aria-hidden="true" />
+        <span
+          className="maka-session-row-trailing"
+          data-new-task={props.reserveNewTask ? 'true' : undefined}
+          aria-hidden="true"
+        />
       ) : null}
     </span>
   );
@@ -1335,7 +1376,7 @@ function ProjectItemActions(props: {
   project: ProjectRecord;
   actions: ProjectRowActions;
   onStartRename(opener: HTMLElement | null): void;
-  position: 'before-disclosure' | 'trailing';
+  canCreateTask: boolean;
 }) {
   const copy = getConversationCopy(useUiLocale()).sessions;
   const trailingRef = useRef<HTMLSpanElement>(null);
@@ -1369,9 +1410,8 @@ function ProjectItemActions(props: {
     })();
   }
 
-  // Projects keep a permanent MoreMenu. SideNavItem's trailingAction slot puts
-  // it after the collapse button and before the nested tasks, so visual and
-  // keyboard order agree without nesting either interactive control.
+  // Both controls share the same pending-action guard and remain siblings of
+  // the collapse button, ahead of the nested tasks in keyboard order.
   const menuItems = project.archivedAt !== undefined
     ? [
         {
@@ -1381,7 +1421,7 @@ function ProjectItemActions(props: {
         },
       ]
     : [
-        ...(project.available
+        ...(props.canCreateTask
           ? [
               {
                 label: copy.projectNewTask,
@@ -1414,15 +1454,29 @@ function ProjectItemActions(props: {
       ];
 
   return (
-    <span className="maka-session-row-action" data-position={props.position} ref={trailingRef}>
-      <MoreMenu
-        size="sm"
-        label={copy.projectActionsAriaLabel(project.name)}
-        isDisabled={pendingAction !== null}
-        isMenuOpen={menuOpen}
-        onOpenChange={setMenuOpen}
-        items={menuItems}
-      />
+    <span className="maka-project-row-actions">
+      <span className="maka-session-row-action" ref={trailingRef}>
+        <MoreMenu
+          size="sm"
+          label={copy.projectActionsAriaLabel(project.name)}
+          isDisabled={pendingAction !== null}
+          isMenuOpen={menuOpen}
+          onOpenChange={setMenuOpen}
+          items={menuItems}
+        />
+      </span>
+      {props.canCreateTask && (
+        <Button
+          variant="ghost"
+          size="sm"
+          isIconOnly
+          label={`${project.name} ${copy.projectNewTask}`}
+          tooltip={copy.projectNewTask}
+          icon={<SquarePen size={ICON_SIZE.control} aria-hidden="true" />}
+          isDisabled={pendingAction !== null}
+          onClick={() => runProjectAction('new', () => actions.onNew(project.id))}
+        />
+      )}
     </span>
   );
 }

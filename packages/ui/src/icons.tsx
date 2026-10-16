@@ -175,6 +175,7 @@ export {
   Square,
   SquareArrowDownLeft,
   SquarePen,
+  SquareTerminal,
   Sun,
   SunMoon,
   Target,
