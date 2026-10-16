@@ -6,7 +6,7 @@ Generated against `@astryxdesign/core@0.6.3` (195 component exports).
 
 Wiki bar: Design Conventions · API Use-the-System · Theming · Container Padding.
 
-**Totals:** 336 files — blocker 0, reimplementation 0, polish 4, aligned 332.
+**Totals:** 341 files — blocker 0, reimplementation 0, polish 4, aligned 337.
 
 ## Exclusions (explicit)
 
@@ -22,6 +22,7 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 | Path | Why |
 |------|-----|
 | `apps/desktop/src/renderer/features/jev-settings/index.tsx` | barrel re-export |
+| `apps/desktop/src/renderer/features/personal-assistant/index.tsx` | barrel re-export |
 | `apps/desktop/src/renderer/main.tsx` | bundle entry, not a surface |
 
 ## Files
@@ -97,6 +98,9 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 | `apps/desktop/src/renderer/features/overlays/ui/overlays-context.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/overlays/ui/overlays-root.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/overlays/ui/search-modal-host.tsx` | dialog-overlay | none | aligned — no raw controls; no Astryx JSX usage | aligned |
+| `apps/desktop/src/renderer/features/personal-assistant/original-reader.css` | styles | n/a (css) | aligned — no off-rhythm control heights flagged | aligned |
+| `apps/desktop/src/renderer/features/personal-assistant/original-reader.tsx` | other | Button | aligned — uses Astryx (Button) | aligned |
+| `apps/desktop/src/renderer/features/personal-assistant/personal-assistant.css` | styles | n/a (css) | aligned — no off-rhythm control heights flagged | aligned |
 | `apps/desktop/src/renderer/features/runtime-host-management/services-context.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/runtime-host-management/ui/peer-mesh-peer-id-button.tsx` | other | Button | aligned — uses Astryx (Button) | aligned |
 | `apps/desktop/src/renderer/features/runtime-host-management/ui/runtime-host-add-computer-menu.tsx` | other | DropdownMenu, DropdownMenuItem | aligned — uses Astryx (DropdownMenu, DropdownMenuItem) | aligned |
@@ -310,11 +314,13 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 | `packages/ui/src/executor-model-picker.tsx` | ui-composition | Button, Popover | aligned — uses Astryx (Button, Popover) | aligned |
 | `packages/ui/src/form-interaction-prompt.tsx` | ui-composition | Button, CheckboxInput, RadioList, RadioListItem, Selector, Text, TextInput | aligned — uses Astryx (Button, CheckboxInput, RadioList, RadioListItem, Selector, Text, TextInput) | aligned |
 | `packages/ui/src/icons.tsx` | ui-composition | none | aligned — no raw controls; no Astryx JSX usage | aligned |
+| `packages/ui/src/image-delivery.tsx` | ui-composition | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `packages/ui/src/inline-reference.tsx` | ui-composition | ChatTokenizedText | aligned — uses Astryx (ChatTokenizedText) | aligned |
 | `packages/ui/src/inline-rename-input.tsx` | ui-composition | TextInput | aligned — uses Astryx (TextInput) | aligned |
 | `packages/ui/src/locale-context.tsx` | ui-composition | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `packages/ui/src/maka-wordmark.tsx` | ui-composition | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `packages/ui/src/markdown-body.tsx` | ui-composition | CodeBlock, Link, Markdown | aligned — uses Astryx (CodeBlock, Link, Markdown) | aligned |
+| `packages/ui/src/markdown-image.tsx` | ui-composition | Button, IconButton, Link, Spinner, Tooltip | aligned — uses Astryx (Button, IconButton, Link, Spinner, Tooltip) | aligned |
 | `packages/ui/src/markdown-math.tsx` | ui-composition | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `packages/ui/src/markdown.tsx` | ui-composition | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `packages/ui/src/mermaid-diagram.tsx` | ui-composition | Button, CodeBlock, Collapsible, Dialog, IconButton, Toolbar | aligned — uses Astryx (Button, CodeBlock, Collapsible, Dialog, IconButton, Toolbar) | aligned |

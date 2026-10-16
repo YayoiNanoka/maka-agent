@@ -20,6 +20,8 @@
 
 import { resolveUsageHeatmapRange } from '@maka/core/settings';
 import { useRef, useState } from 'react';
+import { createPersonalAssistantServices, PersonalAssistantServicesProvider } from '../../src/renderer/features/personal-assistant/index.js';
+import { createAssistantSessionVisibility, AssistantSessionVisibilityProvider } from '../../src/renderer/application/contracts/session-catalog/assistant-session-visibility.js';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test';
 import { ToastProvider, useToast } from '@maka/ui';
@@ -2039,7 +2041,24 @@ function fieldChrome(element: HTMLElement) {
  * reach a provider its own component renders.
  */
 function SettingsStory(props: SettingsStoryProps) {
+  const [assistant] = useState(() => createPersonalAssistantServices({
+    call: async (method) => {
+      if (method === 'assistant.enablement') return { enabled: false };
+      throw new Error(`Assistant is disabled in this settings fixture: ${method}`);
+    },
+    defaultHost: async () => ({ hostId: 'story-host', profileId: 'story-profile' }),
+    hostSnapshot: async () => ({ entries: [] }),
+    createSession: async () => { throw new Error('Disabled assistant cannot create a Session'); },
+    listSessions: async () => [],
+  }));
+  const [assistantVisibility] = useState(() => createAssistantSessionVisibility({
+    read: async () => false,
+    write: async () => undefined,
+    subscribeChanges: () => () => undefined,
+  }));
   return (
+    <PersonalAssistantServicesProvider value={assistant}>
+    <AssistantSessionVisibilityProvider value={assistantVisibility}>
     <ToastProvider>
       <DiagnosticsServicesProvider services={settingsDiagnosticsServices}>
         <AppUpdateServicesProvider services={settingsAppUpdateServices}>
@@ -2051,6 +2070,8 @@ function SettingsStory(props: SettingsStoryProps) {
         </AppUpdateServicesProvider>
       </DiagnosticsServicesProvider>
     </ToastProvider>
+    </AssistantSessionVisibilityProvider>
+    </PersonalAssistantServicesProvider>
   );
 }
 
