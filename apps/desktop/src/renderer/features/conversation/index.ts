@@ -82,5 +82,3 @@ export { ComposerSubmissionServicesProvider, type ComposerSubmissionServices } f
 export { ComposerSubmissionProvider } from './ui/composer-submission-provider.js';
 
 export { ConversationWindowState } from './ui/conversation-window-state.js';
-
-export { createComposerSurfaceOwner } from './controller/composer-surface-owner.js';

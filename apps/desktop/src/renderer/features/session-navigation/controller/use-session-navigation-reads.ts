@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import { useLayoutEffect, useMemo } from 'react';
+import { useLayoutEffect } from 'react';
 import { useMediaQuery } from '@astryxdesign/core/hooks';
 import { useExternalStoreSelector } from '../../../application/contracts/session-catalog/use-external-store-selector.js';
 import type { SessionCatalogState } from '../../../application/contracts/session-catalog/session-catalog-state.js';
@@ -37,8 +37,8 @@ import type { SessionNavigationSession } from '../ports.js';
 
 export interface SessionNavigationReads {
   revisionNavigation: SessionRevisionNavigation | undefined;
-  /** The active Session's parent breadcrumb and navigation action. */
-  titlebarParentSession: { name: string; onOpen(): void } | undefined;
+  /** The active Session's parent row, for the titlebar breadcrumb. */
+  activeParentSession: SessionNavigationSession | undefined;
   layout: SessionRailLayoutState;
 }
 
@@ -87,9 +87,8 @@ function revisionNavigationsEqual(
 export function useSessionNavigationReads(input: {
   catalog: SessionCatalogController;
   activeSessionId: string | undefined;
-  openSession(sessionId: string): void;
 }): SessionNavigationReads {
-  const { activeSessionId, catalog, openSession } = input;
+  const { activeSessionId, catalog } = input;
   const revisionNavigation = useExternalStoreSelector(
     catalog,
     selectRevisionNavigation,
@@ -101,10 +100,6 @@ export function useSessionNavigationReads(input: {
     selectActiveParentSession,
     activeSessionId,
   );
-  const titlebarParentSession = useMemo(() => activeParentSession ? {
-    name: activeParentSession.name,
-    onOpen: () => openSession(activeParentSession.id),
-  } : undefined, [activeParentSession, openSession]);
   /* The one place the rail asks how wide the window is. The store is
      module-scoped, so it is told rather than handed a prop; a layout effect
      re-renders before paint, so a narrow launch never shows it. */
@@ -113,5 +108,5 @@ export function useSessionNavigationReads(input: {
     sessionRailLayoutStore.setCompact(sidebarCompact);
   }, [sidebarCompact]);
   const layout = useExternalStoreSelector(sessionRailLayoutStore, selectRailLayout);
-  return { revisionNavigation, titlebarParentSession, layout };
+  return { revisionNavigation, activeParentSession, layout };
 }
