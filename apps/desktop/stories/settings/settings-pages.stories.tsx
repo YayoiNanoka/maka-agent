@@ -2754,27 +2754,24 @@ export const UsagePagedActivity: Story = {
     await expect(await canvas.findByText(USAGE_PAGINATION_SENTINEL)).toBeVisible();
     await expect(await canvas.findByRole('button', {name: /next page|下一页|下一頁/i})).toBeDisabled();
 
-    // A keyboard tooltip near the top of the calendar must leave its view controls reachable.
+    // Keyboard details remain visible without covering the focused daily cell.
     const chart = canvasElement.querySelector<HTMLElement>('.settingsUsageActivity');
     expect(chart).not.toBeNull();
-    expect(within(chart!).getAllByRole('radiogroup')).toHaveLength(1);
+    expect(within(chart!).queryByRole('radiogroup')).toBeNull();
     chart!.scrollIntoView({block: 'center'});
     const points = chart!.querySelectorAll<HTMLElement>('[data-activity-index]');
     points[points.length - 1]!.focus();
     await userEvent.keyboard('{ArrowLeft}');
-    const weekly = within(chart!).getByRole('radio', {name: copy.heatmap.weekly});
+    const focusedPoint = chart!.querySelector<HTMLElement>('[data-activity-index]:focus');
+    expect(focusedPoint).not.toBeNull();
     await waitFor(() => {
       const tip = within(document.body).getAllByRole('tooltip').at(-1);
       expect(tip).toBeVisible();
       expect(within(tip!).getByText(copy.heatmap.tokens)).toBeVisible();
       expect(within(tip!).getByText(copy.heatmap.requests)).toBeVisible();
-      const box = weekly.getBoundingClientRect();
-      expect(weekly.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))).toBe(true);
+      const box = focusedPoint!.getBoundingClientRect();
+      expect(focusedPoint!.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))).toBe(true);
     });
-    await userEvent.click(weekly);
-    expect(chart!.querySelectorAll('[data-activity-index]').length).toBeLessThanOrEqual(54);
-    await userEvent.click(within(chart!).getByRole('radio', {name: copy.heatmap.daily}));
-    expect(chart!.querySelectorAll('[data-activity-index]')).toHaveLength(points.length);
   },
 };
 // Real path: Settings → Usage after the summary and request list arrive, while the annual query is still running.

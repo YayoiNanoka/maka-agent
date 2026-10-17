@@ -226,7 +226,7 @@ class OperationalStateDatabaseOwner {
       configureSqliteRuntimeLockWait(this.database);
       this.database.exec('PRAGMA foreign_keys = ON');
       if (options.schemaMigration !== 'require_current') {
-        configureSqliteRuntimeAutoVacuumForNewDatabase(this.database);
+        configureSqliteRuntimeAutoVacuumForNewDatabase(this.database, databaseExisted);
       }
       if (options.schemaMigration === 'require_current') {
         requireCurrentOperationalState(this.database);

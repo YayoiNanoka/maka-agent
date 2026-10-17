@@ -25,6 +25,5 @@ export {
   usageActivityFocusIndex,
   usageActivityLevel,
   usageActivityThresholds,
-  usageActivityWeekHeight,
   type UsageActivityDay,
 } from './ui/usage-activity-model.js';

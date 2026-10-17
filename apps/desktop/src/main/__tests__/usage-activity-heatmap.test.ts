@@ -30,7 +30,6 @@ import {
   usageActivityFocusIndex,
   usageActivityLevel,
   usageActivityThresholds,
-  usageActivityWeekHeight,
   type UsageActivityDay,
 } from '../../renderer/features/usage/testing.js';
 
@@ -44,7 +43,7 @@ function daysFrom(start: Date, count: number): UsageActivityDay[] {
 }
 
 describe('Usage activity calendar', () => {
-  it('keeps partial boundary weeks and exact daily totals across a year boundary', () => {
+  it('keeps every daily cell in partial columns across a year boundary', () => {
     const days = daysFrom(new Date(2025, 11, 31), 10);
     const weeks = buildUsageActivityWeeks(days);
     assert.equal(weeks.length, 2);
@@ -52,9 +51,7 @@ describe('Usage activity calendar', () => {
     assert.equal(mondayIndex(weeks[0]!.start), 2);
     assert.equal(mondayIndex(weeks[1]!.start), 0);
     assert.equal(weeks[0]!.start, days[0]!.start);
-    assert.equal(weeks[1]!.end, days.at(-1)!.start);
-    assert.equal(weeks.reduce((sum, week) => sum + week.tokens, 0), 5_500);
-    assert.equal(weeks.reduce((sum, week) => sum + week.successfulRequests, 0), 55);
+    assert.deepEqual(weeks.flatMap((week) => week.days), days);
   });
 
   it('keeps February 29 and can render 54 columns for a leap-year window', () => {
@@ -78,7 +75,7 @@ describe('Usage activity calendar', () => {
         const weeks = buildUsageActivityWeeks(days);
         assert.deepEqual(weeks.map((week) => week.days.length), [7, 7]);
         assert.equal(mondayIndex(weeks[1]!.start), 0);
-        assert.equal(weeks[1]!.tokens, 7_700);
+        assert.deepEqual(weeks.flatMap((week) => week.days), days);
       }
     } finally {
       if (previousTimezone === undefined) delete process.env.TZ;
@@ -97,25 +94,16 @@ describe('Usage activity calendar', () => {
     assert.equal(usageActivityLevel(0, []), 0);
   });
 
-  it('uses proportional weekly columns while preserving tiny nonzero weeks', () => {
-    assert.equal(usageActivityWeekHeight(0, 0), 0);
-    assert.equal(usageActivityWeekHeight(0, 1_000_000), 0);
-    assert.equal(usageActivityWeekHeight(1, 1_000_000), 1);
-    assert.equal(usageActivityWeekHeight(50, 100), 4);
-    assert.equal(usageActivityWeekHeight(100, 100), 7);
-  });
-
   it('moves focus in calendar directions and keeps keyboard navigation inside the year', () => {
-    assert.equal(usageActivityFocusIndex('ArrowLeft', 20, 365, 'daily'), 13);
-    assert.equal(usageActivityFocusIndex('ArrowRight', 20, 365, 'daily'), 27);
-    assert.equal(usageActivityFocusIndex('ArrowUp', 20, 365, 'daily'), 19);
-    assert.equal(usageActivityFocusIndex('ArrowDown', 20, 365, 'daily'), 21);
-    assert.equal(usageActivityFocusIndex('ArrowLeft', 1, 365, 'daily'), 0);
-    assert.equal(usageActivityFocusIndex('ArrowRight', 364, 365, 'daily'), 364);
-    assert.equal(usageActivityFocusIndex('ArrowRight', 20, 53, 'weekly'), 21);
-    assert.equal(usageActivityFocusIndex('Home', 20, 53, 'weekly'), 0);
-    assert.equal(usageActivityFocusIndex('End', 20, 53, 'weekly'), 52);
-    assert.equal(usageActivityFocusIndex('Tab', 20, 53, 'weekly'), null);
+    assert.equal(usageActivityFocusIndex('ArrowLeft', 20, 365), 13);
+    assert.equal(usageActivityFocusIndex('ArrowRight', 20, 365), 27);
+    assert.equal(usageActivityFocusIndex('ArrowUp', 20, 365), 19);
+    assert.equal(usageActivityFocusIndex('ArrowDown', 20, 365), 21);
+    assert.equal(usageActivityFocusIndex('ArrowLeft', 1, 365), 0);
+    assert.equal(usageActivityFocusIndex('ArrowRight', 364, 365), 364);
+    assert.equal(usageActivityFocusIndex('Home', 20, 365), 0);
+    assert.equal(usageActivityFocusIndex('End', 20, 365), 364);
+    assert.equal(usageActivityFocusIndex('Tab', 20, 365), null);
   });
 });
 
@@ -177,21 +165,16 @@ function activityTree(heatmap: import('@maka/core/settings').UsageHeatmap | null
 }
 
 describe('Usage activity view', () => {
-  it('switches intervals using Token totals while showing request counts only in details', async () => {
+  it('shows daily Token intensity without interval controls and keeps requests in details', async () => {
     const { container, root } = setupDom();
     const days = daysFrom(new Date(2026, 0, 1), 365);
     days[0]!.tokens = 0;
     days[0]!.successfulRequests = 9;
     const heatmap = { days, through: days.at(-1)!.start + 1234, hasIncompleteUsage: false };
     const points = () => [...container.querySelectorAll<HTMLElement>('[data-activity-index]')];
-    const select = async (label: string) => {
-      const control = [...container.querySelectorAll<HTMLElement>('[role="radio"]')].find((item) => item.textContent === label);
-      assert.ok(control, label);
-      await act(async () => control.click());
-    };
     try {
       await act(async () => root.render(activityTree(heatmap)));
-      assert.equal(container.querySelectorAll('[role="radiogroup"]').length, 1);
+      assert.equal(container.querySelectorAll('[role="radiogroup"]').length, 0);
       assert.equal(points().length, 365);
       assert.equal(points().filter((point) => point.getAttribute('tabindex') === '0').length, 1);
       assert.equal(points()[0]!.getAttribute('data-level'), '0');
@@ -201,20 +184,6 @@ describe('Usage activity view', () => {
       await act(async () => root.render(activityTree(changedRequests)));
       assert.deepEqual(points().map((point) => point.getAttribute('data-level')), dailyLevels);
       assert.match(points()[0]!.getAttribute('aria-label')!, /Tokens: 0; Requests: 9,000/);
-      await act(async () => root.render(activityTree(heatmap)));
-      await select('Weekly');
-      const weeks = buildUsageActivityWeeks(days);
-      assert.equal(points().length, weeks.length);
-      assert.equal(points().filter((point) => point.getAttribute('tabindex') === '0').length, 1);
-      assert.match(points()[0]!.getAttribute('aria-label')!, /Tokens: 900; Requests: 18/);
-      assert.equal(points()[0]!.querySelectorAll('[data-level="4"]').length, 1);
-      const weeklyHeights = points().map((point) => point.querySelectorAll('[data-level="4"]').length);
-      await act(async () => root.render(activityTree(changedRequests)));
-      assert.deepEqual(points().map((point) => point.querySelectorAll('[data-level="4"]').length), weeklyHeights);
-      assert.match(points()[0]!.getAttribute('aria-label')!, /Tokens: 900; Requests: 18,000/);
-      await select('Daily');
-      assert.equal(points().length, 365);
-      assert.equal(points()[0]!.getAttribute('data-level'), '0');
     } finally {
       await act(async () => root.unmount());
     }

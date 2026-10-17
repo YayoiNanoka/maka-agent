@@ -20,15 +20,11 @@
 import type { UsageHeatmap } from '@maka/core/settings';
 
 export type UsageActivityDay = UsageHeatmap['days'][number];
-export type UsageActivityView = 'daily' | 'weekly';
 
 export type UsageActivityWeek = {
   /** Only dates included in the rolling year, including its partial first week. */
   days: UsageActivityDay[];
   start: number;
-  end: number;
-  tokens: number;
-  successfulRequests: number;
 };
 
 export function mondayIndex(timestamp: number): number {
@@ -41,13 +37,10 @@ export function buildUsageActivityWeeks(days: UsageActivityDay[]): UsageActivity
   for (const day of days) {
     let week = weeks[weeks.length - 1];
     if (!week || mondayIndex(day.start) === 0) {
-      week = { days: [], start: day.start, end: day.start, tokens: 0, successfulRequests: 0 };
+      week = { days: [], start: day.start };
       weeks.push(week);
     }
     week.days.push(day);
-    week.end = day.start;
-    week.tokens += day.tokens;
-    week.successfulRequests += day.successfulRequests;
   }
   return weeks;
 }
@@ -62,19 +55,13 @@ export function usageActivityLevel(value: number, thresholds: readonly number[])
   return value <= 0 ? 0 : 1 + thresholds.filter((threshold) => value >= threshold).length;
 }
 
-export function usageActivityWeekHeight(value: number, maximum: number): number {
-  return value <= 0 || maximum <= 0 ? 0 : Math.max(1, Math.ceil((value / maximum) * 7));
-}
-
 export function usageActivityFocusIndex(
   key: string,
   index: number,
   count: number,
-  view: UsageActivityView,
 ): number | null {
-  const step = view === 'daily' ? 7 : 1;
-  const next = key === 'ArrowLeft' ? index - step
-    : key === 'ArrowRight' ? index + step
+  const next = key === 'ArrowLeft' ? index - 7
+    : key === 'ArrowRight' ? index + 7
       : key === 'ArrowUp' ? index - 1
         : key === 'ArrowDown' ? index + 1
           : key === 'Home' ? 0

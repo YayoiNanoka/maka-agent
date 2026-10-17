@@ -119,7 +119,7 @@ While the heatmap is pending, the rest of the page is usable. Loading, failure,
 and stale notices stay in the heatmap section; a failure never discards ready
 totals or records. Refresh reloads the screen and then its matching heatmap.
 Filter/range changes and Host replacement fence late annual responses as well
-as late screen/page responses. Daily/weekly switching and hover remain local.
+as late screen/page responses. Exploring daily cells remains local.
 
 The Session Inspector's
 separate `usage:summary` API keeps its existing contract. No activity drain loop

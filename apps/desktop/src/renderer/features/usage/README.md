@@ -115,12 +115,11 @@ search input. See [the implementation contract](../../../../../../docs/architect
 ## Annual activity
 
 The overview includes a rolling twelve-month activity chart, independent of the
-headline range and activity filters. Desktop supplies local midnight boundaries
-in the screen query, so remote Hosts use the user's calendar (including DST).
-Storage returns every day's Token total and successful model request count in the
-same read transaction as the rest of the screen. Weekly columns sum those days
-locally; switching granularity never loads activity pages or refetches. Daily
-colour intensity and weekly column height always represent Token totals. Hover
+headline range and activity filters. After the statistics screen is ready, Desktop
+supplies local midnight boundaries in a separate, revision-bound heatmap query,
+so remote Hosts use the user's calendar (including DST). Storage validates that
+revision and returns every day's Token total and successful model request count
+in one read transaction. Daily colour intensity represents Token totals. Hover
 and keyboard details show both Tokens and requests. The chart follows the active
 palette and retains the snapshot's own time labels on a failed refresh. Request
 counts include only successful model attempts; Token totals retain the existing

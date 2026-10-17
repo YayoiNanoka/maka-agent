@@ -241,16 +241,11 @@
   gap: var(--space-3);
 }
 
-.settingsUsageActivityHeader,
 .settingsUsageActivityHeading {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
-}
-
-.settingsUsageActivityHeader {
-  justify-content: space-between;
 }
 
 .settingsUsageActivityHeading h3 {
@@ -318,10 +313,6 @@
 
 .settingsUsageActivityCell[data-level="4"] {
   background: var(--accent);
-}
-
-.settingsUsageActivityPoint {
-  border-radius: calc(var(--radius-control) / 2);
 }
 
 .settingsUsageActivityPoint:hover,

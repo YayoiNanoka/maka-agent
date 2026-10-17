@@ -18,7 +18,7 @@
  */
 
 import { useId, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
-import { EmptyState, SegmentedControl, SegmentedControlItem, Skeleton, Tooltip, VisuallyHidden } from '@astryxdesign/core';
+import { EmptyState, Skeleton, Tooltip, VisuallyHidden } from '@astryxdesign/core';
 import { resolveUsageHeatmapRange } from '@maka/core/settings';
 import { uiLocaleToIntlLocale } from '@maka/core/ui-locale';
 import { Banner, Button, useUiLocale } from '@maka/ui';
@@ -30,8 +30,6 @@ import {
   usageActivityFocusIndex,
   usageActivityLevel,
   usageActivityThresholds,
-  usageActivityWeekHeight,
-  type UsageActivityView,
 } from './usage-activity-model.js';
 
 export function UsageActivityHeatmap({ state, onRefresh, refreshing }: {
@@ -42,7 +40,6 @@ export function UsageActivityHeatmap({ state, onRefresh, refreshing }: {
   const heatmap = state.status === 'ready' ? state.value : null;
   const locale = useUiLocale();
   const copy = getUsageSettingsCopy(locale).heatmap;
-  const [view, setView] = useState<UsageActivityView>('daily');
   const [focusedStart, setFocusedStart] = useState<number | null>(null);
   const [loadingWeekCount] = useState(() => {
     const range = resolveUsageHeatmapRange(Date.now());
@@ -61,13 +58,11 @@ export function UsageActivityHeatmap({ state, onRefresh, refreshing }: {
       number: new Intl.NumberFormat(intlLocale),
     };
   }, [locale]);
-  const items = view === 'daily' ? heatmap?.days ?? [] : weeks;
+  const items = heatmap?.days ?? [];
   const savedFocusIndex = items.findIndex((item) => item.start === focusedStart);
   const focusIndex = savedFocusIndex < 0 ? items.length - 1 : savedFocusIndex;
-  const maximum = Math.max(0, ...weeks.map((week) => week.tokens));
   const weekCount = weeks.length || loadingWeekCount;
   const chartStyle = { '--usage-activity-weeks': weekCount } as CSSProperties;
-  const viewLabel = view === 'daily' ? copy.daily : copy.weekly;
   const firstDay = heatmap?.days[0];
   const lastDay = heatmap?.days.at(-1);
   const period = firstDay && lastDay
@@ -83,23 +78,21 @@ export function UsageActivityHeatmap({ state, onRefresh, refreshing }: {
   });
 
   function moveFocus(event: KeyboardEvent<HTMLElement>, index: number) {
-    const next = usageActivityFocusIndex(event.key, index, items.length, view);
+    const next = usageActivityFocusIndex(event.key, index, items.length);
     if (next === null) return;
     event.preventDefault();
     chartRef.current?.querySelector<HTMLElement>(`[data-activity-index="${next}"]`)?.focus();
   }
 
-  function detail(start: number, end: number, tokens: number, successfulRequests: number, isCurrentWeek = false) {
-    const date = view === 'daily' ? formatters.date.format(start) : formatters.date.formatRange(start, end);
+  function detail(start: number, tokens: number, successfulRequests: number) {
+    const date = formatters.date.format(start);
     const tokenValue = formatters.number.format(tokens);
     const requestValue = formatters.number.format(successfulRequests);
-    const currentWeek = isCurrentWeek && heatmap ? copy.currentWeek(formatters.date.format(heatmap.through)) : null;
     return {
-      label: `${date}${currentWeek ? ` · ${currentWeek}` : ''}; ${copy.tokens}: ${tokenValue}; ${copy.requests}: ${requestValue}`,
+      label: `${date}; ${copy.tokens}: ${tokenValue}; ${copy.requests}: ${requestValue}`,
       content: (
         <div className="settingsUsageActivityTooltip">
           <div>{date}</div>
-          {currentWeek ? <div>{currentWeek}</div> : null}
           <dl className="settingsUsageTokenTooltip">
             <div><dt>{copy.tokens}</dt><dd>{tokenValue}</dd></div>
             <div><dt>{copy.requests}</dt><dd>{requestValue}</dd></div>
@@ -111,19 +104,13 @@ export function UsageActivityHeatmap({ state, onRefresh, refreshing }: {
 
   return (
     <section className="settingsUsageActivity" aria-labelledby={headingId}>
-      <div className="settingsUsageActivityHeader">
-        <div className="settingsUsageActivityHeading">
+      <div className="settingsUsageActivityHeading">
           <h3 id={headingId}>{copy.title}</h3>
           {period ? (
             <Tooltip content={period} hasHoverIndication={false}>
               <span className="settingsUsageActivityPeriod">{copy.period}</span>
             </Tooltip>
           ) : <span className="settingsUsageActivityPeriod">{copy.period}</span>}
-        </div>
-        <SegmentedControl value={view} onChange={(value) => setView(value as UsageActivityView)} label={copy.viewAria} size="sm">
-          <SegmentedControlItem value="daily" label={copy.daily} />
-          <SegmentedControlItem value="weekly" label={copy.weekly} />
-        </SegmentedControl>
       </div>
       <VisuallyHidden id={helpId}>{copy.keyboardHelp}</VisuallyHidden>
       <div className="settingsUsageActivityScroll">
@@ -150,30 +137,15 @@ export function UsageActivityHeatmap({ state, onRefresh, refreshing }: {
           </div>
         ) : weeks.length === 0 ? <EmptyState title={copy.unavailable} isCompact /> : (
           <div className="settingsUsageActivityCanvas" style={chartStyle}>
-            <div className="settingsUsageActivityGrid" role="group" aria-label={`${copy.tokens} · ${viewLabel} · ${period}`} aria-describedby={helpId} ref={chartRef}>
+            <div className="settingsUsageActivityGrid" role="group" aria-label={`${copy.tokens} · ${copy.daily} · ${period}`} aria-describedby={helpId} ref={chartRef}>
               {weeks.map((week, weekIndex) => {
-                if (view === 'weekly') {
-                  const height = usageActivityWeekHeight(week.tokens, maximum);
-                  const tooltip = detail(week.start, week.end, week.tokens, week.successfulRequests, weekIndex === weeks.length - 1);
-                  return (
-                    <Tooltip key={`week-${week.start}`} content={tooltip.content} placement="below" focusTrigger="always" touchTrigger="tap" hasHoverIndication={false}>
-                      <span className="settingsUsageActivityWeek settingsUsageActivityPoint" role="img" aria-label={tooltip.label}
-                        tabIndex={weekIndex === focusIndex ? 0 : -1} data-activity-index={weekIndex}
-                        onFocus={() => setFocusedStart(week.start)} onKeyDown={(event) => moveFocus(event, weekIndex)}>
-                        {Array.from({ length: 7 }, (_, row) => (
-                          <span className="settingsUsageActivityCell" data-level={row >= 7 - height ? 4 : 0} aria-hidden="true" key={row} />
-                        ))}
-                      </span>
-                    </Tooltip>
-                  );
-                }
                 return (
                   <div className="settingsUsageActivityWeek" key={`days-${week.start}`}>
                     {Array.from({ length: 7 }, (_, row) => {
                       const day = week.days.find((item) => mondayIndex(item.start) === row);
                       if (!day) return <span className="settingsUsageActivityCell" aria-hidden="true" key={`padding-${row}`} />;
                       const index = weekIndex * 7 + row - mondayIndex(firstDay!.start);
-                      const tooltip = detail(day.start, day.start, day.tokens, day.successfulRequests);
+                      const tooltip = detail(day.start, day.tokens, day.successfulRequests);
                       return (
                         <Tooltip key={`day-${day.start}`} content={tooltip.content} placement="below" focusTrigger="always" touchTrigger="tap" hasHoverIndication={false}>
                           <span className="settingsUsageActivityCell settingsUsageActivityPoint" role="img" aria-label={tooltip.label}
@@ -198,13 +170,11 @@ export function UsageActivityHeatmap({ state, onRefresh, refreshing }: {
         )}
       </div>
       <div className="settingsUsageActivityFooter">
-        {view === 'daily' ? (
-          <div className="settingsUsageActivityLegend">
+        <div className="settingsUsageActivityLegend">
             <span>{copy.less}</span>
             {[0, 1, 2, 3, 4].map((level) => <span className="settingsUsageActivityCell" data-level={level} aria-hidden="true" key={level} />)}
             <span>{copy.more}</span>
-          </div>
-        ) : <span>{copy.weeklyScale}</span>}
+        </div>
       </div>
       {heatmap?.hasIncompleteUsage ? <p className="settingsUsageActivityNotice">{copy.incomplete}</p> : null}
     </section>

@@ -31,11 +31,11 @@ export type UsageSettingsCopy = {
   summaryOnly: string; showDetails: string; filteredEmpty: string; filteredEmptyHelp: string; requestEmpty: string;
   costUnavailable: string; incompleteTitle: string; incompleteBody: string;
   heatmap: {
-    title: string; period: string; viewAria: string;
-    tokens: string; requests: string; daily: string; weekly: string;
+    title: string; period: string;
+    tokens: string; requests: string; daily: string;
     loadFailed: string; stale: string; refreshHelp: string;
-    loading: string; unavailable: string; less: string; more: string; weeklyScale: string;
-    keyboardHelp: string; incomplete: string; currentWeek(date: string): string;
+    loading: string; unavailable: string; less: string; more: string;
+    keyboardHelp: string; incomplete: string;
   };
   tables: {
     providersAria: string; modelsAria: string; toolsAria: string; pricingAria: string; requestsAria: string;
@@ -47,12 +47,12 @@ export type UsageSettingsCopy = {
 };
 const settingsUsageCopyZhCn: UsageSettingsCopy = {
     heatmap: {
-      title: 'Token 活动', period: '最近 12 个月', viewAria: '活动统计粒度',
-      tokens: 'Token', requests: '请求数', daily: '每天', weekly: '每周',
+      title: 'Token 活动', period: '最近 12 个月',
+      tokens: 'Token', requests: '请求数', daily: '每天',
       loadFailed: '无法加载使用活动', stale: '使用活动已更新', refreshHelp: '请刷新以重新加载使用活动。其他统计仍可查看。',
-      loading: '正在加载使用活动', unavailable: '暂无使用活动数据', less: '少', more: '多', weeklyScale: '每列为一周，按 Token 总量显示高度',
-      keyboardHelp: '使用方向键查看日期或周，Home 跳到开头，End 跳到末尾。',
-      incomplete: '部分记录的用量不完整，实际用量可能更高。', currentWeek: (date) => `当周截至 ${date}`,
+      loading: '正在加载使用活动', unavailable: '暂无使用活动数据', less: '少', more: '多',
+      keyboardHelp: '使用方向键查看日期，Home 跳到开头，End 跳到末尾。',
+      incomplete: '部分记录的用量不完整，实际用量可能更高。',
     },
 
     staleTitle: "统计已更新", staleBody: "当前显示的是之前的完整结果。请刷新后继续浏览。", loadFailed: "无法加载使用统计", capacityBody: "统计结果超出显示容量，请求未返回任何部分数据。", retainedBody: "当前仍显示上次成功加载的结果，新查询尚未生效。",
@@ -81,12 +81,12 @@ const settingsUsageCopyZhCn: UsageSettingsCopy = {
   };
 const settingsUsageCopyZhTw: UsageSettingsCopy = {
     heatmap: {
-      title: 'Token 活動', period: '最近 12 個月', viewAria: '活動統計粒度',
-      tokens: 'Token', requests: '請求數', daily: '每天', weekly: '每週',
+      title: 'Token 活動', period: '最近 12 個月',
+      tokens: 'Token', requests: '請求數', daily: '每天',
       loadFailed: '無法載入使用活動', stale: '使用活動已更新', refreshHelp: '請重新整理以載入使用活動。其他統計仍可查看。',
-      loading: '正在載入使用活動', unavailable: '暫無使用活動資料', less: '少', more: '多', weeklyScale: '每欄為一週，按 Token 總量顯示高度',
-      keyboardHelp: '使用方向鍵查看日期或週，Home 跳到開頭，End 跳到末尾。',
-      incomplete: '部分記錄的用量不完整，實際用量可能更高。', currentWeek: (date) => `當週截至 ${date}`,
+      loading: '正在載入使用活動', unavailable: '暫無使用活動資料', less: '少', more: '多',
+      keyboardHelp: '使用方向鍵查看日期，Home 跳到開頭，End 跳到末尾。',
+      incomplete: '部分記錄的用量不完整，實際用量可能更高。',
     },
 
     staleTitle: "統計已更新", staleBody: "目前顯示先前的完整結果。請重新整理後繼續瀏覽。", loadFailed: "無法載入使用統計", capacityBody: "統計結果超出顯示容量，請求未傳回任何部分資料。", retainedBody: "目前仍顯示上次成功載入的結果，新查詢尚未生效。",
@@ -115,12 +115,12 @@ const settingsUsageCopyZhTw: UsageSettingsCopy = {
   };
 const settingsUsageCopyEn: UsageSettingsCopy = {
     heatmap: {
-      title: 'Token activity', period: 'Last 12 months', viewAria: 'Activity interval',
-      tokens: 'Tokens', requests: 'Requests', daily: 'Daily', weekly: 'Weekly',
+      title: 'Token activity', period: 'Last 12 months',
+      tokens: 'Tokens', requests: 'Requests', daily: 'Daily',
       loadFailed: 'Unable to load usage activity', stale: 'Usage activity has changed', refreshHelp: 'Refresh to reload usage activity. The other statistics remain available.',
-      loading: 'Loading usage activity', unavailable: 'No usage activity data', less: 'Less', more: 'More', weeklyScale: 'Each column is a week; height shows its token total',
-      keyboardHelp: 'Use arrow keys to explore days or weeks, Home for the beginning, and End for the end.',
-      incomplete: 'Some records have incomplete usage, so actual usage may be higher.', currentWeek: (date) => `Week through ${date}`,
+      loading: 'Loading usage activity', unavailable: 'No usage activity data', less: 'Less', more: 'More',
+      keyboardHelp: 'Use arrow keys to explore days, Home for the beginning, and End for the end.',
+      incomplete: 'Some records have incomplete usage, so actual usage may be higher.',
     },
 
     staleTitle: 'Usage has changed', staleBody: 'The previous complete result is still shown. Refresh to continue browsing.', loadFailed: 'Unable to load Usage', capacityBody: 'This complete result exceeds the display capacity. No partial result was loaded.', retainedBody: 'The last successfully loaded result is still shown; the new query has not taken effect.',
