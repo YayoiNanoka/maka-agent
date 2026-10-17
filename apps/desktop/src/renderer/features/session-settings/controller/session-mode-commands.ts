@@ -18,9 +18,8 @@
  */
 
 import type { SessionSummary } from '@maka/core/session';
-import type { NewTaskSettings, SessionSettingValues } from '../model/session-settings-contract.js';
+import type { NewTaskSettings, SessionSettingValues, SessionSettingsCommands } from '../model/session-settings-contract.js';
 import type { OrchestrationMode } from '@maka/core/orchestration';
-import type { SessionSettingsCommands } from '../model/session-settings-contract.js';
 
 /** The composer menu and slash commands share the same selected/new task rules. */
 export function createSessionModeCommands(input: {
@@ -31,17 +30,26 @@ export function createSessionModeCommands(input: {
 }) {
   const setPlanMode = (active: boolean): Promise<boolean> => {
     const sessionId = input.sessionId();
-    if (!sessionId) { input.commands.setNewTaskPlanMode(active); return Promise.resolve(true); }
+    if (!sessionId) {
+      input.commands.setNewTaskPlanMode(active);
+      return Promise.resolve(true);
+    }
     if (active === input.planMode()) return Promise.resolve(true);
     return input.commands.setPlanMode(sessionId, active);
   };
   const setOrchestrationMode = (mode: OrchestrationMode): Promise<boolean> => {
     const sessionId = input.sessionId();
-    if (!sessionId) { input.commands.setNewTaskOrchestrationMode(mode); return Promise.resolve(true); }
+    if (!sessionId) {
+      input.commands.setNewTaskOrchestrationMode(mode);
+      return Promise.resolve(true);
+    }
     if (mode === input.orchestrationMode()) return Promise.resolve(true);
     return input.commands.setOrchestrationMode(sessionId, mode);
   };
-  const setOrchestrationModeActive = (mode: Exclude<OrchestrationMode, 'default'>, active: boolean): Promise<boolean> => {
+  // Turning off Swarm must leave a Session already in Graph unchanged.
+  const setOrchestrationModeActive = (
+    mode: Exclude<OrchestrationMode, 'default'>, active: boolean,
+  ): Promise<boolean> => {
     if (active) return setOrchestrationMode(mode);
     if (input.orchestrationMode() !== mode) return Promise.resolve(true);
     return setOrchestrationMode('default');
@@ -49,7 +57,7 @@ export function createSessionModeCommands(input: {
   return { setPlanMode, setOrchestrationMode, setOrchestrationModeActive };
 }
 
-/** Optimistic settings and the pending first-send defaults have one presentation. */
+/** Each control keeps its own optimistic value, including before the summary loads. */
 export function deriveSessionSettingsPresentation<T extends SessionSummary>(
   session: T | undefined,
   sessionId: string | undefined,

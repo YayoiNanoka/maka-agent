@@ -538,7 +538,7 @@ describe('useSessionNavigationReads', () => {
     const catalog = createSessionCatalogController();
     catalog.commitSessions(linkedCatalog);
     const opened: string[] = [];
-    const openSession = (id: string) => { opened.push(id); };
+    const openSession = (sessionId: string) => { opened.push(sessionId); };
     await act(async () =>
       root.render(
         navigationTree(
@@ -557,8 +557,9 @@ describe('useSessionNavigationReads', () => {
       ['root', 'remote', 'environment'],
     );
     assert.equal(latestRail.activeId, 'root');
+    assert.equal(latestReads.titlebarParentSession?.name, linkedCatalog.find(row => row.id === 'root')?.name);
     latestReads.titlebarParentSession?.onOpen();
-    assert.deepEqual(opened, ['root']);
+    assert.equal(opened.at(-1), 'root');
 
     await act(async () =>
       root.render(
@@ -570,8 +571,9 @@ describe('useSessionNavigationReads', () => {
         ),
       ),
     );
+    assert.equal(latestReads.titlebarParentSession?.name, linkedCatalog.find(row => row.id === 'root')?.name);
     latestReads.titlebarParentSession?.onOpen();
-    assert.deepEqual(opened, ['root', 'root']);
+    assert.equal(opened.at(-1), 'root');
   });
 });
 

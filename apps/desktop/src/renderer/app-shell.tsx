@@ -272,6 +272,7 @@ function AppShellContent({
     openProjectSettings,
     openProviderCatalog,
     openConnectionDetail,
+    openExternalAgentSettings,
     openProviderCreate,
     setSettingsProfileId,
   } = overlays.commands;
@@ -508,8 +509,10 @@ function AppShellContent({
   }
 
   const { setPlanMode, setOrchestrationMode, setOrchestrationModeActive } = createSessionModeCommands({
-    sessionId: () => activeIdRef.current, planMode: () => activePlanMode,
-    orchestrationMode: () => activeOrchestrationMode, commands: sessionSettingIntent.commands,
+    sessionId: () => activeIdRef.current,
+    planMode: () => activePlanMode,
+    orchestrationMode: () => activeOrchestrationMode,
+    commands: sessionSettingIntent.commands,
   });
 
   const openSessionInChatRef = useRef<
@@ -828,8 +831,14 @@ function AppShellContent({
     themePalette,
     themePref,
   });
-  const { captureComposerImportOwner, isShellSurfaceOwnerActive, isComposerImportOwnerActive, isNewChatSendSurfaceActive } =
-    Conversation.createComposerSurfaceOwner({ activeIdRef, navSelectionRef, newTaskDraftKey: currentNewTaskDraftKey, isSessionSelected });
+  const {
+    captureComposerImportOwner,
+    isShellSurfaceOwnerActive,
+    isComposerImportOwnerActive,
+    isNewChatSendSurfaceActive,
+  } = Conversation.createComposerSurfaceOwner({
+    activeIdRef, navSelectionRef, newTaskDraftKey: currentNewTaskDraftKey, isSessionSelected,
+  });
 
   function bootstrapSessions() { return sessionWindow.bootstrap(refreshSessions, readSelectionRevision, openSession); }
 
@@ -1281,7 +1290,7 @@ function AppShellContent({
                   onDeleteQueuedEntry={activeId ? queueSurface.deleteQueuedEntry : undefined}
                   onReorderQueuedEntries={activeId ? queueSurface.reorderQueuedEntries : undefined}
                   contextPickEnabled={canStageComposerContext}
-                  executorComposer={{ selection: executor, taskSubmissionHardBlocked, connectionCount: connections.length, onSetup: () => openSettingsSection('external-agents'), onNewTask: createSession }}
+                  executorComposer={{ selection: executor, taskSubmissionHardBlocked, connectionCount: connections.length, onSetup: sessionWindow.standalone ? openSettings : openExternalAgentSettings, onNewTask: createSession }}
                   activeSession={activeSessionForView}
                   {...{ executorTarget, onExecutorTargetChange }}
                   usageModel={activeModel}

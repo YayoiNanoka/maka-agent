@@ -25,7 +25,10 @@ export interface ComposerSurfaceOwner {
   newTaskDraftKey?: string;
 }
 
-/** Async composer work must still belong to the visible session or new-task draft. */
+/**
+ * Async composer work must still belong to the visible session or new-task draft.
+ * Navigation away from chat keeps the selected session, so the section matters too.
+ */
 export function createComposerSurfaceOwner(input: {
   activeIdRef: { current: string | undefined };
   navSelectionRef: { current: NavSelection };
@@ -38,11 +41,17 @@ export function createComposerSurfaceOwner(input: {
     ...(input.activeIdRef.current === undefined ? { newTaskDraftKey: input.newTaskDraftKey } : {}),
   });
   const isShellSurfaceOwnerActive = (owner: ComposerSurfaceOwner) =>
-    input.navSelectionRef.current.section === owner.navSection && input.isSessionSelected(owner.sessionId) &&
+    input.navSelectionRef.current.section === owner.navSection &&
+    input.isSessionSelected(owner.sessionId) &&
     (owner.sessionId !== undefined || owner.newTaskDraftKey === input.newTaskDraftKey);
   const isComposerImportOwnerActive = (owner: ComposerSurfaceOwner) =>
     owner.navSection === 'sessions' && isShellSurfaceOwnerActive(owner);
   const isNewChatSendSurfaceActive = (owner: ComposerSurfaceOwner) =>
     owner.sessionId === undefined && isComposerImportOwnerActive(owner);
-  return { captureComposerImportOwner, isShellSurfaceOwnerActive, isComposerImportOwnerActive, isNewChatSendSurfaceActive };
+  return {
+    captureComposerImportOwner,
+    isShellSurfaceOwnerActive,
+    isComposerImportOwnerActive,
+    isNewChatSendSurfaceActive,
+  };
 }

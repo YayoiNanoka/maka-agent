@@ -37,7 +37,7 @@ import type { SessionNavigationSession } from '../ports.js';
 
 export interface SessionNavigationReads {
   revisionNavigation: SessionRevisionNavigation | undefined;
-  /** The active Session's parent breadcrumb uses the same window-aware routing. */
+  /** The active Session's parent breadcrumb and navigation action. */
   titlebarParentSession: { name: string; onOpen(): void } | undefined;
   layout: SessionRailLayoutState;
 }
