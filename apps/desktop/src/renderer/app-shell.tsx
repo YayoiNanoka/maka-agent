@@ -32,7 +32,6 @@ import {
   type SetStateAction,
 } from 'react';
 import type { QuoteRef } from '@maka/core/events';
-import type { OrchestrationMode } from '@maka/core/orchestration';
 import type { UiLocale, UiLocalePreference } from '@maka/core/ui-locale';
 import { collapseSessionRevisions } from '@maka/core/session-revisions';
 import { isLinkedSubagentSession } from '@maka/core/session';
@@ -97,7 +96,7 @@ import * as Diagnostics from './features/diagnostics/index.js';
 import { getDesktopConversationCopy } from './application/contracts/conversation-copy';
 import { ErrorBoundary } from './error-boundary';
 import { useShellAppearance } from './use-shell-appearance';
-import { SessionSettingsProvider, useSessionSettingIntent } from './features/session-settings';
+import { SessionSettingsProvider, useSessionSettingIntent, createSessionModeCommands, deriveSessionSettingsPresentation } from './features/session-settings';
 import { pendingSessionView } from './pending-session-view';
 import { readScrollMotionBehavior } from './scroll-motion-policy';
 import { readNavigationState, selectNavigation } from './nav-selection';
@@ -135,12 +134,6 @@ import { useShellConnections } from './use-shell-connections';
 
 import { useSystemUiLocale } from './use-system-ui-locale';
 import { AppShell as AstryxAppShell } from '@astryxdesign/core/AppShell';
-
-type ComposerImportOwner = {
-  sessionId: string | undefined;
-  navSection: NavSelection['section'];
-  newTaskDraftKey?: string;
-};
 
 export function AppShell() {
   const [uiLocalePreference, setUiLocalePreference] = useState<UiLocalePreference>('auto');
@@ -423,20 +416,8 @@ function AppShellContent({
   const composerEditing = queueSurface.editing;
   const rendererMountedRef = useRef(true);
   const { setPermissionMode, setSessionModel, setSessionThinkingLevel, setSessionExecutor } = sessionSettingIntent.commands;
-  const modelConfigurationOverlay = sessionSettingIntent.overlay.modelConfiguration;
-  const activeSessionForModelControls = activeSession
-    ? {
-        ...activeSession,
-        ...(modelConfigurationOverlay
-          ? {
-              llmConnectionId: modelConfigurationOverlay.modelTarget.llmConnectionId,
-              llmConnectionSlug: modelConfigurationOverlay.modelTarget.llmConnectionSlug,
-              model: modelConfigurationOverlay.modelTarget.model,
-              thinkingLevel: modelConfigurationOverlay.thinkingLevel ?? undefined,
-            }
-          : {}),
-      }
-    : undefined;
+  const { activeSessionForModelControls, activePlanMode, activeOrchestrationMode } =
+    deriveSessionSettingsPresentation(activeSession, activeId, sessionSettingIntent);
   // Surface a credential-lifecycle alert directly in the chat header when
   // the active session's connection is in `needs_reauth` / `error` or has
   // been deleted entirely with no usable default. Main resolves credential
@@ -517,43 +498,12 @@ function AppShellContent({
     sessionSettingIntent.commands.clear(sessionId);
   }
 
-  // Stable: the rail's row actions are built from it, and it only reaches
-  // registries and refs that are themselves stable (#4109).
-  function setPlanMode(active: boolean): Promise<boolean> {
-    const sessionId = activeIdRef.current;
-    if (!sessionId) {
-      sessionSettingIntent.commands.setNewTaskPlanMode(active);
-      return Promise.resolve(true);
-    }
-    if (active === activePlanMode) return Promise.resolve(true);
-    return sessionSettingIntent.commands.setPlanMode(sessionId, active);
-  }
-
-  /**
-   * The ＋ menu's orchestration choice and the `/swarm` and `/graph` commands
-   * all land here, so every entry point spells the field the same way.
-   *
-   * `/swarm off` means "leave swarm", not "go to default": a Session already
-   * in Graph has nothing for it to do.
-   */
-  function setOrchestrationMode(mode: OrchestrationMode): Promise<boolean> {
-    const sessionId = activeIdRef.current;
-    if (!sessionId) {
-      sessionSettingIntent.commands.setNewTaskOrchestrationMode(mode);
-      return Promise.resolve(true);
-    }
-    if (mode === activeOrchestrationMode) return Promise.resolve(true);
-    return sessionSettingIntent.commands.setOrchestrationMode(sessionId, mode);
-  }
-
-  function setOrchestrationModeActive(
-    mode: Exclude<OrchestrationMode, 'default'>,
-    active: boolean,
-  ): Promise<boolean> {
-    if (active) return setOrchestrationMode(mode);
-    if (activeOrchestrationMode !== mode) return Promise.resolve(true);
-    return setOrchestrationMode('default');
-  }
+  const { setPlanMode, setOrchestrationMode, setOrchestrationModeActive } = createSessionModeCommands({
+    sessionId: () => activeIdRef.current,
+    planMode: () => activePlanMode,
+    orchestrationMode: () => activeOrchestrationMode,
+    commands: sessionSettingIntent.commands,
+  });
 
   const openSessionInChatRef = useRef<
     (sessionId: string, turnId?: string, sequence?: number) => void
@@ -598,18 +548,6 @@ function AppShellContent({
         permissionMode: newSessionPermissionMode,
       })
     : undefined);
-  // Each control reads its own field. There is nothing to project and nothing
-  // to keep in sync: a Session in Plan with Swarm as its orchestration default
-  // says both, because it is both.
-  const activePlanMode = activeId
-    ? sessionSettingIntent.overlay.planMode
-      ?? ((activeSessionForView?.collaborationMode ?? 'agent') === 'plan')
-    : newTaskSettings.planMode;
-  const activeOrchestrationMode: OrchestrationMode = activeId
-    ? sessionSettingIntent.overlay.orchestrationMode
-      ?? activeSessionForView?.orchestrationMode
-      ?? 'default'
-    : newTaskSettings.orchestrationMode;
   const {
     boundary: activeExecutionBoundary,
     unreadable: activeExecutionBoundaryUnreadable,
@@ -809,20 +747,14 @@ function AppShellContent({
   };
   const {
     revisionNavigation,
-    activeParentSession,
+    titlebarParentSession,
     layout: { collapsed: sessionListCollapsed, width: sessionListWidth },
   } = useSessionNavigationReads({
     catalog: sessionCatalogController,
     activeSessionId: activeId,
+    openSession: openSessionInChat,
   });
   const sessionSideNavHandleRef = sessionRailLayoutStore.collapseHandleRef;
-  const titlebarParentSession = useMemo(() => {
-    if (!activeParentSession) return undefined;
-    return {
-      name: activeParentSession.name,
-      onOpen: () => openSessionInChatRef.current(activeParentSession.id),
-    };
-  }, [activeParentSession]);
   const archivedTasksBridge = useMemo<ArchivedTasksBridge>(
     () => ({
       catalog: sessionCatalogController,
@@ -884,44 +816,14 @@ function AppShellContent({
     themePalette,
     themePref,
   });
-  function captureComposerImportOwner(): ComposerImportOwner {
-    return {
-      sessionId: activeIdRef.current,
-      navSection: navSelectionRef.current.section,
-      ...(activeIdRef.current === undefined
-        ? { newTaskDraftKey: currentNewTaskDraftKey }
-        : {}),
-    };
-  }
-
-  /**
-   * "Is this owner still the surface the user is looking at." One rule, both
-   * halves: an async result that lands after the user moved on must not toast,
-   * navigate or steal focus, and `selectNavigation` never clears `activeId`
-   * (nav-selection.ts) — so the session id alone answers yes long after the
-   * user left for 扩展 or 设置.
-   *
-   * The two below are this same question with a precondition on what KIND of
-   * owner the caller wants, not second opinions about the question. They were
-   * three independent spellings once, and the one that re-derived it from an
-   * id drifted: it lost the section half, which is exactly what let a failed
-   * send pull a user out of 技能 and into 设置 · 模型.
-   */
-  function isShellSurfaceOwnerActive(owner: ComposerImportOwner): boolean {
-    return navSelectionRef.current.section === owner.navSection &&
-      isSessionSelected(owner.sessionId) &&
-      (owner.sessionId !== undefined || owner.newTaskDraftKey === currentNewTaskDraftKey);
-  }
-
-  /** …and the owner was captured on the chat surface. */
-  function isComposerImportOwnerActive(owner: ComposerImportOwner): boolean {
-    return owner.navSection === 'sessions' && isShellSurfaceOwnerActive(owner);
-  }
-
-  /** …and it was the new-chat surface, which by definition has no session. */
-  function isNewChatSendSurfaceActive(owner: ComposerImportOwner): boolean {
-    return owner.sessionId === undefined && isComposerImportOwnerActive(owner);
-  }
+  const {
+    captureComposerImportOwner,
+    isShellSurfaceOwnerActive,
+    isComposerImportOwnerActive,
+    isNewChatSendSurfaceActive,
+  } = Conversation.createComposerSurfaceOwner({
+    activeIdRef, navSelectionRef, newTaskDraftKey: currentNewTaskDraftKey, isSessionSelected,
+  });
 
   async function bootstrapSessions() {
     const next = await refreshSessions();

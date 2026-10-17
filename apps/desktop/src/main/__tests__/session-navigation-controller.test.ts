@@ -537,12 +537,14 @@ describe('useSessionNavigationReads', () => {
     const { root } = installReactRenderer();
     const catalog = createSessionCatalogController();
     catalog.commitSessions(linkedCatalog);
+    const opened: string[] = [];
+    const openSession = (sessionId: string) => { opened.push(sessionId); };
     await act(async () =>
       root.render(
         navigationTree(
           catalog,
           { activeSessionId: 'child', workHubActive: false },
-          createElement(ReadsProbe, { catalog, activeSessionId: 'child' }),
+          createElement(ReadsProbe, { catalog, activeSessionId: 'child', openSession }),
           createElement(RailProbe),
         ),
       ),
@@ -555,19 +557,23 @@ describe('useSessionNavigationReads', () => {
       ['root', 'remote', 'environment'],
     );
     assert.equal(latestRail.activeId, 'root');
-    assert.equal(latestReads.activeParentSession?.id, 'root');
+    assert.equal(latestReads.titlebarParentSession?.name, linkedCatalog.find(row => row.id === 'root')?.name);
+    latestReads.titlebarParentSession?.onOpen();
+    assert.equal(opened.at(-1), 'root');
 
     await act(async () =>
       root.render(
         navigationTree(
           catalog,
           { activeSessionId: 'side-conversation', workHubActive: false },
-          createElement(ReadsProbe, { catalog, activeSessionId: 'side-conversation' }),
+          createElement(ReadsProbe, { catalog, activeSessionId: 'side-conversation', openSession }),
           null,
         ),
       ),
     );
-    assert.equal(latestReads.activeParentSession?.id, 'root');
+    assert.equal(latestReads.titlebarParentSession?.name, linkedCatalog.find(row => row.id === 'root')?.name);
+    latestReads.titlebarParentSession?.onOpen();
+    assert.equal(opened.at(-1), 'root');
   });
 });
 

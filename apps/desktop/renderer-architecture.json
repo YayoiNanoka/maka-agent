@@ -354,6 +354,7 @@
         "TaskReadinessProvider",
         "createComposerStagingCommands",
         "createComposerSubmissionCommands",
+        "createComposerSurfaceOwner",
         "createExecutorSessionActivator",
         "resolveTaskReadinessModelTarget",
         "useActiveExecutionBoundary",
@@ -467,6 +468,8 @@
     "src/renderer/features/session-settings/index.ts": {
       "appShell": [
         "SessionSettingsProvider",
+        "createSessionModeCommands",
+        "deriveSessionSettingsPresentation",
         "useSessionSettingIntent"
       ],
       "composition": [
@@ -743,7 +746,7 @@
           "react": 1
         },
         "importSpecifiers": 43,
-        "nonTriviaTokens": 7276
+        "nonTriviaTokens": 6843
       },
       "src/renderer/use-app-shell-session-list.ts": {
         "importDeclarations": 3,
