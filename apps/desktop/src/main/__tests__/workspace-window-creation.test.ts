@@ -217,4 +217,3 @@ test('concurrent main creation shares the asynchronous construction and one regi
   assert.equal(h.windows.length, 2);
   assert.equal(h.registry.main()?.window, h.windows[1]);
 });
-
