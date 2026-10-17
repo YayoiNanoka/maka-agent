@@ -20,72 +20,78 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
+import { deferred } from '@maka/core/test-only/async-primitives';
 import { createSessionWindowCoordinator, registerSessionWindowIpc } from '../session-window-coordinator.js';
 import { createWorkspaceWindowRegistry } from '../workspace-window-registry.js';
-import type { SessionWindowCommand, SessionWindowContext, SessionWindowGroup } from '../../shared/session-window-contract.js';
-import type { SessionWorkspaceSnapshot } from '../../shared/session-workspace-state.js';
+import { createSessionWindowCommandHandler } from '../../renderer/features/session-windows/testing.js';
+import type { SessionWindowCommand, SessionWindowContext, SessionWindowGroup, SessionWindowOwnership } from '../../shared/session-window-contract.js';
 
-const snapshot = (): SessionWorkspaceSnapshot => ({ capturedAt: 1, drafts: [], sideConversations: [] });
 const group: SessionWindowGroup = { hostId: 'local', groupId: 'A', sessionIds: ['A', 'A-child', 'A-version'] };
-
+const single = (id: string): SessionWindowGroup => ({ hostId: 'local', groupId: id, sessionIds: [id] });
 function harness() {
   const registry = createWorkspaceWindowRegistry();
-  const mainCommands: string[] = [];
-  let closeGate: { started(): void; wait: Promise<void> } | undefined;
-  const commands: Array<{ windowId: string; command: SessionWindowCommand }> = [];
+  const commands: { windowId: string; kind: SessionWindowCommand['kind'] }[] = [];
   const errors: unknown[] = [];
-  const migrations: string[] = [];
-  const saves: string[] = [];
-  const loads: string[] = [];
-  const released: string[] = [];
-  const drafts = new Map<string, string>();
-  let restoreGate: { started(): void; wait: Promise<void> } | undefined;
-  const toSnapshot = (entries: readonly [string, string][]): SessionWorkspaceSnapshot => ({
-    ...snapshot(), drafts: entries.map(([sessionId, text]) => ({ sessionId, text, references: [], attachments: [], directoryReferences: [], quotes: [] })),
-  });
-  let failRestore: 'main' | 'session' | undefined;
-  let prepareWait: Promise<void> | undefined;
-  let failSave = false;
-  let failAdopt = false;
-  let failConfirmation = false;
-  let closeAnyway = false;
-  const closeWarnings: readonly string[][] = [];
-  let failLoad = false;
-  let failRelease = false;
+  const resources: string[] = [];
+  const known = [group, single('B')];
   let nextId = 0;
+  let failCreation = false;
+  let failReceive: 'main' | 'session' | undefined;
+  let failResources = false;
+  let dropReply: SessionWindowCommand['kind'] | undefined;
+  let transferGate: { entered(): void; wait: Promise<void> } | undefined;
+  let confirmation: boolean | Error = false;
+  let confirmations = 0;
+  let quitting = false;
   let coordinator: ReturnType<typeof createSessionWindowCoordinator>;
   class FakeWindow extends EventEmitter {
     readonly id = String(++nextId);
-    private readonly contents = Object.assign(new EventEmitter(), {
-      id: Number(this.id),
-      isDestroyed: () => this.destroyed,
-      send: (channel: string, command: SessionWindowCommand) => {
-        if (channel !== 'session-window:command') { mainCommands.push(channel); return; }
-        commands.push({ windowId: this.id, command });
-        queueMicrotask(async () => {
-          if (command.kind === 'prepare-transfer' && prepareWait) await prepareWait;
-          if (restoreGate && command.kind === 'restore' && this.context.kind === 'main') {
-            const gate = restoreGate; restoreGate = undefined; gate.started(); await gate.wait;
+    destroyed = false;
+    focused = false;
+    revealed = false;
+    frozen = false;
+    unsupported = false;
+    active: string | undefined;
+    readonly drafts = new Map<string, string>();
+    readonly context: SessionWindowContext;
+    handler = this.createHandler();
+    private createHandler() { return createSessionWindowCommandHandler({
+      activeSessionId: () => this.active,
+      freeze: (value) => { this.frozen = value; },
+      capture: (ids) => {
+        if (this.unsupported) throw new Error('Send or clear staged content');
+        return ids.map((sessionId) => ({ sessionId, text: this.drafts.get(sessionId) ?? '', references: [] }));
+      },
+      hasUnsent: (ids) => this.unsupported || ids.some((id) => Boolean(this.drafts.get(id)?.trim())),
+      restore: (drafts) => { for (const draft of drafts) this.drafts.set(draft.sessionId, draft.text); },
+      clear: (ids) => { for (const id of ids) this.drafts.delete(id); },
+      navigate: ({ sessionId }) => { this.active = sessionId; },
+      suspend: (ids) => { if (ids.includes(this.active ?? '')) this.active = undefined; },
+    }); }
+    resetRenderer() { this.drafts.clear(); this.active = undefined; this.handler = this.createHandler(); }
+    readonly contents = Object.assign(new EventEmitter(), {
+      id: Number(this.id), isDestroyed: () => this.destroyed,
+      send: (channel: string, payload: SessionWindowCommand | SessionWindowOwnership) => {
+        if (channel === 'session-window:ownership') {
+          this.handler.ownershipChanged(new Set((payload as SessionWindowOwnership).sessionIds));
+          return;
+        }
+        if (channel !== 'session-window:command') return;
+        const command = payload as SessionWindowCommand;
+        commands.push({ windowId: this.id, kind: command.kind });
+        queueMicrotask(() => {
+          if (this.destroyed) return;
+          try {
+            if (command.kind === 'receive' && this.context.kind === failReceive) {
+              failReceive = undefined;
+              throw new Error('receive failed');
+            }
+            const result = this.handler.execute(command);
+            if (command.kind === dropReply) { dropReply = undefined; return; }
+            coordinator.reply(this.contents as never, { requestId: command.requestId, ok: true, result });
+          } catch (error) {
+            coordinator.reply(this.contents as never, { requestId: command.requestId, ok: false, error: String(error) });
           }
-          const shouldFail = command.kind === 'restore' && this.context.kind === failRestore;
-          if (shouldFail) failRestore = undefined;
-          const captured = command.kind === 'prepare-transfer'
-            ? toSnapshot([...this.drafts].filter(([id]) => command.group.sessionIds.includes(id)))
-            : toSnapshot([...this.drafts]);
-          const result = { snapshot: captured, activeSessionId: this.active };
-          if (!shouldFail) {
-            if (command.kind === 'clear') {
-              for (const id of command.group.sessionIds) this.drafts.delete(id);
-              if (command.group.sessionIds.includes(this.active ?? '')) this.active = undefined;
-            } else if (command.kind === 'restore') {
-              for (const draft of command.snapshot.drafts) this.drafts.set(draft.sessionId, draft.text);
-              this.active = command.navigation.sessionId;
-            } else if (command.kind === 'navigate') this.active = command.navigation.sessionId;
-            else if (command.kind === 'resume' && command.navigation !== undefined) this.active = command.navigation?.sessionId;
-          }
-          coordinator.reply(this.contents as never, shouldFail
-            ? { requestId: command.requestId, ok: false, error: 'restore failed' }
-            : { requestId: command.requestId, ok: true, result });
         });
       },
     });
@@ -93,19 +99,14 @@ function harness() {
       if (this.destroyed) throw new Error('Object has been destroyed');
       return this.contents;
     }
-    destroyed = false;
-    focused = false;
-    revealed = false;
-    active: string | undefined = 'A';
-    readonly drafts = new Map<string, string>();
-    context: SessionWindowContext;
     constructor(context: Omit<Extract<SessionWindowContext, { kind: 'session' }>, 'windowId'> | { kind: 'main' }) {
       super();
       this.context = { ...context, windowId: this.id };
+      this.active = context.kind === 'main' ? 'A' : undefined;
     }
     isDestroyed() { return this.destroyed; }
     isFocused() { return this.focused; }
-    destroy() { this.destroyed = true; this.emit('closed'); }
+    destroy() { if (this.destroyed) return; this.destroyed = true; this.emit('closed'); }
     close() {
       const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
       this.emit('close', event);
@@ -115,411 +116,212 @@ function harness() {
   const windows: FakeWindow[] = [];
   function add(context: Omit<Extract<SessionWindowContext, { kind: 'session' }>, 'windowId'> | { kind: 'main' }) {
     const window = new FakeWindow(context);
-    const controller = {
-      browserWindow: () => window,
-      reveal: () => { window.revealed = true; },
-      focus: () => { window.focused = true; },
-    };
+    const controller = { browserWindow: () => window, reveal: () => { window.revealed = true; }, focus: () => { window.focused = true; } };
     registry.register({ context: window.context, window: window as never, controller: controller as never });
     windows.push(window);
-    if (coordinator) coordinator.sessionWindowReady(window.webContents as never);
+    if (coordinator) coordinator.sessionWindowReady(window.contents as never);
     return { window, controller };
   }
   const main = add({ kind: 'main' }).window;
   coordinator = createSessionWindowCoordinator({
-    windows: { registry, createSessionWindow: async (context: any) => add(context).controller } as never,
+    windows: { registry, createSessionWindow: async (context: Parameters<typeof add>[0]) => {
+      if (failCreation) throw new Error('creation failed');
+      return add(context).controller;
+    } } as never,
     signal: new AbortController().signal,
     ensureMainWindow: async () => { if (!registry.main()) add({ kind: 'main' }); },
-    resolveGroup: async (id) => group.sessionIds.includes(id) ? group : { hostId: 'local', groupId: id, sessionIds: [id] },
-    saveSnapshot: async (sender, state) => { if (failSave) throw new Error('attachment unavailable'); saves.push(String(sender.id)); for (const draft of state.drafts) drafts.set(draft.sessionId, draft.text); },
-    saveForClose: async (sender, state) => {
-      saves.push(String(sender.id));
-      for (const draft of state.drafts) drafts.set(draft.sessionId, draft.text);
-      return { snapshot: state, losses: failSave ? ['attachment unavailable'] : [] };
+    resolveGroup: async (id) => known.find((item) => item.sessionIds.includes(id)) ?? single(id),
+    knownGroups: () => known,
+    confirmClose: async () => { confirmations += 1; if (confirmation instanceof Error) throw confirmation; return confirmation; },
+    transferResources: async ({ source, target }) => {
+      resources.push(`${source?.id}->${target.id}`);
+      if (transferGate) { const gate = transferGate; transferGate = undefined; gate.entered(); await gate.wait; }
+      if (failResources) { failResources = false; throw new Error('resource transfer failed'); }
     },
-    confirmClose: async (_sender, losses) => {
-      (closeWarnings as string[][]).push([...losses]);
-      if (closeGate) { const gate = closeGate; closeGate = undefined; gate.started(); await gate.wait; }
-      if (failConfirmation) throw new Error('confirmation failed');
-      return closeAnyway;
-    },
-    adoptSnapshot: async (_sender, snapshot) => {
-      if (failAdopt) throw new Error('copy no longer available');
-      for (const draft of snapshot.drafts) drafts.delete(draft.sessionId);
-    },
-    loadSnapshot: async (sender, ids) => { if (failLoad) throw new Error('recovery capacity'); loads.push(String(sender.id)); return toSnapshot([...drafts].filter(([id]) => ids.includes(id))); },
-    forgetSnapshot: (_sender, snapshot) => { for (const draft of snapshot.drafts) drafts.delete(draft.sessionId); },
-    releaseSnapshot: (sender) => { released.push(String(sender.id)); },
-    transferResources: async ({ source, target }) => { migrations.push(`${source?.id}->${target.id}`); },
-    releaseResources: () => { if (failRelease) throw new Error('resource release failed'); },
-    isQuitting: () => false,
-    onError: (error) => { errors.push(error); },
-    commandTimeoutMs: 30,
+    releaseResources: (sender) => { resources.push(`release:${sender.id}`); },
+    isQuitting: () => quitting, onError: (error) => { errors.push(error); }, commandTimeoutMs: 30,
   });
-  coordinator.sessionWindowReady(main.webContents as never);
+  coordinator.sessionWindowReady(main.contents as never);
   return {
-    coordinator, registry, main, windows, commands, errors, migrations, saves, loads, released,
-    pauseNextMainRestore() {
-      let started!: () => void;
-      let release!: () => void;
-      const entered = new Promise<void>((resolve) => { started = resolve; });
-      const wait = new Promise<void>((resolve) => { release = resolve; });
-      restoreGate = { started, wait };
-      return { entered, release };
-    },
-    drafts, closeWarnings, mainCommands,
-    pauseCloseConfirmation() {
-      let started!: () => void;
-      let release!: () => void;
-      const entered = new Promise<void>((resolve) => { started = resolve; });
-      closeGate = { started, wait: new Promise<void>((resolve) => { release = resolve; }) };
-      return { entered, release };
-    },
-    closeAnyway: () => { closeAnyway = true; },
-    failRestore: () => { failRestore = 'session'; },
-    failMainRestore: () => { failRestore = 'main'; },
-    delayPrepare: (wait: Promise<void>) => { prepareWait = wait; },
-    failSave: () => { failSave = true; },
-    failAdopt: () => { failAdopt = true; },
-    failConfirmation: () => { failConfirmation = true; },
-    failLoad: () => { failLoad = true; },
-    failRelease: () => { failRelease = true; },
+    coordinator, main, windows, commands, resources, errors, known,
+    open: (id = 'A') => coordinator.openSessionWindow(main.contents as never, id),
+    returnToMain: (window = windows.at(-1)!) => coordinator.openInMainWindow(window.contents as never),
+    failCreation: () => { failCreation = true; },
+    failReceive: (kind: 'main' | 'session') => { failReceive = kind; },
+    failResources: () => { failResources = true; },
+    dropReply: (kind: SessionWindowCommand['kind']) => { dropReply = kind; },
+    gate: (value: NonNullable<typeof transferGate>) => { transferGate = value; },
+    confirm: (value: boolean | Error) => { confirmation = value; },
+    confirmations: () => confirmations,
+    quit: () => { quitting = true; },
   };
 }
+const settle = () => new Promise((resolve) => setImmediate(resolve));
 
-const settle = async (): Promise<void> => { await new Promise((resolve) => setTimeout(resolve, 10)); };
-
-test('duplicate opens and group members share one independent window', async () => {
+test('opening a family parks its source, moves all drafts and admits only one owner', async () => {
   const h = harness();
-  await Promise.all([
-    h.coordinator.openSessionWindow(h.main.webContents as never, 'A'),
-    h.coordinator.openSessionWindow(h.main.webContents as never, 'A-child'),
-  ]);
-  assert.equal(h.windows.length, 2);
+  h.main.drafts.set('A', 'root draft'); h.main.drafts.set('A-child', 'child draft');
+  await h.open();
   const child = h.windows[1]!;
+  assert.equal(h.main.active, undefined);
+  assert.equal(h.main.drafts.has('A'), false);
+  assert.equal(child.active, 'A');
+  assert.equal(child.drafts.get('A-child'), 'child draft');
   assert.equal(child.revealed, true);
-  assert.equal(h.coordinator.ownerForSession('A-version'), child.webContents);
-  assert.equal(h.coordinator.canUseSession(h.main.webContents as never, 'A'), false);
-  assert.equal(await h.coordinator.routeSession(h.main.webContents as never, { sessionId: 'A-version' }), 'routed');
-  assert.equal(await h.coordinator.routeSession(child.webContents as never, { sessionId: 'A-child' }), 'local');
-  assert.equal(h.commands.filter(({ command }) => command.kind === 'clear').length, 1);
-  assert.deepEqual(h.loads, ['2'], 'only the receiving renderer gets attachment recovery handles');
+  assert.equal(child.frozen, false);
+  for (const id of group.sessionIds) {
+    assert.equal(h.coordinator.canUseSession(child.contents as never, id), true);
+    assert.equal(h.coordinator.canUseSession(h.main.contents as never, id), false);
+  }
+  h.coordinator.dispose();
 });
 
-test('unrelated child navigation targets the main window without replacing the child', async () => {
-  const h = harness();
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
+test('an inactive family leaves the main selection and unrelated drafts untouched', async () => {
+  const h = harness(); h.main.active = 'B'; h.main.drafts.set('B', 'keep B'); h.main.drafts.set('A', 'move A');
+  await h.open();
+  assert.equal(h.main.active, 'B'); assert.equal(h.main.drafts.get('B'), 'keep B');
+  const child = h.windows[1]!; child.active = 'A-child'; child.drafts.set('A-child', 'edited child');
+  await h.returnToMain();
+  assert.equal(h.main.active, 'A-child'); assert.equal(h.main.drafts.get('B'), 'keep B');
+  assert.equal(h.main.drafts.get('A-child'), 'edited child'); assert.equal(child.destroyed, true);
+  h.coordinator.dispose();
+});
+
+test('repeated and simultaneous opens focus the existing owner instead of creating duplicates', async () => {
+  const h = harness(); await Promise.all([h.open(), h.open('A-child'), h.open('A-version')]);
+  assert.equal(h.windows.length, 2); assert.equal(h.windows[1]!.active, 'A-version');
   const child = h.windows[1]!;
-  assert.equal(await h.coordinator.routeSession(child.webContents as never, { sessionId: 'B' }), 'routed');
-  assert.equal(h.commands.at(-1)?.windowId, h.main.id);
-  assert.equal(h.coordinator.ownerForSession('A'), child.webContents);
-  assert.equal(child.destroyed, false);
+  child.focused = false; child.revealed = false;
+  await h.open();
+  assert.equal(h.windows.length, 2); assert.equal(child.focused, true); assert.equal(child.revealed, true);
+  child.focused = false; child.revealed = false;
+  await h.coordinator.routeSession(h.main.contents as never, { sessionId: 'A-child' });
+  assert.equal(child.active, 'A-child'); assert.equal(h.main.active, undefined);
+  assert.equal(child.focused, true); assert.equal(child.revealed, true);
+  h.coordinator.dispose();
 });
 
-test('returning transfers current child member and closes only after restore', async () => {
+for (const failure of ['creation', 'prepare', 'receive', 'resources', 'prepare-timeout', 'receive-timeout'] as const) {
+  test(`${failure} failure retains the source draft and releases the failed child`, async () => {
+    const h = harness(); h.main.drafts.set('A', 'keep me');
+    if (failure === 'creation') h.failCreation();
+    if (failure === 'prepare') h.main.unsupported = true;
+    if (failure === 'receive') h.failReceive('session');
+    if (failure === 'resources') h.failResources();
+    if (failure === 'prepare-timeout') h.dropReply('prepare');
+    if (failure === 'receive-timeout') h.dropReply('receive');
+    await assert.rejects(h.open());
+    assert.equal(h.main.active, 'A'); assert.equal(h.main.drafts.get('A'), 'keep me'); assert.equal(h.main.frozen, false);
+    assert.equal(h.windows.filter((window) => !window.destroyed).length, 1);
+    assert.equal(h.coordinator.canUseSession(h.main.contents as never, 'A'), true);
+    h.coordinator.dispose();
+  });
+}
+
+for (const failure of ['receive', 'resources', 'receive-timeout'] as const) {
+  test(`return ${failure} preserves the source child and the main window's unrelated B`, async () => {
+    const h = harness(); await h.open(); const child = h.windows[1]!;
+    h.main.active = 'B'; h.main.drafts.set('B', 'keep B'); child.drafts.set('A', 'keep A');
+    if (failure === 'receive') h.failReceive('main');
+    if (failure === 'resources') h.failResources();
+    if (failure === 'receive-timeout') h.dropReply('receive');
+    await assert.rejects(h.returnToMain());
+    assert.equal(h.main.active, 'B'); assert.equal(h.main.drafts.get('B'), 'keep B'); assert.equal(h.main.destroyed, false);
+    assert.equal(child.active, 'A'); assert.equal(child.drafts.get('A'), 'keep A'); assert.equal(child.frozen, false);
+    assert.equal(h.coordinator.canUseSession(child.contents as never, 'A'), true);
+    h.coordinator.dispose();
+  });
+}
+
+test('resource handoff holds both windows inactive and source drafts until the receiver commits', async () => {
+  const h = harness(); h.main.drafts.set('A', 'still owned');
+  const entered = deferred(); const release = deferred(); h.gate({ entered: () => entered.resolve(), wait: release.promise });
+  const opening = h.open(); await entered.promise;
+  assert.equal(h.main.active, undefined); assert.equal(h.main.drafts.get('A'), 'still owned');
+  assert.equal(h.windows[1]!.active, undefined); assert.equal(h.windows[1]!.revealed, false);
+  assert.equal(h.coordinator.canUseSession(h.main.contents as never, 'A'), false);
+  release.resolve(); await opening;
+  assert.equal(h.main.drafts.has('A'), false); assert.equal(h.windows[1]!.active, 'A');
+  h.coordinator.dispose();
+});
+
+test('new descendants inherit the family owner before they can use session resources', async () => {
+  const h = harness(); await h.open();
+  assert.equal(h.coordinator.canUseSession(h.main.contents as never, 'new-child'), false);
+  h.known[0] = { ...group, sessionIds: [...group.sessionIds, 'new-child'] };
+  h.coordinator.refreshOwnership();
+  assert.equal(h.coordinator.canUseSession(h.windows[1]!.contents as never, 'new-child'), true);
+  assert.equal(h.coordinator.canUseSession(h.main.contents as never, 'new-child'), false);
+  h.coordinator.dispose();
+});
+
+test('cancel close keeps every member draft, while confirmed close releases its owner and browser', async () => {
+  const h = harness(); await h.open(); const child = h.windows[1]!;
+  child.drafts.set('A-child', 'hidden unsent text'); child.close(); await settle(); await settle();
+  assert.equal(h.confirmations(), 1); assert.equal(child.destroyed, false); assert.equal(child.frozen, false);
+  assert.equal(child.drafts.get('A-child'), 'hidden unsent text');
+  h.confirm(true); child.close(); await settle(); await settle();
+  assert.equal(child.destroyed, true); assert.ok(h.resources.includes(`release:${child.id}`));
+  assert.equal(h.coordinator.canUseSession(h.main.contents as never, 'A'), true);
+  h.coordinator.dispose();
+});
+
+test('an unreadable composer still allows an explicitly confirmed discard close', async () => {
+  const h = harness(); await h.open(); h.dropReply('check-close'); h.confirm(true);
+  const child = h.windows[1]!; child.close();
+  await new Promise((resolve) => setTimeout(resolve, 70));
+  assert.equal(h.confirmations(), 1); assert.equal(child.destroyed, true);
+  h.coordinator.dispose();
+});
+
+test('a failed confirmation cancels close and unfreezes the child', async () => {
+  const h = harness(); await h.open(); const child = h.windows[1]!; child.unsupported = true;
+  h.confirm(new Error('dialog failed')); child.close(); await settle(); await settle();
+  assert.equal(child.destroyed, false); assert.equal(child.frozen, false); assert.equal(h.errors.length, 1);
+  h.coordinator.dispose();
+});
+
+test('closing Main leaves children alive and returning can recreate Main', async () => {
+  const h = harness(); await h.open(); const child = h.windows[1]!;
+  h.main.close(); await settle(); await settle();
+  assert.equal(h.main.destroyed, true); assert.equal(child.destroyed, false);
+  await h.returnToMain(child); assert.equal(h.windows[2]!.active, 'A'); assert.equal(child.destroyed, true);
+  h.coordinator.dispose();
+});
+
+test('IPC rejects auxiliary senders and subframes and validates routing input', async () => {
   const h = harness();
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  const child = h.windows[1]!;
-  child.active = 'A-child';
-  await h.coordinator.openInMainWindow(child.webContents as never);
-  assert.equal(child.destroyed, true);
-  assert.equal(h.errors.length, 0);
-  assert.equal(h.coordinator.ownerForSession('A'), undefined);
-  const restore = h.commands.at(-1)?.command;
-  assert.equal(restore?.kind, 'restore');
-  if (restore?.kind === 'restore') assert.equal(restore.navigation.sessionId, 'A-child');
-  assert.deepEqual(h.migrations, ['1->2', '2->1']);
+  const handlers = new Map<string, (...args: any[]) => any>();
+  registerSessionWindowIpc(h.coordinator, { handle: (key, handler) => { handlers.set(key, handler); } });
+  const frame = {}; Object.assign(h.main.contents, { mainFrame: frame });
+  const event = { sender: h.main.contents, senderFrame: frame };
+  assert.throws(() => handlers.get('session-window:context')!({ ...event, senderFrame: {} }), /main frame/);
+  assert.throws(() => handlers.get('session-window:context')!({ sender: { mainFrame: frame, isDestroyed: () => false }, senderFrame: frame }), /workspace window/);
+  assert.throws(() => handlers.get('session-window:route')!(event, { sessionId: 'A', sequence: -1 }), /sequence/);
+  assert.throws(() => handlers.get('session-window:open')!(event, ''), /identity/);
+  h.coordinator.dispose();
 });
 
-test('failed destination restoration revokes it before restoring original owner', async () => {
-  const h = harness();
-  h.failRestore();
-  await assert.rejects(h.coordinator.openSessionWindow(h.main.webContents as never, 'A'), /restore failed/);
-  assert.equal(h.windows[1]?.destroyed, true);
-  assert.equal(h.coordinator.ownerForSession('A'), undefined);
-  assert.equal(h.main.destroyed, false);
-  assert.deepEqual(h.migrations, ['1->2', '2->1']);
-  assert.deepEqual(h.loads, ['2', '1'], 'issue once to destination and once to rollback source');
-  assert.deepEqual(h.released, ['2'], 'discard failed destination handles before rollback');
-  const tail = h.commands.slice(-2);
-  assert.deepEqual(tail.map(({ windowId, command }) => [windowId, command.kind]), [['2', 'clear'], ['1', 'restore']]);
-});
-
-test('normal close saves workspace before releasing ownership and does not close main', async () => {
-  const h = harness();
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  h.windows[1]!.close();
-  assert.equal(h.windows[1]!.destroyed, false);
-  await settle();
-  assert.equal(h.windows[1]!.destroyed, true);
-  assert.equal(h.errors.length, 0);
-  assert.equal(h.main.destroyed, false);
-  assert.equal(h.coordinator.ownerForSession('A'), undefined);
-  assert.equal(await h.coordinator.routeSession(h.main.webContents as never, { sessionId: 'A' }), 'local');
-});
-
-test('canceling a close with attachment losses keeps the child and its ownership', async () => {
-  const h = harness();
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  h.failSave();
-  h.windows[1]!.close();
-  await settle();
-  assert.equal(h.windows[1]!.destroyed, false);
-  assert.equal(h.coordinator.ownerForSession('A'), h.windows[1]!.webContents);
-  assert.deepEqual(h.closeWarnings, [['attachment unavailable']]);
-});
-
-test('closing main leaves the session window and return recreates main', async () => {
-  const h = harness();
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  h.main.close();
-  await settle();
-  assert.equal(h.main.destroyed, true);
-  assert.equal(h.windows[1]!.destroyed, false);
-  await h.coordinator.openInMainWindow(h.windows[1]!.webContents as never);
-  assert.equal(h.windows.length, 3);
-  assert.equal(h.registry.main()?.context.windowId, '3');
-});
-
-
-test('failed return restores child ownership and the main window previous task', async () => {
-  const h = harness();
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  h.main.active = 'B';
-  h.failMainRestore();
-  await assert.rejects(h.coordinator.openInMainWindow(h.windows[1]!.webContents as never), /restore failed/);
-  assert.equal(h.coordinator.ownerForSession('A'), h.windows[1]!.webContents);
-  assert.equal(h.windows[1]!.destroyed, false);
-  assert.equal(h.main.active, 'B');
-  assert.equal(h.commands.at(-1)?.command.kind, 'resume');
-});
-
-test('reloaded child restores the last viewed group member without opening another window', async () => {
-  const h = harness();
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  const child = h.windows[1]!;
-  await h.coordinator.routeSession(child.webContents as never, { sessionId: 'A-child' });
-  child.webContents.emit('render-process-gone');
-  h.coordinator.sessionWindowReady(child.webContents as never);
-  await settle();
-  assert.equal(h.windows.length, 2);
-  const last = h.commands.at(-1)?.command;
-  assert.equal(last?.kind, 'navigate');
-  if (last?.kind === 'navigate') assert.equal(last.navigation.sessionId, 'A-child');
-  assert.equal(h.loads.length, 1, 'reload never replays an adopted draft');
-});
-
-test('synchronous cleanup failure after native destruction is reported without throwing from closed', async () => {
-  const h = harness();
-  h.failRelease();
-  assert.doesNotThrow(() => h.main.destroy());
-  assert.throws(() => h.main.webContents, /Object has been destroyed/);
-  await settle();
-  assert.equal(h.errors.length, 1);
-  assert.match(String(h.errors[0]), /resource release failed/);
-});
-
-
-test('navigation IPC accepts omitted optional fields from a normal session row', async () => {
-  const h = harness();
-  const handlers = new Map<string, (event: any, input: unknown) => any>();
-  registerSessionWindowIpc(h.coordinator, { handle: (channel: string, listener: (event: any, input: unknown) => any) => { handlers.set(channel, listener); } } as never);
-  const route = handlers.get('session-window:route')!;
-  const event = { sender: h.main.webContents, senderFrame: undefined };
-  assert.equal(await route(event, { sessionId: 'A', turnId: undefined, sequence: undefined }), 'local');
-  assert.equal(await route(event, { sessionId: 'A', turnId: 'turn-1', sequence: 0 }), 'local');
-  assert.throws(() => route(event, { sessionId: 'A', turnId: 1 }), /Invalid turn identity/);
-  assert.throws(() => route(event, { sessionId: 'A', sequence: -1 }), /Invalid turn sequence/);
-});
-
-
-test('concurrent groups returning to a recreated main preserve both drafts and serialize restoration', async () => {
-  const h = harness();
-  h.main.drafts.set('A', 'draft A');
-  h.main.drafts.set('B', 'draft B');
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  h.main.active = 'B';
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'B');
-  const a = h.windows[1]!;
-  const b = h.windows[2]!;
-  b.active = 'B';
-  h.main.close();
-  await settle();
-  const gate = h.pauseNextMainRestore();
-  const returning = Promise.all([
-    h.coordinator.openInMainWindow(a.webContents as never),
-    h.coordinator.openInMainWindow(b.webContents as never),
-  ]);
-  await gate.entered;
-  assert.equal(h.windows.length, 4, 'one replacement main window is shared by both returns');
-  const main = h.windows[3]!;
-  assert.equal(h.commands.filter(({ windowId, command }) => windowId === main.id && command.kind === 'prepare-navigation').length, 1,
-    'B must wait until A has restored before switching the shared main workspace');
-  gate.release();
-  await returning;
-  assert.equal(a.destroyed, true);
-  assert.equal(b.destroyed, true);
-  assert.equal(main.drafts.get('A'), 'draft A');
-  assert.equal(main.drafts.get('B'), 'draft B');
-  assert.equal(h.drafts.size, 0, 'live renderer owns adopted drafts; no stale main-process copies');
-  assert.equal(h.errors.length, 0);
-});
-
-
-test('adopted snapshots are removed while closed-window snapshots wait for their next owner', async () => {
-  const h = harness();
-  h.main.drafts.set('A', 'unsent');
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  const child = h.windows[1]!;
-  assert.equal(h.drafts.size, 0);
-  child.drafts.set('A', 'newer unsent');
-  child.close();
-  await settle();
-  assert.equal(h.drafts.get('A'), 'newer unsent');
-  const snapshot = await h.coordinator.loadSnapshot(h.main.webContents as never, ['A']);
-  await h.coordinator.adoptSnapshot(h.main.webContents as never, snapshot);
-  assert.equal(h.drafts.size, 0);
-});
-
-
-test('failed handoff before source clear and failed normal close discard stale custody', async () => {
-  for (const operation of ['load', 'close'] as const) {
-    const h = harness();
-    h.main.drafts.set('A', 'old unsent draft');
-    if (operation === 'load') {
-      h.failLoad();
-      await assert.rejects(h.coordinator.openSessionWindow(h.main.webContents as never, 'A'), /recovery capacity/);
-    } else {
-      h.failSave();
-      h.main.close();
-      await settle();
+for (const change of ['crash', 'reload', 'reload-ready', 'destroy'] as const) {
+  test(`receiver ${change} after receipt rejects transfer and preserves the source`, async () => {
+    const h = harness(); h.main.drafts.set('A', 'surviving draft');
+    const entered = deferred(); const release = deferred();
+    h.gate({ entered: () => entered.resolve(), wait: release.promise });
+    const moving = h.open(); const rejected = assert.rejects(moving);
+    await entered.promise;
+    const target = h.windows[1]!;
+    if (change === 'destroy') target.destroy();
+    else {
+      if (change === 'crash') target.contents.emit('render-process-gone');
+      else target.contents.emit('did-start-navigation', {}, 'reload', false, true);
+      target.resetRenderer();
+      if (change === 'reload-ready') h.coordinator.sessionWindowReady(target.contents as never);
     }
-    assert.equal(h.main.destroyed, false);
-    assert.equal(h.main.drafts.get('A'), 'old unsent draft');
-    h.main.drafts.set('A', ''); // The owner can continue editing or send successfully.
-    assert.equal(h.drafts.size, 0, 'a resumed owner must not leave a stale draft to replay');
-  }
-});
-
-
-test('a timed-out source preparation resumes its window and ignores the late snapshot', async () => {
-  const h = harness();
-  h.main.drafts.set('A', 'draft');
-  let complete!: () => void;
-  h.delayPrepare(new Promise<void>((resolve) => { complete = resolve; }));
-  await assert.rejects(h.coordinator.openSessionWindow(h.main.webContents as never, 'A'), /not confirmed/);
-  assert.ok(h.commands.some(({ windowId, command }) => windowId === h.main.id && command.kind === 'resume'));
-  complete();
-  await settle();
-  assert.equal(h.main.destroyed, false);
-  assert.equal(h.drafts.size, 0);
-});
-
-test('late replies cannot discard a snapshot belonging to another window', async () => {
-  const h = harness();
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  const child = h.windows[1]!;
-  const retained = { ...snapshot(), drafts: [{ sessionId: 'A', text: 'child draft', references: [], attachments: [], directoryReferences: [], quotes: [] }] };
-  await h.coordinator.saveSnapshot(child.webContents as never, retained);
-  h.coordinator.reply(h.main.webContents as never, { requestId: 'invented', ok: true, result: { snapshot: retained } });
-  await settle();
-  assert.equal(h.drafts.get('A'), 'child draft');
-  assert.equal(h.errors.length, 0, 'late replies have no side effects');
-});
-
-
-test('confirmed attachment loss closes once and still runs native close finalization', async () => {
-  const h = harness();
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  const child = h.windows[1]!;
-  let nativeFinalizations = 0;
-  child.on('close', (event) => { if (!event.defaultPrevented) nativeFinalizations += 1; });
-  h.failSave();
-  h.closeAnyway();
-  child.close();
-  await settle();
-  assert.equal(child.destroyed, true);
-  assert.equal(nativeFinalizations, 1);
-  assert.equal(h.closeWarnings.length, 1);
-  assert.equal(h.commands.filter(({ windowId, command }) => windowId === child.id && command.kind === 'flush').length, 1);
-});
-
-test('closing B does not wait for A restoring into Main', async () => {
-  const h = harness();
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'B');
-  const a = h.windows[1]!;
-  const b = h.windows[2]!;
-  const gate = h.pauseNextMainRestore();
-  const returning = h.coordinator.openInMainWindow(a.webContents as never);
-  await gate.entered;
-  b.close();
-  await settle();
-  assert.equal(b.destroyed, true);
-  assert.equal(a.destroyed, false);
-  gate.release();
-  await returning;
-});
-
-test('returning A never exports unrelated B drafts in Main', async () => {
-  const h = harness();
-  h.main.drafts.set('A', 'A draft');
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  h.main.active = 'B';
-  h.main.drafts.set('B', 'B draft with an unavailable attachment');
-  const previousSaves = h.saves.length;
-  await h.coordinator.openInMainWindow(h.windows[1]!.webContents as never);
-  assert.deepEqual(h.saves.slice(previousSaves), ['2']);
-  assert.equal(h.main.drafts.get('B'), 'B draft with an unavailable attachment');
-  assert.equal(h.main.active, 'A');
-});
-
-
-test('main commands cannot enter Main while its close confirmation is pending', async () => {
-  const h = harness();
-  await h.coordinator.openSessionWindow(h.main.webContents as never, 'A');
-  h.failSave();
-  h.closeAnyway();
-  const gate = h.pauseCloseConfirmation();
-  h.main.close();
-  await gate.entered;
-  const child = h.windows[1]!;
-  for (const command of ['newTask', 'openSettings', 'openHelp'] as const) {
-    await assert.rejects(h.coordinator.commandMain(child.webContents as never, command), /closing/);
-  }
-  assert.deepEqual(h.mainCommands, []);
-  gate.release();
-  await settle();
-  assert.equal(h.main.destroyed, true);
-  assert.equal(child.destroyed, false);
-});
-
-test('failed cancellation retains the recovery snapshot when custody cannot return to its renderer', async () => {
-  const h = harness();
-  h.main.drafts.set('A', 'recoverable unsent text');
-  h.failSave();
-  const gate = h.pauseCloseConfirmation();
-  h.main.close();
-  await gate.entered;
-  h.failAdopt(); // A companion becomes unavailable while confirmation is open.
-  gate.release();
-  await settle();
-  assert.equal(h.main.destroyed, false);
-  assert.equal(h.drafts.get('A'), 'recoverable unsent text');
-  assert.equal(h.commands.at(-1)?.command.kind, 'resume');
-  assert.match(String(h.errors.at(-1)), /copy no longer available/);
-});
-
-test('a rejected close dialog returns custody and resumes the source', async () => {
-  const h = harness();
-  h.main.drafts.set('A', 'unsent text');
-  h.failSave();
-  h.failConfirmation();
-  h.main.close();
-  await settle();
-  assert.equal(h.main.destroyed, false);
-  assert.equal(h.drafts.size, 0, 'successful return to renderer releases the retained snapshot');
-  assert.equal(h.main.drafts.get('A'), 'unsent text');
-  assert.equal(h.commands.at(-1)?.command.kind, 'resume');
-  assert.match(String(h.errors.at(-1)), /confirmation failed/);
-});
+    release.resolve(); await rejected;
+    assert.equal(h.main.drafts.get('A'), 'surviving draft');
+    assert.equal(h.main.active, 'A'); assert.equal(h.main.frozen, false);
+    assert.equal(h.coordinator.canUseSession(h.main.contents as never, 'A'), true);
+    assert.equal(target.destroyed, true);
+    h.coordinator.dispose();
+  });
+}

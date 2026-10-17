@@ -30,7 +30,6 @@ import {
   toDesktopHostSessionSummary,
   type RuntimeHostSessionCatalogIpcDeps,
 } from '../runtime-host-session-catalog-ipc-main.js';
-import { SessionLocalAttachmentRecovery } from '../session-local-attachment-recovery.js';
 import { DesktopRuntimeHostClientError } from '../runtime-host-client.js';
 import { createManagedTaskDirectoryAuthority } from '../managed-task-directory.js';
 import { resolveDesktopSessionWorkspace } from '../new-session-project.js';
@@ -312,7 +311,7 @@ function ipcHarness() {
     async invoke(channel: string, ...args: unknown[]): Promise<unknown> {
       const handler = handlers.get(channel);
       assert.ok(handler, `missing handler: ${channel}`);
-      return handler({ sender: { id: 9 } } as never, ...args);
+      return handler({} as never, ...args);
     },
   };
 }
@@ -364,29 +363,3 @@ function projection(overrides: Partial<SessionCatalogProjection> = {}): SessionC
     ...overrides,
   };
 }
-
-
-test('replacing an empty side conversation returns recovery handles to its source before cleanup', async () => {
-  let now = 0;
-  const recovery = new SessionLocalAttachmentRecovery(() => now);
-  const owner = { senderId: 9, partition: 'p', scope: { hostId: 'host', targetEpoch: 'epoch' }, sessionId: 'old-fork' };
-  const [approval] = recovery.issue(owner, [{ name: 'draft.txt', mimeType: 'text/plain', content: Buffer.from('draft') }]);
-  const deps = createDeps([]);
-  const removed: string[] = [];
-  deps.client.getSession = async () => projection({ id: 'old-fork', parentSessionId: 'source', labels: ['mode:side_conversation'] });
-  deps.sessionCopyCleanup.cleanup = async (id) => { removed.push(id); };
-  deps.transferRecoveryAttachments = (senderId, source, target, ids) => recovery.transfer({ ...owner, senderId, sessionId: source }, target, ids);
-  const ipc = ipcHarness();
-  registerRuntimeHostSessionCatalogIpc(deps, ipc);
-  await assert.rejects(ipc.invoke('sessions:cleanupSessionCopy', 'old-fork', { sourceSessionId: 'unrelated', attachmentIds: [approval!.approvalId] }), /another session/);
-  assert.deepEqual(removed, []);
-  now = 25 * 60 * 1000;
-  await ipc.invoke('sessions:cleanupSessionCopy', 'old-fork', { sourceSessionId: 'source', attachmentIds: [approval!.approvalId] });
-  assert.deepEqual(removed, ['old-fork']);
-  recovery.transfer({ ...owner, sessionId: 'source' }, 'new-fork', [approval!.approvalId]);
-  assert.equal(Buffer.from(recovery.snapshot({ ...owner, sessionId: 'new-fork' }, approval!.approvalId).content).toString(), 'draft');
-  assert.throws(() => recovery.snapshot(owner, approval!.approvalId), { code: 'source_expired' });
-  assert.throws(() => recovery.snapshot({ ...owner, senderId: 10, sessionId: 'new-fork' }, approval!.approvalId), { code: 'source_expired' });
-  now = 31 * 60 * 1000;
-  assert.throws(() => recovery.snapshot({ ...owner, sessionId: 'new-fork' }, approval!.approvalId), { code: 'source_expired' }, 'replacement must not extend the original expiry');
-});

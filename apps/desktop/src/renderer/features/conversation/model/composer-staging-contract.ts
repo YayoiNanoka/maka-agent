@@ -44,19 +44,8 @@ export interface ComposerStagingSubmission {
 }
 
 /** Commands only: there is deliberately no subscription or controller getter. */
-export interface ComposerStagingDraft {
-  readonly draftKey: string;
-  readonly attachments: readonly PendingAttachment[];
-  readonly directoryReferences: readonly DirectoryReference[];
-  readonly quotes: readonly QuoteRef[];
-}
-
 export interface ComposerStagingCommands {
-  flushImports(): Promise<void>;
-  captureDrafts(keys: readonly string[]): readonly ComposerStagingDraft[];
-  /** Replace selected drafts together, retaining attachment approvals still referenced by any draft. */
-  replaceDrafts(drafts: readonly { draftKey: string; context: Omit<RestoredDraftContent, 'text'> }[]): void;
-  clearDrafts(keys: readonly string[]): void;
+  hasPendingContext(sessionIds: readonly string[]): boolean;
   captureSubmission(): ComposerStagingSubmission;
   /** Live plate reads for the revision lifecycle, assembled beside the hooks
    *  that own the buckets (see RevisionStagedContext). */

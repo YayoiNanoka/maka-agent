@@ -39,7 +39,6 @@ export type DesktopWorkbarBridge = Pick<
   | 'gitReview'
   | 'inspector'
   | 'sessions'
-  | 'sessionLocal'
   | 'shellRuns'
   | 'transcripts'
 > &
@@ -169,13 +168,7 @@ export function createDesktopWorkbarServices(
         bridge.app.saveArtifactAs(sessionId, artifactId),
     },
     inspector: createDesktopInspectorService(bridge),
-    attachments: {
-      readBytes: bridge.attachments.readBytes,
-      pickFiles: bridge.attachments.pickFiles,
-      previewApproval: bridge.attachments.previewApproval,
-      detectDirectories: bridge.attachments.detectDirectories,
-      releaseRecoveryAttachments: (ids) => bridge.sessionLocal.releaseRecoveryAttachments(ids),
-    },
+    attachments: bridge.attachments,
     ...(bridge.workBoard
       ? {
           workBoard: {
@@ -190,8 +183,8 @@ export function createDesktopWorkbarServices(
         dependencies.readSettledMessages(bridge, sessionId, options),
       branchFromTurn: (sessionId, input) =>
         bridge.sessions.branchFromTurn(sessionId, input),
-      cleanupSessionCopy: (sessionId, recovery) =>
-        bridge.sessions.cleanupSessionCopy(sessionId, recovery),
+      cleanupSessionCopy: (sessionId) =>
+        bridge.sessions.cleanupSessionCopy(sessionId),
       abandonSessionCopy: (sourceSessionId, copyId) =>
         bridge.sessions.abandonSessionCopy(sourceSessionId, copyId),
       compact: (sessionId) => bridge.sessions.compact(sessionId),

@@ -19,17 +19,12 @@
 
 import type { MakaBridge } from '../../../preload/bridge-contract.js';
 import type { SessionWindowServices } from '../../features/session-windows/index.js';
-export function createDesktopSessionWindowServices(bridge: Pick<MakaBridge, 'appWindow' | 'sessions' | 'sessionLocal'> = window.maka): SessionWindowServices {
+export function createDesktopSessionWindowServices(bridge: Pick<MakaBridge, 'appWindow' | 'sessions'> = window.maka): SessionWindowServices {
   return {
     ...bridge.appWindow,
     subscribeDeleted: (handler) => bridge.sessions.subscribeChanges((event) => {
       if (event.reason === 'deleted' && event.sessionId) handler(event.sessionId);
     }),
-    releaseSnapshot: async (snapshot) => {
-      const drafts = [...snapshot.drafts, ...snapshot.sideConversations.map((side) => side.draft)];
-      const approvalIds = [...new Set(drafts.flatMap((draft) => draft.attachments.flatMap((attachment) =>
-        attachment.type === 'approval' ? [attachment.approvalId] : [])))];
-      if (approvalIds.length) await bridge.sessionLocal.releaseRecoveryAttachments(approvalIds);
-    },
+
   };
 }

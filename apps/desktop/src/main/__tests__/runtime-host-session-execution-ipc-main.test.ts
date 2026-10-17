@@ -37,7 +37,6 @@ import {
   RuntimeHostOperationError,
   RuntimeHostRequestInterruptedError,
 } from '@maka/runtime-host/client';
-import { SessionLocalAttachmentRecovery } from '../session-local-attachment-recovery.js';
 import { createAttachmentApprovalRegistry } from "../attachment-approval.js";
 import type { DesktopRuntimeHostSession } from "../runtime-host-client.js";
 import {
@@ -647,7 +646,6 @@ test("sends Side Conversation intent and metadata atomically to Runtime Host", a
   const backgroundErrors: unknown[] = [];
   const ipc = ipcHarness();
   const sessionCopyCleanup = {
-    adopt: async () => {},
     ownCreation: <T>(_creation: unknown, operation: () => Promise<T>) => operation(),
     async rejectCreation() {},
     async cleanup() {},
@@ -2446,7 +2444,6 @@ function registerExecutionIpc(
 
 function unusedSessionCopyCleanup(): RuntimeHostSessionExecutionIpcDeps['sessionCopyCleanup'] {
   return {
-    adopt: async () => {},
     ownCreation: async (_creation, operation) => operation(),
     async rejectCreation() {},
     async cleanup() {},
@@ -2570,39 +2567,3 @@ test('prompt suggestion IPC forwards only a validated Session and does not recon
   assert.deepEqual(calls, ['session-1']);
   assert.equal(ipc.reconnectableChannels.has('sessions:generatePromptSuggestion'), false);
 });
-
-
-for (const channel of ['sessions:send', 'sessions:submitMessage'] as const) {
-  test(`${channel} admits recovered side-chat attachments only for their assigned session`, async () => {
-    const recovery = new SessionLocalAttachmentRecovery();
-    const owner = { senderId: 9, partition: 'partition', scope: { hostId: 'host', targetEpoch: 'epoch' }, sessionId: 'source' };
-    const [approval] = recovery.issue(owner, [{ name: 'recovered.txt', mimeType: 'text/plain', content: Buffer.from('hello') }]);
-    const uploads: string[] = [];
-    const ipc = ipcHarness();
-    registerExecutionIpc({
-      recoverAttachmentItems: (senderId, sessionId, items) => recovery.prepare({ ...owner, senderId, sessionId }, items),
-      transferRecoveryAttachments: (senderId, sourceSessionId, targetSessionId, ids) => recovery.transfer({ ...owner, senderId, sessionId: sourceSessionId }, targetSessionId, ids),
-      client: executionClient({
-        getSession: async () => ({ ...session('/workspace', 'fork'), labels: [SIDE_CONVERSATION_SESSION_LABEL] }),
-        copySession: async () => session('/workspace', 'fork'),
-        ingestAttachment: async ({ sessionId, name, mimeType, content }) => {
-          uploads.push(Buffer.from(content).toString());
-          return { kind: 'other', name, mimeType, bytes: content.byteLength, ref: { kind: 'session_file', sessionId, relativePath: 'attachment-1' } };
-        },
-        submitMessage: async () => ({ disposition: 'turn_started', turnId: 'turn-1', skillInvocation: { loaded: [], failed: [], receipts: [] } }),
-      }),
-    }, ipc);
-    const input = { type: 'send', text: 'read recovered attachment', messageId: 'message-1', attachmentItems: [{ type: 'approval', approvalId: approval!.approvalId, name: approval!.name }] };
-    const send = () => channel === 'sessions:send'
-      ? ipc.invoke(channel, 'fork', input)
-      : ipc.invoke(channel, 'fork', 'next_turn', input);
-    assert.deepEqual(await send(), { ok: false, reason: 'attachment_blocked', code: 'source_expired' });
-    await ipc.invoke('sessions:branchFromTurn', 'source', { copyId: 'fork', sideConversation: true, recoveryAttachmentIds: [approval!.approvalId] });
-    assert.equal((await send() as { ok: boolean }).ok, true);
-    assert.deepEqual(uploads, ['hello']);
-    // A failed remote admission can retain the original draft; renderer cleanup
-    // owns successful-send disposal instead of prematurely consuming its token.
-    assert.equal(recovery.snapshot({ ...owner, sessionId: 'fork' }, approval!.approvalId).content.byteLength, 5);
-    await assert.rejects(ipc.invoke('sessions:branchFromTurn', 'source', { copyId: 'ordinary', recoveryAttachmentIds: [approval!.approvalId] }), /Invalid side conversation recovery attachments/);
-  });
-}

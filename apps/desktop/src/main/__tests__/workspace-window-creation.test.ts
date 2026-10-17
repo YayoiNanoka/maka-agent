@@ -341,13 +341,11 @@ test('session windows center within the primary display work area when no main w
 
 test('coordinated immediate close saves final Main bounds through native close finalization', async () => {
   const h = await harness();
-  const snapshot = { capturedAt: 1, drafts: [], sideConversations: [] };
   const coordinator = createSessionWindowCoordinator({
     windows: h.controller, signal: new AbortController().signal, ensureMainWindow: async () => {},
     resolveGroup: async (id) => ({ hostId: 'host', groupId: id, sessionIds: [id] }),
-    saveSnapshot: async () => {}, saveForClose: async () => ({ snapshot, losses: [] }), confirmClose: async () => false,
-    adoptSnapshot: async () => {}, forgetSnapshot: () => {}, loadSnapshot: async () => snapshot,
-    releaseSnapshot: () => {}, transferResources: async () => {}, releaseResources: () => {},
+    knownGroups: () => [], confirmClose: async () => false,
+    transferResources: async () => {}, releaseResources: () => {},
     isQuitting: () => false, onError: (error) => { throw error; },
   });
   h.releaseSettings();
@@ -355,7 +353,7 @@ test('coordinated immediate close saves final Main bounds through native close f
   const main = h.windows[0]!;
   const sender = main.webContents;
   sender.on('command', (command: SessionWindowCommand) => queueMicrotask(() => coordinator.reply(sender as never,
-    { requestId: command.requestId, ok: true, result: { snapshot } })));
+    { requestId: command.requestId, ok: true, result: {} })));
   coordinator.sessionWindowReady(sender as never);
   const bounds = { x: 230, y: 140, width: 1100, height: 760 };
   main.setBounds(bounds);

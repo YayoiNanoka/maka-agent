@@ -102,7 +102,6 @@ export interface EnsureCompanionForkDeps {
   sourceSession: SessionSummary;
   panelId: string;
   name: string;
-  recoveryAttachmentIds?: readonly string[];
   /** True once the panel has unmounted — checked after every await so a fork
    *  born after disposal is torn down instead of leaking a hidden run. */
   isDisposed: () => boolean;
@@ -169,13 +168,6 @@ export async function abandonPendingCompanionCopy(
   }
 }
 
-/** The workspace now holds the fork; this renderer must not recover it as an orphan. */
-export function detachCompanionCopy(sourceSessionId: string, panelId: string): void {
-  const key = companionCopyAttemptKey(sourceSessionId, panelId);
-  const attempt = readSessionCopyAttempt(key);
-  if (attempt) completeSessionCopyAttempt(key, attempt.copyId);
-}
-
 export async function recoverOrphanedCompanionCopies(
   api: SideChatSessionPort,
 ): Promise<void> {
@@ -198,13 +190,12 @@ export async function cleanupCompanionCopy(
   sourceSessionId: string,
   panelId: string,
   companionSessionId: string,
-  recoveryAttachmentIds?: readonly string[],
 ): Promise<boolean> {
   const key = companionCopyAttemptKey(sourceSessionId, panelId);
   const attempt = readSessionCopyAttempt(key);
   if (attempt) abandonSessionCopyAttempt(key, attempt.copyId);
   try {
-    await api.cleanupSessionCopy(companionSessionId, recoveryAttachmentIds?.length ? { sourceSessionId, attachmentIds: recoveryAttachmentIds } : undefined);
+    await api.cleanupSessionCopy(companionSessionId);
     if (attempt) completeSessionCopyAttempt(key, attempt.copyId);
     return true;
   } catch {
@@ -217,10 +208,9 @@ export async function dismissCompanionCopy(
   sourceSessionId: string,
   panelId: string,
   companionSessionId: string,
-  recoveryAttachmentIds?: readonly string[],
 ): Promise<boolean> {
   await api.stop(companionSessionId).catch(() => undefined);
-  return cleanupCompanionCopy(api, sourceSessionId, panelId, companionSessionId, recoveryAttachmentIds);
+  return cleanupCompanionCopy(api, sourceSessionId, panelId, companionSessionId);
 }
 
 /**
@@ -307,7 +297,6 @@ export async function ensureCompanionFork(
       name,
       copyId: copyAttempt.copyId,
       sideConversation: true,
-      ...(deps.recoveryAttachmentIds?.length ? { recoveryAttachmentIds: deps.recoveryAttachmentIds } : {}),
     });
     if (!result.ok) {
       copyAttempt.complete();

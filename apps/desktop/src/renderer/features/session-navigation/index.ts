@@ -24,7 +24,7 @@ export {
   type ArchivedTaskScopeView,
 } from './ui/archived-task-scope.js';
 export type { ArchivedTaskProjectScope } from './model/archived-task-scope.js';
-export { createSessionOpenCommand } from './controller/session-open-command.js';
+export { createSessionNavigationCommands } from './controller/session-open-command.js';
 export { useSessionNavigationReads } from './controller/use-session-navigation-reads.js';
 export { sessionRailLayoutStore } from './model/session-rail-layout-store.js';
 export type { SessionNavigationRowActions } from './controller/session-row-actions.js';

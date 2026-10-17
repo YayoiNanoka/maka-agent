@@ -21,50 +21,19 @@ import type { SessionSummary } from '@maka/core/session';
 import { collapseSessionRevisions } from '@maka/core/session-revisions';
 import { hasNewTaskReloadIntent } from '../../../application/contracts/new-task-reload-intent.js';
 import type { SessionWindowContext, SessionWindowNavigation } from '../ports.js';
-import type { SessionWorkspaceSnapshot } from '../../../../shared/session-workspace-state.js';
 
-/** A discarded load must release its temporary recovery handles without adopting local state. */
-export async function restoreSessionWindowWorkspace(input: {
-  load(): Promise<SessionWorkspaceSnapshot>;
-  release(snapshot: SessionWorkspaceSnapshot): Promise<void>;
-  activate(snapshot: SessionWorkspaceSnapshot): Promise<void>;
-  restore(snapshot: SessionWorkspaceSnapshot): void;
-  adopt(snapshot: SessionWorkspaceSnapshot): Promise<void>;
-  isCurrent(): boolean;
-}): Promise<void> {
-  const snapshot = await input.load();
-  if (!input.isCurrent()) {
-    await input.release(snapshot);
-    return;
-  }
-  try { await input.activate(snapshot); }
-  catch (error) { await input.release(snapshot); throw error; }
-  if (!input.isCurrent()) {
-    await input.release(snapshot);
-    return;
-  }
-  input.restore(snapshot);
-  await input.adopt(snapshot);
-}
-
-/** A routed or superseded request never briefly mounts in the source window. */
+/** Known local membership preserves synchronous selection and history behavior. */
 export function createSessionWindowNavigator(deps: {
-  route(navigation: SessionWindowNavigation): Promise<'local' | 'routed'>;
-  openWorkspace(sessionId: string, isCurrent: () => boolean, activate: () => void): Promise<void>;
+  owns(sessionId: string): boolean;
+  route(navigation: SessionWindowNavigation): void;
   blocked(): boolean;
 }) {
-  let revision = 0;
-  const open = async (navigation: SessionWindowNavigation, activate: () => void): Promise<boolean> => {
+  return (navigation: SessionWindowNavigation, activate: () => void): boolean => {
     if (deps.blocked()) return false;
-    const ownRevision = ++revision;
-    const isCurrent = () => !deps.blocked() && ownRevision === revision;
-    const route = await deps.route(navigation);
-    if (route !== 'local' || !isCurrent()) return false;
-    let activated = false;
-    await deps.openWorkspace(navigation.sessionId, isCurrent, () => { if (isCurrent()) { activate(); activated = true; } });
-    return activated && isCurrent();
+    if (!deps.owns(navigation.sessionId)) { deps.route(navigation); return false; }
+    activate();
+    return true;
   };
-  return { open, invalidate: () => { revision += 1; } };
 }
 
 /** Startup may resume history only while the user still owns the initial empty selection. */

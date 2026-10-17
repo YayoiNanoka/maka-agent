@@ -3891,6 +3891,12 @@ const makaBridge = {
   },
   appWindow: {
     context: () => invokeWhenReady('session-window:context'),
+    ownership: () => invokeWhenReady('session-window:ownership'),
+    subscribeSessionWindowOwnership(handler) {
+      const listener = (_event: Electron.IpcRendererEvent, snapshot: import('../shared/session-window-contract.js').SessionWindowOwnership) => handler(snapshot);
+      ipcRenderer.on('session-window:ownership', listener);
+      return () => ipcRenderer.off('session-window:ownership', listener);
+    },
     routeSession: (navigation) => invokeWhenReady('session-window:route', navigation),
     openSessionWindow: (sessionId) => invokeWhenReady('session-window:open', sessionId),
     openInMainWindow: () => invokeWhenReady('session-window:open-main'),
@@ -3901,8 +3907,6 @@ const makaBridge = {
       return () => ipcRenderer.off('session-window:command', listener);
     },
     ackSessionWindowCommand: (reply) => invokeWhenReady('session-window:reply', reply),
-    adoptWorkspaceSnapshot: (snapshot) => invokeWhenReady('session-window:adopt', snapshot),
-    loadWorkspaceSnapshot: (sessionIds) => invokeWhenReady('session-window:load', sessionIds),
     commandMain: (command) => invokeWhenReady('session-window:command-main', command),
     popupMenu(input: import('../shared/native-menu.js').NativeMenuRequest): Promise<string | null> {
       return invokeWhenReady('window:popupMenu', input);

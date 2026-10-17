@@ -17,7 +17,6 @@
  * under the License.
  */
 
-import { isSideConversationSession } from '@maka/core/side-conversation';
 import { isExecutorConfiguration } from '@maka/core/executor-catalog';
 import { randomUUID } from 'node:crypto';
 import { isCollaborationMode } from '@maka/core/collaboration';
@@ -76,7 +75,6 @@ export interface DesktopHostSessionSummary extends SessionCatalogSummary {
 }
 
 export interface RuntimeHostSessionCatalogIpcDeps {
-  transferRecoveryAttachments?: (senderId: number, sourceSessionId: string, targetSessionId: string, ids: unknown) => void;
   client: RuntimeHostSessionCatalogClient;
   queryExecutors?: (input: import('@maka/runtime-host/protocol').PluginExecutorQueryInput) => Promise<import('@maka/runtime-host/protocol').PluginExecutorQueryResult>;
   /** Observer state supplements the Host catalog without falling back to the durable header. */
@@ -148,19 +146,7 @@ export function registerRuntimeHostSessionCatalogIpc(
       ? null
       : toDesktopHostSessionListSummary(session, deps.runningTurnIds(sessionId));
   });
-  ipcMain.handle('sessions:cleanupSessionCopy', async (event, sessionId: string, recovery?: unknown) => {
-    if (recovery !== undefined) {
-      if (!recovery || typeof recovery !== 'object' || !('sourceSessionId' in recovery) || typeof recovery.sourceSessionId !== 'string' ||
-          !('attachmentIds' in recovery) || !Array.isArray(recovery.attachmentIds) || !deps.transferRecoveryAttachments)
-        throw new Error('Invalid side conversation recovery attachments');
-      const copy = await deps.client.getSession(sessionId);
-      if (copy && (!isSideConversationSession(copy.labels) || copy.parentSessionId !== recovery.sourceSessionId))
-        throw new Error('Recovery attachments belong to another session');
-      // Return the exact handles before removing an empty fork. The next fork
-      // can use them without extending their lifetime or widening their scope.
-      deps.transferRecoveryAttachments(event.sender.id, copy ? sessionId : recovery.sourceSessionId,
-        recovery.sourceSessionId, recovery.attachmentIds);
-    }
+  ipcMain.handle('sessions:cleanupSessionCopy', async (_event, sessionId: string) => {
     await deps.sessionCopyCleanup.cleanup(sessionId);
     pendingCleanup.delete(sessionId);
   });

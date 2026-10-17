@@ -319,7 +319,7 @@ projection one feature makes into another's region is composed here.
 | module-hub | `ModuleHubSkillCatalogRevisionBoundary` | Composer mentions provider | render-prop skill catalog revision | stays: cross-region projection into the Composer |
 | module-hub | `ModuleHubScheduledTasksBoundary` | Session rail (`SessionNavigationProvider`) | render-prop scheduled tasks | stays: cross-region projection into navigation |
 | module-hub | `createModuleHubCommandPort` | command palette; project selection | command port | stays: cross-region command |
-| session-navigation | `createSessionOpenCommand` | open-Session command | command factory | stays: cross-region command |
+| session-navigation | `createSessionNavigationCommands` | window-aware Session and new-task commands | command factory | stays: cross-region command |
 | session-navigation | `sessionRailLayoutStore` | rail collapse handle; E2E fixture | layout store | stays: layout |
 | session-navigation | `useSessionNavigationReads` | see the retained-root table | read hook | stays: navigation |
 | session-settings | `useSessionSettingIntent` | see the retained-root table | read hook and commands | stays: cross-region command |

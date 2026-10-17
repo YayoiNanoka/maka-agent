@@ -170,7 +170,7 @@ test('browser IPC isolates owned renderer documents and their native parents', a
     const parkingParent = { getVisible: () => false } as Electron.View;
     const browserIpc = registerBrowserIpc({
       parkingParent,
-      canUseSession: (contents, id) => !id.includes('main-session') || contents === sessionOwner,
+      canUseSession: (contents, id) => !id.includes(WORKHUB_COORDINATION_SESSION_ID) && (!id.includes('main-session') || contents === sessionOwner),
       mainWindowController: mainWindowController as never,
       auxiliaryWindowRegistry: {
         rendererParent: (contents: Electron.WebContents) =>
@@ -373,10 +373,14 @@ test('browser IPC isolates owned renderer documents and their native parents', a
     windows.set(child, childWindow);
     workspaceRenderers.add(child);
     emit('browser:document-ready', child, 'child-document');
+    emit('browser:active-session', child, scope, WORKHUB_COORDINATION_SESSION_ID, 'child-document', 1);
+    await invoke('browser:navigate', child, scope, WORKHUB_COORDINATION_SESSION_ID, 'https://forbidden-presenter.example/');
+    assert.equal(controllers.has(coordinationKey), false, 'a child cannot recreate or present the WorkHub Coordination browser');
+    emit('browser:document-ready', child, 'child-document-owning-session');
     sessionOwner = child;
     browserIpc.transferSessions([JSON.stringify([scope.hostId, 'main-session'])], main as never, child as never);
-    emit('browser:active-session', child, scope, 'main-session', 'child-document', 1);
-    emit('browser:setViewport', child, scope, { sessionId: 'main-session', rect: mainRect }, 'child-document', 1);
+    emit('browser:active-session', child, scope, 'main-session', 'child-document-owning-session', 1);
+    emit('browser:setViewport', child, scope, { sessionId: 'main-session', rect: mainRect }, 'child-document-owning-session', 1);
     emit('browser:active-session', main, scope, 'main-session', 'main-document', 6);
     emit('browser:setViewport', main, scope, { sessionId: 'main-session', rect: mainRect }, 'main-document', 6);
     await invoke('browser:navigate', main, scope, 'main-session', 'https://late-source.example/');

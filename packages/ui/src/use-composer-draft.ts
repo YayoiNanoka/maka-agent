@@ -58,6 +58,7 @@ export interface ComposerDraftSnapshot {
 }
 
 export interface ComposerDraftApi {
+  hasPendingRecovery(): boolean;
   captureDrafts(keys: readonly string[]): ComposerDraftSnapshot[];
   restoreDrafts(drafts: readonly ComposerDraftSnapshot[]): void;
   /** Remember the current (or given) value; persist ordinary drafts when configured. */
@@ -216,20 +217,31 @@ export function useComposerDraft(input: {
   });
 
   return {
-    captureDrafts: (keys) => keys.map((key) => ({
-      draftKey: key, text: getDraft(key),
-      references: structuredClone(activeDraftKeyRef.current === key ? input.references?.read() ?? [] : referencesByKey.current.get(key) ?? []),
-      ...(replacementsByKey.current.has(key) ? { replacesMessageId: replacementsByKey.current.get(key)! } : {}),
-    })),
+    hasPendingRecovery: mutations.hasPending,
+    captureDrafts: (keys) => keys.map((key) => {
+      const text = getDraft(key);
+      const retained = new Map<string, string>();
+      rememberComposerDraft(retained, key, text);
+      if (text.trim() && retained.get(key) !== text) throw new Error('Send or shorten this draft before moving the task; it exceeds the existing draft cache limit.');
+      return { draftKey: key, text,
+        references: structuredClone(activeDraftKeyRef.current === key ? input.references?.read() ?? [] : referencesByKey.current.get(key) ?? []),
+        ...(replacementsByKey.current.has(key) ? { replacesMessageId: replacementsByKey.current.get(key)! } : {}),
+      };
+    }),
     restoreDrafts: (drafts) => {
-      // Handoffs navigate before restoring. Restore the live editor last so
-      // the ordinary cache bound cannot evict its replacement identity while
-      // inactive group members are installed.
-      const active = drafts.find((draft) => draft.draftKey === activeDraftKeyRef.current);
-      for (const draft of drafts) {
-        if (draft !== active) setDraft(draft.draftKey, draft.text, draft.references, draft.replacesMessageId);
+      // Refuse an adoption that would evict another task's unsent text. Reuse
+      // the existing cache policy without enlarging it or adding persistence.
+      const before = new Map(draftStoreRef.current);
+      const active = activeDraftKeyRef.current;
+      if (active && input.text.getValue().trim()) before.set(active, input.text.getValue());
+      const retained = new Map(before);
+      for (const draft of drafts) rememberComposerDraft(retained, draft.draftKey, draft.text);
+      const incoming = new Set(drafts.map((draft) => draft.draftKey));
+      if (drafts.some((draft) => draft.replacesMessageId || (draft.text.trim() && retained.get(draft.draftKey) !== draft.text)) ||
+          [...before].some(([key, text]) => !incoming.has(key) && retained.get(key) !== text)) {
+        throw new Error('Send or clear drafts before moving this task; the existing draft cache is full.');
       }
-      if (active) setDraft(active.draftKey, active.text, active.references, active.replacesMessageId);
+      for (const draft of drafts) setDraft(draft.draftKey, draft.text, draft.references);
     },
     saveCurrentDraft,
     clearDraft,

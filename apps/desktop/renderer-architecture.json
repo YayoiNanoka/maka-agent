@@ -459,7 +459,7 @@
       "appShell": [
         "SessionNavigationCommands",
         "SessionNavigationProvider",
-        "createSessionOpenCommand",
+        "createSessionNavigationCommands",
         "sessionRailLayoutStore",
         "useSessionNavigationReads"
       ],
@@ -671,7 +671,7 @@
         "importDeclarations": 33,
         "bridgePaths": {},
         "environmentCapabilities": {
-          "window.requestAnimationFrame": 3
+          "window.requestAnimationFrame": 2
         },
         "hookCalls": {
           "useActiveExecutionBoundary": 1,
@@ -681,8 +681,7 @@
           "useAppShellPersistenceEffects": 1,
           "useAppShellProjectContext": 1,
           "useAppShellSessionWorkspace": 1,
-          "useLayoutEffect": 1,
-          "useRef": 4,
+          "useRef": 3,
           "useSessionNavigationReads": 1,
           "useSessionSettingIntent": 1,
           "useShellAppearance": 1,
@@ -757,8 +756,8 @@
           "@maka/ui": 1,
           "react": 1
         },
-        "importSpecifiers": 42,
-        "nonTriviaTokens": 7283
+        "importSpecifiers": 41,
+        "nonTriviaTokens": 6813
       },
       "src/renderer/use-app-shell-session-list.ts": {
         "importDeclarations": 3,

@@ -19,8 +19,8 @@
 
 import type { UiLocale } from '@maka/core/ui-locale';
 const COPY = {
-  'zh-CN': { failed: '无法打开任务窗口', deleted: '会话已删除', opening: '正在打开任务…' },
-  'zh-TW': { failed: '無法開啟任務視窗', deleted: '會話已刪除', opening: '正在開啟任務…' },
-  en: { failed: 'Could not open task window', deleted: 'This conversation was deleted', opening: 'Opening task…' },
+  'zh-CN': { unsupported: '请先发送或清空附件、引用、目录和侧边对话，并完成当前编辑或发送，再移动任务。', failed: '无法打开任务窗口', deleted: '会话已删除', opening: '正在打开任务…' },
+  'zh-TW': { unsupported: '請先傳送或清空附件、引用、目錄和側邊對話，並完成目前的編輯或傳送，再移動任務。', failed: '無法開啟任務視窗', deleted: '會話已刪除', opening: '正在開啟任務…' },
+  en: { unsupported: 'Send or clear attachments, quotes, directories and side conversations, and finish pending edits or sends before moving this task.', failed: 'Could not open task window', deleted: 'This conversation was deleted', opening: 'Opening task…' },
 };
 export function sessionWindowCopy(locale: UiLocale) { return COPY[locale]; }

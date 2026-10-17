@@ -166,7 +166,6 @@ export interface WorkbarArtifactsService {
 }
 
 export interface WorkbarAttachmentsService {
-  releaseRecoveryAttachments(approvalIds: readonly string[]): Promise<void>;
   readBytes(sessionId: string, artifactId: string): Promise<ArtifactBinaryReadResult>;
   resolveImageDelivery?: ResolveImageDelivery;
   pickFiles(): Promise<
@@ -228,13 +227,12 @@ export interface SideChatSessionPort {
       name?: string;
       copyId: string;
       sideConversation: true;
-      recoveryAttachmentIds?: readonly string[];
     },
   ): Promise<
     | { ok: true; session: SessionSummary }
     | { ok: false; reason: 'session_busy' | 'operation_unavailable' }
   >;
-  cleanupSessionCopy(sessionId: string, recovery?: { sourceSessionId: string; attachmentIds: readonly string[] }): Promise<void>;
+  cleanupSessionCopy(sessionId: string): Promise<void>;
   abandonSessionCopy(sourceSessionId: string, copyId: string): Promise<void>;
   compact(sessionId: string): Promise<ContextCompactResult>;
   send(

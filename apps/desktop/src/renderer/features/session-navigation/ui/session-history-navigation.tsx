@@ -29,7 +29,7 @@ export interface SessionHistoryNavigationProps {
   /** Only the session destination participates; settings and WorkHub do not. */
   visible: boolean;
   blocked: boolean;
-  openSession(sessionId: string): void | Promise<boolean>;
+  openSession(sessionId: string): void;
 }
 
 interface SwipeIndicator extends SessionSwipeFeedback {
@@ -68,7 +68,6 @@ export function SessionHistoryNavigation(props: SessionHistoryNavigationProps) {
     const swipe = gesture.current;
     setIndicator(null);
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let disposed = false;
     const scheduleSettlement = () => {
       clearTimeout(timer);
       const delay = swipe.settleAfter();
@@ -110,26 +109,21 @@ export function SessionHistoryNavigation(props: SessionHistoryNavigationProps) {
       }
       const available = (id: string) => catalog.getState().sessions.some((session) => session.id === id && session.localState !== 'pending');
       const canMove = history.current.peek(feedback.direction, available) !== undefined;
-      if (result.direction !== null) {
-        void history.current.move(result.direction, available, async (id) => {
-          const outcome = await openSession(id);
-          return outcome !== false && catalog.getState().activeSessionId === id;
-        }).catch(() => false).then((moved) => {
-          if (disposed) return;
-          setIndicator((value) => value ? { ...value, phase: moved ? 'committed' : 'unavailable' } : null);
-          scheduleSettlement();
+      let moved = false;
+      if (result.direction !== null) moved = history.current.move(result.direction, available,
+        (id) => {
+          openSession(id);
+          return catalog.getState().activeSessionId === id;
         });
-      }
       if (!surface || surface === 'loading') return;
       const rect = surface.getBoundingClientRect();
-      setIndicator({ ...feedback, motion: swipe.motion(), phase: !canMove ? 'unavailable' : 'pulling',
+      setIndicator({ ...feedback, motion: swipe.motion(), phase: moved ? 'committed' : (!canMove || feedback.committed) ? 'unavailable' : 'pulling',
         edge: feedback.direction === -1 ? rect.left : rect.right, top: rect.top + rect.height / 2 });
       scheduleSettlement();
     };
     document.addEventListener('wheel', onWheel, { passive: false });
     window.addEventListener('blur', cancel);
     return () => {
-      disposed = true;
       document.removeEventListener('wheel', onWheel);
       window.removeEventListener('blur', cancel);
       clearTimeout(timer);

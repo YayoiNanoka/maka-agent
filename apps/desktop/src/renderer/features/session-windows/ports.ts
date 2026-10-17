@@ -17,11 +17,9 @@
  * under the License.
  */
 
-export type { SessionWindowContext, SessionWindowNavigation } from '../../../shared/session-window-contract.js';
+export type { SessionWindowContext, SessionWindowNavigation, SessionWindowOwnership } from '../../../shared/session-window-contract.js';
 
 import type { SessionWindowBridge } from '../../../shared/session-window-contract.js';
-import type { SessionWorkspaceSnapshot } from '../../../shared/session-workspace-state.js';
 export interface SessionWindowServices extends SessionWindowBridge {
   subscribeDeleted(handler: (sessionId: string) => void): () => void;
-  releaseSnapshot(snapshot: SessionWorkspaceSnapshot): Promise<void>;
 }

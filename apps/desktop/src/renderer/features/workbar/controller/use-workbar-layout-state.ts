@@ -41,7 +41,6 @@ import {
   type SessionWorkbarTab,
   type SessionWorkbarTabKind,
 } from '../model/workbar-tabs.js';
-import type { SessionWorkbarLayoutSnapshot } from '../../../../shared/session-workbar-state.js';
 const LAYOUT_PERSIST_DEBOUNCE_MS = 200;
 
 /**
@@ -78,25 +77,6 @@ export function useWorkbarLayoutState(
   }, [authoritativeSessionIds, activeSessionId, state.panels]);
   const stateRef = useRef(state);
   stateRef.current = state;
-  const captureWorkspace = useCallback((sessionIds: readonly string[]) => {
-    const current = stateRef.current;
-    return Object.fromEntries(sessionIds.map((id) => [id, {
-      panels: current.panels,
-      collapsed: isSessionWorkbarCollapsed({ ...current, activeSessionId: id }),
-      bottomOpen: current.bottomOpen,
-      rightWidth: current.rightWidth,
-      bottomHeight: current.bottomHeight,
-    }]));
-  }, []);
-  const restoreWorkspace = useCallback((snapshots: Readonly<Record<string, SessionWorkbarLayoutSnapshot>>) => {
-    // Only an explicit handoff restores topology. Ordinary Session navigation
-    // keeps the existing window-wide topology and dimensions.
-    const id = stateRef.current.activeSessionId;
-    if (id && snapshots[id]) dispatch({
-      type: 'restore-layout', sessionId: id, snapshot: snapshots[id]!,
-      collapsedBySession: Object.fromEntries(Object.entries(snapshots).map(([sessionId, snapshot]) => [sessionId, snapshot.collapsed])),
-    });
-  }, []);
   const rightDragStartRef = useRef(state.rightWidth);
   const bottomDragStartRef = useRef(state.bottomHeight);
   // The Workbar reducer is the controlled size authority. These props adapt it
@@ -266,8 +246,6 @@ export function useWorkbarLayoutState(
   );
 
   return {
-    captureWorkspace,
-    restoreWorkspace,
     workbarCollapsed: isSessionWorkbarCollapsed(state),
     setWorkbarCollapsed,
     spaceCollapsed: state.spaceCollapsed,

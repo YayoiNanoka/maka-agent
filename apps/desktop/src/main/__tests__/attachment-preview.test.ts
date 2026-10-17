@@ -20,10 +20,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createAttachmentApprovalRegistry } from '../attachment-approval.js';
-import { SessionLocalAttachmentRecovery } from '../session-local-attachment-recovery.js';
 import {
   loadApprovalPreview,
-  loadRecoveryApprovalPreview,
   registerAttachmentPreviewIpc,
   type AttachmentPreviewResult,
 } from '../attachment-preview.js';
@@ -202,8 +200,6 @@ describe('staged attachment preview (approval source)', () => {
       (event: { sender: { id: number } }, approvalId: unknown) => Promise<AttachmentPreviewResult>
     >();
     registerAttachmentPreviewIpc({
-      recovery: new SessionLocalAttachmentRecovery(),
-      authorizeRecovery: () => true,
       ipcMain: { handle: (channel, listener) => handlers.set(channel, listener) },
       approvals,
       readFile: async () => PNG,
@@ -261,41 +257,5 @@ describe('staged attachment preview (approval source)', () => {
       }),
       { ok: false, reason: 'unreadable' },
     );
-  });
-});
-
-
-describe('workspace recovery image preview', () => {
-  const owner = { senderId: 1, partition: 'authorized', scope: { hostId: 'host', targetEpoch: 'epoch' }, sessionId: 'session' };
-  it('rebuilds a thumbnail for the new window without exposing original bytes or consuming its send approval', async () => {
-    const recovery = new SessionLocalAttachmentRecovery();
-    const [approval] = recovery.issue(owner, [{ name: 'image.png', mimeType: 'image/png', content: PNG }]);
-    const thumbnail = Uint8Array.from([...PNG, 1, 2, 3]);
-    const result = await loadRecoveryApprovalPreview({ senderId: owner.senderId, approvalId: approval.approvalId, recovery,
-      authorizeRecovery: (candidate) => candidate.partition === owner.partition && candidate.scope.targetEpoch === owner.scope.targetEpoch,
-      renderPreview: async () => ({ mimeType: 'image/png', bytes: thumbnail }),
-    });
-    assert.deepEqual(result, { ok: true, mimeType: 'image/png', base64: Buffer.from(thumbnail).toString('base64') });
-    assert.notEqual((result as { base64: string }).base64, Buffer.from(PNG).toString('base64'));
-    assert.equal(recovery.prepare(owner, [approval]).commit(() => true), true);
-  });
-  it('rejects another window or revoked Host and never falls back to original recovery bytes', async () => {
-    const recovery = new SessionLocalAttachmentRecovery();
-    const [approval] = recovery.issue(owner, [{ name: 'image.png', mimeType: 'image/png', content: PNG }]);
-    const input = { senderId: owner.senderId, approvalId: approval.approvalId, recovery, authorizeRecovery: () => true, renderPreview: async () => null };
-    assert.deepEqual(await loadRecoveryApprovalPreview({ ...input, senderId: 2 }), { ok: false, reason: 'not_found' });
-    assert.deepEqual(await loadRecoveryApprovalPreview({ ...input, authorizeRecovery: () => false }), { ok: false, reason: 'not_found' });
-    assert.deepEqual(await loadRecoveryApprovalPreview(input), { ok: false, reason: 'unreadable' });
-  });
-  it('discards a thumbnail if source authority expires during decoding', async () => {
-    const recovery = new SessionLocalAttachmentRecovery();
-    const [approval] = recovery.issue(owner, [{ name: 'image.png', mimeType: 'image/png', content: PNG }]);
-    const result = await loadRecoveryApprovalPreview({ senderId: owner.senderId, approvalId: approval.approvalId, recovery,
-      authorizeRecovery: () => true, renderPreview: async () => {
-        recovery.clear(owner.partition);
-        return { mimeType: 'image/png', bytes: PNG };
-      },
-    });
-    assert.deepEqual(result, { ok: false, reason: 'not_found' });
   });
 });

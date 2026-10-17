@@ -17,13 +17,16 @@
  * under the License.
  */
 
-import { useCallback, useLayoutEffect, useMemo, useReducer, useRef } from 'react';
+import { useCallback, useMemo, useReducer } from 'react';
 import type { QuoteCompanionPanelState } from './quote-companion-panel-state.js';
 
-import { bindSideConversationWorkspace, type SideConversationRecord } from '../../../../application/contracts/session-side-conversation-handoff.js';
+interface SideConversationRecord {
+  panel: QuoteCompanionPanelState;
+  hasContent: boolean;
+  active: boolean;
+}
 
 type SideConversationAction =
-  | { type: 'restore'; records: readonly SideConversationRecord[] }
   | { type: 'upsert'; panel: QuoteCompanionPanelState }
   | {
       type: 'update-panel';
@@ -42,10 +45,6 @@ function reduceSideConversations(
   state: readonly SideConversationRecord[],
   action: SideConversationAction,
 ): readonly SideConversationRecord[] {
-  if (action.type === 'restore') {
-    const restored = new Map(action.records.map((record) => [record.panel.id, record]));
-    return [...state.filter((record) => !restored.has(record.panel.id)), ...action.records];
-  }
   if (action.type === 'upsert') {
     const index = state.findIndex((record) => record.panel.id === action.panel.id);
     if (index < 0) {
@@ -87,13 +86,6 @@ function reduceSideConversations(
 
 export function useSideConversationWorkspace() {
   const [records, dispatch] = useReducer(reduceSideConversations, []);
-  const recordsRef = useRef(records);
-  recordsRef.current = records;
-  useLayoutEffect(() => bindSideConversationWorkspace({
-    records: () => recordsRef.current,
-    restore: (records) => dispatch({ type: 'restore', records }),
-    remove: (panelIds) => dispatch({ type: 'remove', panelIds }),
-  }), []);
   const panels = useMemo(() => records.map((record) => record.panel), [records]);
   const panelIds = useCallback(
     (field: 'hasContent' | 'active') =>

@@ -27,10 +27,7 @@ export function createComposerStagingCommands(): ComposerStagingCommands {
     return binding.current;
   };
   const commands: ComposerStagingCommands = {
-    flushImports: () => requireOwner().flushImports(),
-    captureDrafts: (keys) => requireOwner().captureDrafts(keys),
-    replaceDrafts: (drafts) => requireOwner().replaceDrafts(drafts),
-    clearDrafts: (keys) => requireOwner().clearDrafts(keys),
+    hasPendingContext: (ids) => requireOwner().hasPendingContext(ids),
     captureSubmission: () => requireOwner().captureSubmission(),
     stagedContext: () => requireOwner().stagedContext(),
     addQuote: (quote) => requireOwner().addQuote(quote),

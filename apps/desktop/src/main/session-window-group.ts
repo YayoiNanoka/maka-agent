@@ -28,6 +28,7 @@ export type WindowGroupSession = Pick<SessionSummary,
 /** Retain ancestry for this app lifetime so deleting a parent cannot split its open family. */
 export class SessionWindowGroups {
   readonly #catalogs = new Map<string, Map<string, WindowGroupSession>>();
+  readonly #groups = new Map<string, Map<string, SessionWindowGroup>>();
 
   has(sessionKey: string): boolean {
     const { hostId, sessionId } = parseDesktopSessionKey(sessionKey);
@@ -37,15 +38,32 @@ export class SessionWindowGroups {
   update(hostId: string, sessions: readonly WindowGroupSession[]): void {
     let catalog = this.#catalogs.get(hostId);
     if (!catalog) this.#catalogs.set(hostId, catalog = new Map());
-    for (const session of sessions) catalog.set(session.id, session);
+    for (const session of sessions) {
+      const previous = catalog.get(session.id);
+      if (!previous || sessionRevisionFamilyId(previous) !== sessionRevisionFamilyId(session)
+        || linkedSubagentParentSessionId(previous) !== linkedSubagentParentSessionId(session)
+        || previous.parentSessionId !== session.parentSessionId
+        || isSideConversationSession(previous.labels) !== isSideConversationSession(session.labels)) this.#groups.delete(hostId);
+      catalog.set(session.id, session);
+    }
+  }
+
+  all(): SessionWindowGroup[] {
+    return [...this.#catalogs.keys()].flatMap((hostId) => [...new Set(this.#forHost(hostId).values())]);
   }
 
   resolve(sessionKey: string, sessions: readonly WindowGroupSession[]): SessionWindowGroup {
     const { hostId, sessionId } = parseDesktopSessionKey(sessionKey);
-    let catalog = this.#catalogs.get(hostId);
-    if (!catalog) this.#catalogs.set(hostId, catalog = new Map());
-    for (const session of sessions) catalog.set(session.id, session);
-    if (!catalog.has(sessionId)) throw new Error('Session is unavailable');
+    this.update(hostId, sessions);
+    const group = this.#forHost(hostId).get(sessionId);
+    if (!group) throw new Error('Session is unavailable');
+    return group;
+  }
+
+  #forHost(hostId: string): Map<string, SessionWindowGroup> {
+    const cached = this.#groups.get(hostId);
+    if (cached) return cached;
+    const catalog = this.#catalogs.get(hostId) ?? new Map<string, WindowGroupSession>();
     const familyOf = (id: string): string => {
       const session = catalog.get(id);
       return session ? sessionRevisionFamilyId(session) : id;
@@ -68,16 +86,24 @@ export class SessionWindowGroups {
       }
       return current;
     };
-    const root = rootOf(sessionId);
-    const members = [...catalog.keys()].filter((id) => rootOf(id) === root);
-    // Include a deleted/missing root identity in ownership checks as well.
-    if (!members.includes(root)) members.push(root);
-    return {
-      hostId,
-      groupId: desktopSessionKey({ hostId, sessionId: root }),
-      sessionIds: members.sort().map((id) => desktopSessionKey({ hostId, sessionId: id })),
-    };
+    const members = new Map<string, string[]>();
+    for (const id of catalog.keys()) {
+      const root = rootOf(id);
+      const group = members.get(root) ?? [];
+      group.push(id);
+      members.set(root, group);
+    }
+    const result = new Map<string, SessionWindowGroup>();
+    for (const [root, ids] of members) {
+      // A deleted parent retains its identity while the family window is open.
+      if (!ids.includes(root)) ids.push(root);
+      const group = { hostId, groupId: desktopSessionKey({ hostId, sessionId: root }),
+        sessionIds: ids.sort().map((id) => desktopSessionKey({ hostId, sessionId: id })) };
+      for (const id of ids) result.set(id, group);
+    }
+    this.#groups.set(hostId, result);
+    return result;
   }
 
-  forgetHost(hostId: string): void { this.#catalogs.delete(hostId); }
+  forgetHost(hostId: string): void { this.#catalogs.delete(hostId); this.#groups.delete(hostId); }
 }

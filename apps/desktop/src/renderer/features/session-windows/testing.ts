@@ -18,4 +18,4 @@
  */
 
 export { createSessionWindowCommandHandler } from './controller/session-window-command.js';
-export { bootstrapSessionWindow, createSessionWindowNavigator, restoreSessionWindowWorkspace } from './controller/session-window-navigation.js';
+export { bootstrapSessionWindow, createSessionWindowNavigator } from './controller/session-window-navigation.js';

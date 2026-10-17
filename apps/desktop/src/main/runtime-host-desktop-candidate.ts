@@ -137,8 +137,6 @@ export interface DesktopRuntimeHostCandidateDeps {
   readonly ipcMain: RuntimeHostTargetIpcMain;
   readonly workspaceRoot: string;
   readonly attachmentApprovals: AttachmentApprovalRegistry;
-  readonly recoverAttachmentItems?: (senderId: number, scope: DesktopTargetScope, sessionId: string, items: unknown) => { items: unknown[]; validate(): void; dispose(): void };
-  readonly transferRecoveryAttachments?: (senderId: number, scope: DesktopTargetScope, sourceSessionId: string, targetSessionId: string, ids: unknown) => void;
   readonly stat: (path: string) => Promise<{ size: number }>;
   readonly resizeImage: (bytes: Uint8Array) => Promise<Uint8Array>;
   /** Native file dialogs for moving a Session in or out as a bundle. */
@@ -278,7 +276,6 @@ export interface DesktopRuntimeHostCandidate {
   submitLocalMessage(input: TurnMessageSubmitInput): Promise<TurnMessageSubmitResult>;
   readonly botIncoming: BotIncomingMainService;
   readonly client: DesktopRuntimeHostClient;
-  readonly sessionCopyCleanup?: SessionCopyCleanupAuthority;
   readonly closed: Promise<void>;
   readonly hostOwnership: DesktopRuntimeHostOwnership;
   readonly hostPid?: number;
@@ -290,7 +287,6 @@ export interface DesktopRuntimeHostCandidate {
 class DesktopRuntimeHostCandidateImpl implements DesktopRuntimeHostCandidate {
   readonly botIncoming: BotIncomingMainService;
   readonly client: DesktopRuntimeHostClient;
-  readonly sessionCopyCleanup?: SessionCopyCleanupAuthority;
   readonly closed: Promise<void>;
   readonly hostOwnership: DesktopRuntimeHostOwnership;
   readonly hostPid: number | undefined;
@@ -310,7 +306,6 @@ class DesktopRuntimeHostCandidateImpl implements DesktopRuntimeHostCandidate {
 
   constructor(input: {
     client: DesktopRuntimeHostClient;
-    sessionCopyCleanup?: SessionCopyCleanupAuthority;
     observer: RuntimeHostSessionObserver;
     ipc: ScopedIpcMain;
     botIncoming: BotIncomingMainService;
@@ -328,7 +323,6 @@ class DesktopRuntimeHostCandidateImpl implements DesktopRuntimeHostCandidate {
   }) {
     this.#client = input.client;
     this.client = input.client;
-    this.sessionCopyCleanup = input.sessionCopyCleanup;
     this.#observer = input.observer;
     this.#ipc = input.ipc;
     this.#botIncoming = input.botIncoming;
@@ -963,7 +957,6 @@ export async function createDesktopRuntimeHostCandidate(
             : {}),
           emitSessionsChanged,
           releaseSessionResources: releaseNativeSession,
-          ...(deps.transferRecoveryAttachments ? { transferRecoveryAttachments: (senderId: number, source: string, target: string, ids: unknown) => deps.transferRecoveryAttachments!(senderId, scope, source, target, ids) } : {}),
           sessionCopyCleanup,
           ...(deps.newId ? { newId: deps.newId } : {}),
         },
@@ -1005,8 +998,6 @@ export async function createDesktopRuntimeHostCandidate(
             observer: sessionObserver,
             retireCancelledMessages,
             attachmentApprovals: deps.attachmentApprovals,
-            ...(deps.recoverAttachmentItems ? { recoverAttachmentItems: (senderId: number, sessionId: string, items: unknown) => deps.recoverAttachmentItems!(senderId, scope, sessionId, items) } : {}),
-            ...(deps.transferRecoveryAttachments ? { transferRecoveryAttachments: (senderId: number, source: string, target: string, ids: unknown) => deps.transferRecoveryAttachments!(senderId, scope, source, target, ids) } : {}),
             emitSessionsChanged,
             stat: deps.stat,
             resizeImage: deps.resizeImage,
@@ -1050,7 +1041,6 @@ export async function createDesktopRuntimeHostCandidate(
     );
     return new DesktopRuntimeHostCandidateImpl({
       client,
-      ...(sessionCopyCleanup ? { sessionCopyCleanup } : {}),
       observer: sessionObserver,
       ipc,
       botIncoming,

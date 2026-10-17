@@ -64,7 +64,6 @@ import {
   applyCompanionInteractionEvent,
   createCompanionDismissalGuard,
   dismissCompanionCopy,
-  detachCompanionCopy,
   companionRunEventEffect,
   ensureCompanionFork,
   performCompanionTurn,
@@ -131,15 +130,7 @@ function admissionOutcomeForMessage(
   return retracted ? { kind: 'retracted' } : undefined;
 }
 
-export interface CompanionWorkspaceState {
-  readonly sessionId: string;
-  readonly ownTurnIds: readonly string[];
-  readonly queueOwnedMessageIds: readonly string[];
-}
-
 export interface UseQuoteCompanionInput {
-  restoredWorkspace?: CompanionWorkspaceState;
-  restoredHasContent?: boolean;
   /** Stable owner for the currently mounted panel generation. */
   panelId: string;
   /** Whether anyone can see the transcript. Observation follows this: hidden
@@ -185,9 +176,6 @@ export async function requestPermissionModeWithConfirmation(
 }
 
 export interface UseQuoteCompanionResult {
-  captureWorkspace(): Promise<CompanionWorkspaceState | undefined>;
-  detachWorkspace(): void;
-  resumeWorkspace(): void;
   companionSession: SessionSummary | undefined;
   /** True after this temporary conversation has accepted at least one turn. */
   hasContent: boolean;
@@ -314,14 +302,7 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
   const copy = getDesktopConversationCopy(locale).quoteCompanion;
   const [companion, setCompanion] = useState<SessionSummary | undefined>(undefined);
   const companionRef = useRef<SessionSummary | undefined>(undefined);
-  const companionIdRef = useRef<string | null>(input.restoredWorkspace?.sessionId ?? null);
-  const detachWorkspaceRef = useRef(false);
-  const workspaceSendsRef = useRef(new Set<Promise<unknown>>());
-  function trackWorkspaceSend<T>(pending: Promise<T>): Promise<T> {
-    workspaceSendsRef.current.add(pending);
-    void pending.finally(() => workspaceSendsRef.current.delete(pending)).catch(() => {});
-    return pending;
-  }
+  const companionIdRef = useRef<string | null>(null);
   // A created fork is hidden immediately, but is not considered usable until
   // onForkCommitted promotes it.
   const pendingForkIdRef = useRef<string | null>(null);
@@ -357,7 +338,7 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
   localeRef.current = locale;
   const copyRef = useRef(copy);
   copyRef.current = copy;
-  const ownTurnIdsRef = useRef<Set<string>>(new Set(input.restoredWorkspace?.ownTurnIds));
+  const ownTurnIdsRef = useRef<Set<string>>(new Set());
   const compactionRequestInFlightRef = useRef(false);
   const compactionTurnIdRef = useRef<string | null>(null);
   const pendingCompactionTerminalRef = useRef<PendingCompactionTerminal | null>(null);
@@ -392,7 +373,7 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
   // presentation authority, but it drains when the Host consumes entries — a
   // reconnect can miss the admission events that would have bound their
   // Turns, so reseed resolves ownership through this set instead.
-  const queueOwnedMessageIdsRef = useRef(new Set<string>(input.restoredWorkspace?.queueOwnedMessageIds));
+  const queueOwnedMessageIdsRef = useRef(new Set<string>());
   const [execution, setExecution] = useState<SessionExecutionProjection>();
   const [liveTurns, setLiveTurns] = useState<LiveTurnBuffer>();
   const liveTurnsRef = useRef(liveTurns);
@@ -402,7 +383,7 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
   const processing = pendingAdmission !== null;
   const streaming = processing || Boolean(activeHostTurn(execution));
   const turnInFlight = streaming;
-  const [hasContent, setHasContent] = useState(input.restoredHasContent ?? false);
+  const [hasContent, setHasContent] = useState(false);
   const hasContentRef = useRef(hasContent);
   hasContentRef.current = hasContent;
   const [error, setError] = useState<string | null>(null);
@@ -966,19 +947,6 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
     [subscribeToFork],
   );
 
-  useEffect(() => {
-    const restored = input.restoredWorkspace;
-    if (!restored) return;
-    let disposed = false;
-    void sideChat.listSessions().then((sessions) => {
-      if (disposed || !mountedRef.current) return;
-      const session = sessions.find((entry) => entry.id === restored.sessionId);
-      if (session) { companionRef.current = session; setCompanion(session); }
-      else setError(copyRef.current.errors.forkSetupFailed);
-    }).catch(() => { if (!disposed) setError(copyRef.current.errors.sendFailed); });
-    return () => { disposed = true; };
-  }, []);
-
   // The fork's observation period is the panel's interest period: a hidden
   // panel renders nothing, so its observer is released; returning re-seeds it
   // through the same recovery path a lost subscription takes (seeded events
@@ -996,7 +964,7 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
   }, [active, subscribeToFork]);
 
   const ensureFork = useCallback(
-    (name: string, recoveryAttachmentIds?: readonly string[]): Promise<EnsureCompanionForkResult> => {
+    (name: string): Promise<EnsureCompanionForkResult> => {
       if (forkSetupPromiseRef.current) return forkSetupPromiseRef.current;
       const currentSourceSession = sourceSessionRef.current;
       if (
@@ -1006,7 +974,6 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
         return Promise.resolve({ status: 'error', code: 'fork_setup_failed' });
       }
       const existing = companionRef.current;
-      if (companionIdRef.current && !existing) return Promise.resolve({ status: 'error', code: 'fork_setup_failed' });
       if (existing && sessionHasExactModelChoice(existing, modelChoicesRef.current)) {
         return Promise.resolve({ status: 'ready', session: existing });
       }
@@ -1028,7 +995,7 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
         if (existing) {
           const sourceId = sourceSessionIdRef.current;
           if (!sourceId) return { status: 'error', code: 'fork_setup_failed' };
-          const cleaned = await dismissCompanionCopy(sideChat, sourceId, panelId, existing.id, recoveryAttachmentIds);
+          const cleaned = await dismissCompanionCopy(sideChat, sourceId, panelId, existing.id);
           if (!cleaned) return { status: 'error', code: 'fork_setup_failed' };
           unsubscribeRef.current?.();
           unsubscribeRef.current = null;
@@ -1061,7 +1028,6 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
           sourceSession: latestSource,
           panelId,
           name,
-          recoveryAttachmentIds,
           isDisposed: () => !mountedRef.current,
           onForkCreated: (session) => {
             pendingForkIdRef.current = session.id;
@@ -1131,8 +1097,9 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
   // wedge the composer: the next send discards it and re-forks from the current
   // source model, so treat it as ready regardless of its stale inherited model.
   const companionModelReady =
-    (!input.restoredWorkspace && companion === undefined) ||
-    (companion !== undefined && (!hasContent || sessionHasExactModelChoice(companion, modelChoices)));
+    companion === undefined ||
+    !hasContent ||
+    sessionHasExactModelChoice(companion, modelChoices);
 
   // The fork is ephemeral (用完即弃): when the panel is explicitly dismissed,
   // unsubscribe and remove the fork so it never lingers in the session list.
@@ -1146,7 +1113,6 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
         // A later setup generation means this was not a real panel dismissal.
         if (!shouldDismiss()) return;
         unsubscribeRef.current?.();
-        if (detachWorkspaceRef.current) return;
         const sourceSessionId = sourceSessionIdRef.current;
         const id = companionIdRef.current ?? pendingForkIdRef.current;
         if (id && sourceSessionId) {
@@ -1294,9 +1260,7 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
         dropOptimisticUserMessage(turnId);
         setSubmitLocked(false);
       };
-      const recoveryAttachmentIds = attachments?.flatMap((attachment) => attachment.source.type === 'approval' &&
-        attachment.source.approvalId.startsWith('local-recovery:') ? [attachment.source.approvalId] : []);
-      const fork = await ensureFork(`${copyRef.current.namePrefix}${label}`, recoveryAttachmentIds);
+      const fork = await ensureFork(`${copyRef.current.namePrefix}${label}`);
       if (fork.status !== 'ready') {
         abandonOptimisticSend();
         return false;
@@ -1805,18 +1769,6 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
   const activeForm = activeInteraction?.type === 'form_request' ? activeInteraction : undefined;
 
   return {
-    async captureWorkspace() {
-      while (workspaceSendsRef.current.size) await Promise.allSettled([...workspaceSendsRef.current]);
-      if (forkSetupPromiseRef.current) await forkSetupPromiseRef.current;
-      if (submitLockRef.current || pendingAdmissionRef.current) throw new Error('Side conversation admission is not confirmed');
-      const sessionId = companionIdRef.current;
-      return sessionId ? { sessionId, ownTurnIds: [...ownTurnIdsRef.current], queueOwnedMessageIds: [...queueOwnedMessageIdsRef.current] } : undefined;
-    },
-    detachWorkspace() {
-      detachWorkspaceRef.current = true;
-      if (sourceSessionIdRef.current) detachCompanionCopy(sourceSessionIdRef.current, panelId);
-    },
-    resumeWorkspace() { detachWorkspaceRef.current = false; },
     companionSession: companion,
     hasContent,
     messages,
@@ -1836,9 +1788,9 @@ export function useQuoteCompanion(input: UseQuoteCompanionInput): UseQuoteCompan
     activeQuestion,
     activeForm,
     compact,
-    send: (...args: Parameters<typeof send>) => trackWorkspaceSend(send(...args)),
-    steer: (...args: Parameters<typeof steer>) => trackWorkspaceSend(steer(...args)),
-    queue: (...args: Parameters<typeof queue>) => trackWorkspaceSend(queue(...args)),
+    send,
+    steer,
+    queue,
     promoteQueuedEntry,
     editQueuedEntry: async (entry: Pick<MessageQueueEntryProjection, 'entryId' | 'content'>) => {
       if (queuedEntryDraft) await retractQueuedEntryToDraft(entry, queuedEntryDraft);

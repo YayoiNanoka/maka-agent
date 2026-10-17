@@ -19,8 +19,6 @@
 
 import { linkedSubagentParentSessionId } from '@maka/core/session';
 import { isSideConversationSession } from '@maka/core/side-conversation';
-import { adoptWorkspaceCopies } from './session-workspace-custody.js';
-import { bindSessionCopyOwner } from './runtime-host-session-execution-ipc-main.js';
 import { resolveDesktopWslHostHandoff } from './runtime-host-wsl-handoff.js';
 import {
   app,
@@ -288,9 +286,7 @@ import {
 } from "../shared/runtime-host-identity.js";
 
 import { SessionWindowGroups } from './session-window-group.js';
-import { SessionWorkspaceStateStore } from './session-workspace-state-store.js';
 import { createSessionWindowCoordinator, registerSessionWindowIpc } from './session-window-coordinator.js';
-import type { SessionWorkspaceSnapshot } from '../shared/session-workspace-state.js';
 
 const MANAGED_UPDATE_RECONNECT_TIMEOUT_MS = 10_000;
 bootContext.prepareToQuit = prepareRuntimeHostDesktopQuit;
@@ -428,10 +424,7 @@ const native = assembleDesktopNativeCapabilities({
   revealMode,
   locale: desktopLocale,
   keepSystemAwake,
-  sessionWindow: (id) => {
-    const owner = sessionWindows.ownerForSession(desktopSessionKey(parseDesktopSessionResourceKey(id)));
-    return owner ? mainWindowController.registry.forSender(owner)?.controller : mainWindowController.registry.main()?.controller;
-  },
+  mainWindow: mainWindowController,
 });
 const riveWorkflowTool = buildRiveWorkflowTool();
 const completeDesktopInteractionTurn = (sessionId: string): void => {
@@ -489,108 +482,18 @@ const sessionLocal = new DesktopSessionLocalService(sessionLocalStore, {
     const target = localSessionTarget(state);
     return target ? [target] : [];
   }),
-  changed: localSessionChanged,
+  changed: (scope, sessionId) => {
+    sessionWindows.refreshOwnership();
+    localSessionChanged(scope, sessionId);
+  },
   onError: (error) => console.error('[session-local] background synchronization failed:', error),
-});
-const sessionWorkspaceStore = new SessionWorkspaceStateStore({
-  approvals: attachmentApprovals, recovery: sessionLocal.attachmentRecovery,
 });
 const sessionWindowGroups = new SessionWindowGroups();
 const sessionWindowLifetime = new AbortController();
 
-function workspaceOwner(sender: Pick<WebContents, 'id'>, hostId: string) {
-  const state = runtimeHostManager?.entries().find((entry) => entry.hostId === hostId);
-  if (!state || (state.readiness === 'unavailable' && state.error instanceof RuntimeHostProfileConnectionError && state.error.reason === 'credential_rejected')) {
-    throw new Error('Session Host authority is unavailable');
-  }
-  return {
-    senderId: sender.id,
-    partition: desktopSessionLocalPartition({ profileId: state.target.profile.id, hostId, incarnation: state.target.profileIncarnationId, credential: state.target.credential }),
-    scope: { hostId, targetEpoch: state.epoch },
-  };
-}
-async function saveWorkspaceSnapshot(sender: WebContents, snapshot: SessionWorkspaceSnapshot, onLoss?: (message: string) => void): Promise<SessionWorkspaceSnapshot> {
-  const keys = [
-    ...snapshot.drafts.map((draft) => draft.sessionId),
-    ...snapshot.sideConversations.map((side) => side.panel.sourceSessionId),
-    ...Object.keys(snapshot.workbar ?? {}), ...Object.keys(snapshot.readingAnchors ?? {}),
-  ];
-  const hosts = new Set(keys.map((key) => parseDesktopSessionKey(key).hostId));
-  const workspaces = [...hosts].map((hostId) => {
-    const belongs = (key: string) => parseDesktopSessionKey(key).hostId === hostId;
-    return { owner: workspaceOwner(sender, hostId), snapshot: {
-      capturedAt: snapshot.capturedAt,
-      drafts: snapshot.drafts.filter((draft) => belongs(draft.sessionId)),
-      sideConversations: snapshot.sideConversations.filter((side) => belongs(side.panel.sourceSessionId)),
-      workbar: Object.fromEntries(Object.entries(snapshot.workbar ?? {}).filter(([key]) => belongs(key))),
-      readingAnchors: Object.fromEntries(Object.entries(snapshot.readingAnchors ?? {}).filter(([key]) => belongs(key))),
-    } };
-  });
-  await sessionWorkspaceStore.saveAll(workspaces, onLoss);
-  const unavailable = new Set<string>();
-  try {
-    await moveWorkspaceCopies(snapshot, 'workspace', sender, onLoss ? (side, error) => {
-      const { hostId } = parseDesktopSessionKey(side.panel.sourceSessionId);
-      sessionWorkspaceStore.releaseUnavailableCompanion(workspaceOwner(sender, hostId).partition, side.panel.sourceSessionId, side.panel.id, snapshot.capturedAt);
-      unavailable.add(side.panel.id);
-      onLoss(`Side conversation history: ${error instanceof Error ? error.message : String(error)}`);
-    } : undefined);
-  } catch (error) { forgetWorkspaceSnapshot(sender, snapshot); throw error; }
-  return { ...snapshot, sideConversations: snapshot.sideConversations.map((side) => {
-    if (!unavailable.has(side.panel.id)) return side;
-    const { companion: _companion, ...retained } = side;
-    return { ...retained, active: false, hasContent: false, draft: { ...side.draft, sessionId: side.panel.sourceSessionId } };
-  }) };
-}
-async function moveWorkspaceCopies(
-  snapshot: SessionWorkspaceSnapshot, owner: 'workspace' | WebContents, previousOwner: 'workspace' | WebContents,
-  unavailable?: (side: SessionWorkspaceSnapshot['sideConversations'][number], error: unknown) => void,
-): Promise<void> {
-  const ownerId = (value: 'workspace' | WebContents) => value === 'workspace' ? value : `web-contents:${value.id}`;
-  await adoptWorkspaceCopies(snapshot, {
-    ownerId: ownerId(owner), previousOwnerId: ownerId(previousOwner), unavailable,
-    resolve: (side) => {
-      const { hostId, sessionId } = parseDesktopSessionKey(side.companion!.sessionId);
-      const state = runtimeHostManager?.entries().find((entry) => entry.hostId === hostId);
-      const authority = state?.readiness === 'ready' ? state.candidate.sessionCopyCleanup : undefined;
-      if (!authority) throw new Error('Side conversation cleanup authority is unavailable');
-      if (owner !== 'workspace') bindSessionCopyOwner(authority, owner, (error) => console.error('[session-copy]', error));
-      return { authority, sessionId, sourceSessionId: parseDesktopSessionKey(side.panel.sourceSessionId).sessionId };
-    },
-  });
-}
-
-function forgetWorkspaceSnapshot(sender: WebContents, snapshot: SessionWorkspaceSnapshot): void {
-  const hosts = new Map<string, string[]>();
-  for (const draft of snapshot.drafts) {
-    const hostId = parseDesktopSessionKey(draft.sessionId).hostId;
-    const ids = hosts.get(hostId) ?? [];
-    ids.push(draft.sessionId);
-    hosts.set(hostId, ids);
-  }
-  for (const [hostId, ids] of hosts) {
-    sessionWorkspaceStore.forget(workspaceOwner(sender, hostId).partition, ids, snapshot.capturedAt);
-  }
-}
-async function loadWorkspaceSnapshot(sender: WebContents, sessionIds: readonly string[]): Promise<SessionWorkspaceSnapshot> {
-  const hosts = new Set(sessionIds.map((key) => parseDesktopSessionKey(key).hostId));
-  const snapshots: SessionWorkspaceSnapshot[] = [];
-  try {
-    for (const hostId of hosts) snapshots.push(sessionWorkspaceStore.load(workspaceOwner(sender, hostId), sessionIds.filter((key) => parseDesktopSessionKey(key).hostId === hostId)));
-  } catch (error) {
-    for (const snapshot of snapshots) sessionWorkspaceStore.releaseSnapshot(sender.id, snapshot);
-    throw error;
-  }
-  return {
-    capturedAt: Math.max(0, ...snapshots.map((snapshot) => snapshot.capturedAt)), drafts: snapshots.flatMap((snapshot) => snapshot.drafts),
-    sideConversations: snapshots.flatMap((snapshot) => snapshot.sideConversations),
-    workbar: Object.assign({}, ...snapshots.map((snapshot) => snapshot.workbar)),
-    readingAnchors: Object.assign({}, ...snapshots.map((snapshot) => snapshot.readingAnchors)),
-  };
-}
 registerDesktopSessionLocalIpc({
   ipcMain, service: sessionLocal, approvals: attachmentApprovals, resizeImage: resizeImageForAttachment,
-  changed: localSessionChanged,
+  changed: (scope, sessionId) => { sessionWindows.refreshOwnership(); localSessionChanged(scope, sessionId); },
   resolveWorkspace: async (target, input) => {
     const context = runtimePolicyTargetsByEpoch.get(target.scope.targetEpoch);
     if (!context?.isActive()) throw new Error('Select a cached project before creating an offline task');
@@ -943,38 +846,28 @@ const sessionWindows = createSessionWindowCoordinator({
     }
     return sessionWindowGroups.resolve(id, []);
   },
-  saveSnapshot: async (sender, snapshot) => { await saveWorkspaceSnapshot(sender, snapshot); },
-  saveForClose: async (sender, snapshot) => {
-    const losses: string[] = [];
-    const retained = await saveWorkspaceSnapshot(sender, snapshot, (message) => losses.push(message));
-    return { snapshot: retained, losses };
+  knownGroups: () => {
+    for (const entry of sessionLocal.catalog()) sessionWindowGroups.update(entry.scope.hostId, entry.sessions);
+    return sessionWindowGroups.all();
   },
-  confirmClose: async (sender, losses) => {
+  confirmClose: async (sender) => {
     const zh = (await desktopLocale.resolve()).startsWith('zh');
     const options = {
       type: 'warning' as const, title: 'Maka',
-      message: zh ? '部分内容无法保留，仍要关闭窗口吗？' : 'Some content could not be retained. Close the window anyway?',
-      detail: (zh ? '已尽量保留草稿。以下内容无法保留：\n' : 'Drafts have been retained where possible. The following could not be retained:\n') + losses.join('\n'),
-      buttons: zh ? ['取消', '仍然关闭'] : ['Cancel', 'Close anyway'],
+      message: zh ? '关闭窗口并丢弃未发送的内容？' : 'Close this window and discard unsent content?',
+      buttons: zh ? ['取消', '丢弃并关闭'] : ['Cancel', 'Discard and close'],
       defaultId: 0, cancelId: 0,
     };
     const window = mainWindowController.browserWindowFor(sender);
     const result = await (window ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options));
     return result.response === 1;
   },
-  forgetSnapshot: forgetWorkspaceSnapshot,
-  adoptSnapshot: async (sender, snapshot) => {
-    await moveWorkspaceCopies(snapshot, sender, 'workspace');
-    forgetWorkspaceSnapshot(sender, snapshot);
-  },
-  loadSnapshot: loadWorkspaceSnapshot,
-  releaseSnapshot: (sender, snapshot) => sessionWorkspaceStore.releaseSnapshot(sender.id, snapshot),
   transferResources: async ({ group, source, target }) => {
     browserIpc.transferSessions(group.sessionIds, source, target);
-    native.computerUsePip.refreshOwner();
+    const sessionId = native.computerUsePip.currentSessionId();
+    if (sessionId && group.sessionIds.includes(desktopSessionKey(parseDesktopSessionResourceKey(sessionId)))) native.computerUsePip.clearForSession(sessionId);
   },
   releaseResources: (sender) => {
-    sessionLocal.attachmentRecovery.releaseSender(sender.id);
     browserIpc.releaseRenderer(sender);
     const sessionId = native.computerUsePip.currentSessionId();
     if (sessionId) {
@@ -1195,16 +1088,7 @@ const notifyRun = createRunNotifier({
   locale: desktopLocale,
   mainWindowController,
   e2e: isE2e,
-  focusSession: (input) => {
-    const state = runtimeHostManager?.entries().find((entry) => entry.readiness === 'ready' && entry.candidate.client.hostEpoch === input.hostEpoch);
-    if (state) void sessionWindows.focusSession(desktopSessionKey({ hostId: state.hostId, sessionId: input.sessionId })).catch(console.error);
-  },
-  isSessionFocused: (input) => {
-    const state = runtimeHostManager?.entries().find((entry) => entry.readiness === 'ready' && entry.candidate.client.hostEpoch === input.hostEpoch);
-    if (!state) return false;
-    const owner = sessionWindows.ownerForSession(desktopSessionKey({ hostId: state.hostId, sessionId: input.sessionId }));
-    return (owner ? mainWindowController.browserWindowFor(owner) : mainWindowController.browserWindow())?.isFocused() ?? false;
-  },
+
 });
 
 const sessionCopyOwnerProcessId = randomUUID();
@@ -1243,16 +1127,6 @@ const createLocalRuntimeHostManager = () => createRuntimeHostDesktopManager(
     ipcMain,
     workspaceRoot,
     attachmentApprovals,
-    recoverAttachmentItems: (senderId, scope, sessionId, items) => {
-      const owner = workspaceOwner({ id: senderId }, scope.hostId);
-      if (owner.scope.targetEpoch !== scope.targetEpoch) throw new Error('Attachment Host authority changed');
-      return sessionLocal.attachmentRecovery.prepare({ ...owner, sessionId }, items);
-    },
-    transferRecoveryAttachments: (senderId, scope, sourceSessionId, targetSessionId, ids) => {
-      const owner = workspaceOwner({ id: senderId }, scope.hostId);
-      if (owner.scope.targetEpoch !== scope.targetEpoch) throw new Error('Attachment Host authority changed');
-      sessionLocal.attachmentRecovery.transfer({ ...owner, sessionId: sourceSessionId }, targetSessionId, ids);
-    },
     stat: (path) => import("node:fs/promises").then(({ stat }) => stat(path)),
     resizeImage: resizeImageForAttachment,
     mainWindowController,
@@ -1448,7 +1322,7 @@ const createLocalRuntimeHostManager = () => createRuntimeHostDesktopManager(
       if (localTarget) {
         sessionLocal.connectionChanged(localTarget);
         sessionLocalStore.bindAuthority(localTarget.profileId, localTarget.partition);
-        if (state.readiness === 'unavailable' && state.error instanceof RuntimeHostProfileConnectionError && state.error.reason === 'credential_rejected') { sessionLocal.purge(localTarget); sessionWorkspaceStore.clear(localTarget.partition); sessionWindowGroups.forgetHost(state.hostId); }
+        if (state.readiness === 'unavailable' && state.error instanceof RuntimeHostProfileConnectionError && state.error.reason === 'credential_rejected') { sessionLocal.purge(localTarget); sessionWindowGroups.forgetHost(state.hostId); }
       }
       sessionLocal.wake();
       const event = runtimeHostTargetEvent(state);
@@ -1492,7 +1366,7 @@ const createLocalRuntimeHostManager = () => createRuntimeHostDesktopManager(
     },
     onTargetRemoved: (state) => {
       const localTarget = localSessionTarget(state);
-      if (localTarget) { sessionLocal.purge(localTarget); sessionWorkspaceStore.clear(localTarget.partition); }
+      if (localTarget) { sessionLocal.purge(localTarget); }
       sessionWindowGroups.forgetHost(state.hostId);
       mainWindowController.send("runtime-host-profiles:changed", {
         ...runtimeHostTargetEvent(state),
@@ -2266,11 +2140,6 @@ function registerPersistentClientIpc(): void {
   registerAttachmentPreviewIpc({
     ipcMain,
     approvals: attachmentApprovals,
-    recovery: sessionLocal.attachmentRecovery,
-    authorizeRecovery: (owner) => {
-      try { return sessionLocal.target(owner.scope).partition === owner.partition; }
-      catch { return false; }
-    },
     readFile: readFileCapped,
     renderPreview: renderAttachmentPreview,
   });
@@ -2329,7 +2198,6 @@ function emitSessionsChanged(
     try {
       const target = sessionLocal.target(scope);
       sessionLocal.removeSession(target, sessionId);
-      sessionWorkspaceStore.delete(target.partition, [desktopSessionKey({ ...scope, sessionId })]);
     } catch { /* A retired target cannot repopulate its cache. */ }
   }
   const event: SessionChangedEvent = {
@@ -2398,7 +2266,6 @@ function closeRuntimeHostDesktop(): Promise<void> {
 async function disposeRuntimeHostDesktop(): Promise<void> {
   sessionWindowLifetime.abort();
   sessionWindows.dispose();
-  sessionWorkspaceStore.close();
   sessionLocal.close();
   powerMonitor.off("resume", wakePeerRecoveryAfterResume);
   clientSettingsWatcher.stop();

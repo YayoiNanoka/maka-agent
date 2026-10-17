@@ -76,37 +76,10 @@ type ToastApi = {
   error(title: string, description?: string): void;
 };
 
-export interface ComposerAttachmentDraft {
-  readonly draftKey: string;
-  readonly attachments: readonly PendingAttachment[];
-  readonly directoryReferences: readonly DirectoryReference[];
-}
-
 type ComposerPendingState = {
   attachments: PendingByKey<PendingAttachment>;
   directories: Record<string, readonly DirectoryReference[]>;
 };
-
-type RestoredAttachmentContext = {
-  attachments: readonly AttachmentRef[];
-  stagedAttachments: readonly { approvalId: string; name: string; mimeType?: string; size: number }[];
-  directoryReferences: readonly DirectoryReference[];
-};
-
-function appendDirectoryReferences(
-  current: ComposerPendingState['directories'],
-  draftKey: string,
-  references: readonly DirectoryReference[],
-): ComposerPendingState['directories'] {
-  let next = current;
-  for (const reference of references) {
-    const key = `${draftKey}:${reference.hostId}`;
-    const previous = next[key] ?? [];
-    if (previous.length >= DIRECTORY_REFERENCE_MAX_COUNT || previous.some((entry) => entry.path === reference.path)) continue;
-    next = { ...next, [key]: [...previous, reference] };
-  }
-  return next;
-}
 
 function recoveryApprovalIds(attachments: readonly PendingAttachment[]): Set<string> {
   return new Set(attachments.flatMap((item) =>
@@ -452,12 +425,10 @@ export function useComposerAttachments(options: {
     }
   }
 
-  const pendingImports = useRef(new Set<Promise<void>>());
-  function trackImport(operation: () => Promise<void>): Promise<void> {
-    const pending = operation();
-    pendingImports.current.add(pending);
-    void pending.finally(() => pendingImports.current.delete(pending)).catch(() => {});
-    return pending;
+  const pendingImports = useRef(0);
+  async function importing(operation: () => Promise<void>): Promise<void> {
+    pendingImports.current += 1;
+    try { await operation(); } finally { pendingImports.current -= 1; }
   }
 
   async function pickAttachments(): Promise<void> {
@@ -585,7 +556,11 @@ export function useComposerAttachments(options: {
   }
 
   /** Restore Main-owned recovery approvals and Host references without consuming either source. */
-  function restoreMessageContext(ownerKey: string, _hostId: string | undefined, input: RestoredAttachmentContext): void {
+  function restoreMessageContext(ownerKey: string, _hostId: string | undefined, input: {
+    attachments: readonly AttachmentRef[];
+    stagedAttachments: readonly { approvalId: string; name: string; mimeType?: string; size: number }[];
+    directoryReferences: readonly DirectoryReference[];
+  }): void {
     if (!lifecycle.mounted) return;
     const staged = [
       ...input.attachments.map(retainedToPending),
@@ -604,7 +579,19 @@ export function useComposerAttachments(options: {
   // `${draftKey}:${hostId}` owner key `pickDirectory` staged them under.
   function restoreDirectories(draftKey: string, references: readonly DirectoryReference[]): void {
     if (!lifecycle.mounted || references.length === 0) return;
-    updateDirectories(draftKey, (all) => appendDirectoryReferences(all, draftKey, references));
+    updateDirectories(draftKey, (all) => {
+      let next = all;
+      for (const reference of references) {
+        const ownerKey = `${draftKey}:${reference.hostId}`;
+        const previous = next[ownerKey] ?? [];
+        if (
+          previous.length >= DIRECTORY_REFERENCE_MAX_COUNT
+          || previous.some((entry) => entry.path === reference.path)
+        ) continue;
+        next = { ...next, [ownerKey]: [...previous, reference] };
+      }
+      return next;
+    });
   }
 
   function removeAttachment(index: number): void {
@@ -659,47 +646,9 @@ export function useComposerAttachments(options: {
    * is cancelled, under both the source and the branch child keys (#5274
    * review). */
   return {
-    async flushImports(): Promise<void> {
-      while (pendingImports.current.size) await Promise.all([...pendingImports.current]);
-    },
-    captureDrafts(keys: readonly string[]): ComposerAttachmentDraft[] {
-      return keys.map((draftKey) => ({
-        draftKey,
-        attachments: [...(pendingStateRef.current.attachments[draftKey] ?? [])],
-        directoryReferences: Object.entries(pendingStateRef.current.directories)
-          .filter(([key]) => key.startsWith(`${draftKey}:`)).flatMap(([, refs]) => refs.map((ref) => ({ ...ref }))),
-      }));
-    },
-    replaceDrafts(drafts: readonly { draftKey: string; context: RestoredAttachmentContext }[]): void {
-      if (!lifecycle.mounted || !drafts.length) return;
-      const replacements = drafts.map(({ draftKey, context }) => ({
-        draftKey, directoryReferences: context.directoryReferences,
-        attachments: [...context.attachments.map(retainedToPending), ...context.stagedAttachments.map(approvalToPending)],
-      }));
-      const keys = replacements.map((draft) => draft.draftKey);
-      // Publish every bucket together: an approval retained by the replacement
-      // (including one moving between drafts) never temporarily loses its owner.
-      updatePendingState(undefined, (current) => {
-        const attachments = { ...current.attachments };
-        let directories = Object.fromEntries(Object.entries(current.directories)
-          .filter(([key]) => !keys.some((id) => key.startsWith(`${id}:`))));
-        for (const draft of replacements) {
-          attachments[draft.draftKey] = draft.attachments;
-          directories = appendDirectoryReferences(directories, draft.draftKey, draft.directoryReferences);
-        }
-        return { attachments, directories };
-      });
-      const staged = replacements.flatMap((draft) => draft.attachments);
-      for (const item of staged) lifecycle.stagedKeys.add(item.stagingKey);
-      void loadPreviewsSequentially(staged);
-    },
-    clearDrafts(keys: readonly string[]): void {
-      const selected = new Set(keys);
-      updatePendingState(undefined, (current) => ({
-        attachments: Object.fromEntries(Object.entries(current.attachments).filter(([key]) => !selected.has(key))),
-        directories: Object.fromEntries(Object.entries(current.directories).filter(([key]) => !keys.some((id) => key.startsWith(`${id}:`)))),
-      }));
-    },
+    hasPendingContextFor: (keys: readonly string[]) => pendingImports.current > 0 || keys.some((key) =>
+      selectPending(pendingStateRef.current.attachments, key).length > 0 ||
+      Object.entries(pendingStateRef.current.directories).some(([owner, entries]) => owner.startsWith(`${key}:`) && entries.length > 0)),
     pendingAttachments,
     pendingDirectories,
     submittableAttachments: pendingAttachments.length ? pendingAttachments : undefined,
@@ -714,11 +663,11 @@ export function useComposerAttachments(options: {
       pendingDirectories,
       onRemoveDirectory: removeDirectory,
       onPickDirectory: pendingDirectories.length < DIRECTORY_REFERENCE_MAX_COUNT
-        ? () => trackImport(pickDirectory)
+        ? () => importing(pickDirectory)
         : undefined,
     },
-    pickAttachments: () => trackImport(pickAttachments),
-    attachFilePaths: (files: File[]) => trackImport(() => attachFilePaths(files)),
+    pickAttachments: () => importing(pickAttachments),
+    attachFilePaths: (files: File[]) => importing(() => attachFilePaths(files)),
     restoreAttachments,
     restoreMessageContext,
     restoreDirectories,

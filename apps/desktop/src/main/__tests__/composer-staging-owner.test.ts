@@ -41,16 +41,11 @@ import { createChatActions } from '../../renderer/features/conversation/testing.
 import { createRevisionActions, type TurnRevisionDraft } from '../../renderer/features/conversation/testing.js';
 import { createDesktopComposerStagingServices } from '../../renderer/platform/desktop/create-composer-staging-services.js';
 import { createActionsDeps, createTransientState, EMPTY_SKILL_INVOCATION, windowSubmissionServices } from './app-shell-chat-actions-fixture.js';
-import { captureSessionWorkspace, clearSessionWorkspace, restoreSessionWorkspace } from '../../renderer/application/contracts/session-workspace-handoff.js';
 import { ComposerStagingFixture } from './composer-staging-fixture.js';
 import { renderTranscriptMarkup } from './transcript-test-dom.js';
 import { createSessionCatalogController, SessionCatalogContext } from '../../renderer/application/contracts/session-catalog/session-catalog-state.js';
 import type { DesktopSessionSummary } from '../../shared/desktop-session-projection.js';
 import type { DesktopLocalMessageDraft } from '../../shared/session-local-contract.js';
-import { createFakeWorkbarServices, createSessionWorkbarPanelsState, openSessionWorkbarPanelTab, useSideConversationWorkspace, WorkbarServicesProvider, WorkbarSurface, type WorkbarServices } from '../../renderer/features/workbar/testing.js';
-import { captureSideConversationWorkspace, clearSideConversationWorkspace, restoreSideConversationWorkspace } from '../../renderer/application/contracts/session-side-conversation-handoff.js';
-import type { SideConversationWorkspaceState } from '../../shared/session-workspace-state.js';
-import { SessionLocalAttachmentRecovery } from '../session-local-attachment-recovery.js';
 
 const saved = Object.fromEntries([
   'window', 'document', 'Element', 'HTMLBRElement', 'sessionStorage', 'HTMLElement', 'HTMLIFrameElement', 'Event', 'Node', 'CSS',
@@ -218,13 +213,6 @@ test('staged follow-up holds recovered attachments through removal and preserves
   assert.deepEqual(released, [['local-recovery:follow-up']], 'the removed attachment is released after the refused send');
 });
 
-test('idle workspace capture does not start Session reference resolution', async () => {
-  let referenceRequests = 0;
-  const view = await mount({ waitForSessionReference: async () => { referenceRequests++; return false; } });
-  await view.composer.current!.waitForDraftReady();
-  assert.equal(referenceRequests, 0);
-});
-
 test('StagedComposer keeps the submitted recovery attachment while waiting for Session references', async () => {
   const released: string[][] = [];
   let finishReference!: (ready: boolean) => void;
@@ -271,10 +259,8 @@ test('StagedComposer keeps the submitted recovery attachment while waiting for S
     assert.ok(form);
     form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
   });
-  let ready = false;
-  const flushed = view.composer.current!.waitForDraftReady().then(() => { ready = true; });
+  assert.equal(view.composer.current!.hasPendingAction(), true, 'the handoff guard includes reference preparation');
   await act(() => view.removeAttachment());
-  assert.equal(ready, false, 'workspace capture waits for a send still resolving Session references');
   assert.deepEqual(released, [], 'early Composer ownership protects the approval before onSend starts');
   assert.deepEqual(submissions, []);
   await act(async () => { finishReference(true); await Promise.resolve(); });
@@ -282,9 +268,9 @@ test('StagedComposer keeps the submitted recovery attachment while waiting for S
     sources: [{ type: 'approval', approvalId: 'local-recovery:waiting-reference', name: 'recovered.txt' }],
     replaces: 'paused-original',
   }], 'the later factory must submit the content captured by the original send');
-  assert.equal(ready, false, 'workspace capture also waits for admission and Composer cleanup');
-  await act(async () => { finishAdmission(false); await sent; await flushed; });
-  assert.equal(ready, true);
+  assert.equal(view.composer.current!.hasPendingAction(), true, 'the handoff guard includes pending admission');
+  await act(async () => { finishAdmission(false); await sent; });
+  assert.equal(view.composer.current!.hasPendingAction(), false);
   assert.deepEqual(released, [['local-recovery:waiting-reference']]);
 });
 
@@ -413,6 +399,7 @@ async function mountNavigatingRecovery(text = 'original text') {
     return createElement(Fragment, null,
       editor && createElement(StagedComposer, {
         ref: queue.composer, draftKey, disabled,
+        pendingSessionReferences: mentions.pendingSessionReferences,
         onSend: async (body, metadata, context) => { sent.push({ text: body, metadata, staging: context }); return false; },
         onStop() {}, stagingEnabled: true, canStageContext: true, contextPickEnabled: true,
         directoryPickerEnabled: true, allowAttachmentOnlySend: true,
@@ -886,243 +873,49 @@ test('Desktop backs the attachment port with the bridge reader; AppShell no long
   assert.deepEqual(shell.split('\n').filter((line) => /\battachments\s*\.\s*readBytes\b|\bonReadAttachmentBytes\b/.test(line)), []);
 });
 
-
-test('window handoff carries inactive member drafts and staging while preserving an unrelated session', async () => {
-  const view = await mount();
-  await act(() => {
-    view.composer.current!.appendDraft('draft-a', '@file.ts first', [{ kind: 'workspace_file', value: '@file.ts', label: 'file.ts', start: 0 }], 'replacement');
-    view.commands.addQuote({ text: 'quoted A', turnId: 'turn-a' });
-    view.stage({ attachments: [attachment], directoryReferences: [{ hostId: 'host-a', path: '/project-a' }] });
-  });
-  await view.render('draft-child');
-  await act(() => {
-    view.composer.current!.setText('child draft');
-    view.commands.addQuote({ text: 'quoted child' });
-    view.restoreRecovery('local-recovery:child');
-  });
-  await view.render('unrelated');
-  await act(() => {
-    view.composer.current!.setText('B stays here');
-    view.commands.addQuote({ text: 'B quote' });
-  });
-  const input = { composer: view.composer.current, staging: view.commands, sessionIds: ['draft-a', 'draft-child'] };
-  const saved = await captureSessionWorkspace(input);
-  assert.deepEqual(saved.drafts.map((draft) => draft.text), ['@file.ts first', 'child draft']);
-  assert.equal(saved.drafts[0]!.replacesMessageId, 'replacement');
-  assert.deepEqual(saved.drafts[0]!.directoryReferences, [{ hostId: 'host-a', path: '/project-a' }]);
-  assert.equal(saved.drafts[0]!.attachments[0]!.type, 'retained');
-  assert.equal(saved.drafts[1]!.attachments[0]!.type, 'approval');
-  assert.ok(!JSON.stringify(saved).includes('previewUrl'));
-  await act(() => clearSessionWorkspace(input));
-  assert.equal(view.composer.current!.getText(), 'B stays here');
-  assert.deepEqual(view.commands.captureSubmission().quotesForSend(), [{ text: 'B quote' }]);
-  assert.equal(view.composer.current!.getDraft('draft-a'), '');
-  assert.equal(view.commands.captureDrafts(['draft-a'])[0]!.attachments.length, 0);
-  // Main reissues these approvals; restore accepts only the resulting handles.
-  const restored = { ...saved, drafts: saved.drafts.map((draft) => ({ ...draft, attachments: draft.attachments.map((item) => item.type === 'approval' ? { ...item, approvalId: 'local-recovery:destination' } : item) })) };
-  await act(() => restoreSessionWorkspace({ ...input, snapshot: restored }));
-  await view.render('draft-a');
-  assert.equal(view.composer.current!.getText(), '@file.ts first');
-  assert.deepEqual(view.composer.current!.captureDrafts(['draft-a'])[0]!.references, [{ kind: 'workspace_file', value: '@file.ts', label: 'file.ts', start: 0 }]);
-  assert.deepEqual(view.commands.captureSubmission().quotesForSend(), [{ text: 'quoted A', sourceTurnId: 'turn-a' }]);
-  assert.equal(view.commands.captureSubmission().submittableAttachments?.[0]?.source.type, 'retained');
-  await view.render('draft-child');
-  assert.equal(view.composer.current!.getText(), 'child draft');
-  assert.deepEqual(view.commands.captureSubmission().submittableAttachments?.[0]?.source, { type: 'approval', approvalId: 'local-recovery:destination', name: 'recovered.txt' });
-});
-
-test('restoring a retained workspace keeps shared recovery approvals sendable and releases only replaced context', async () => {
-  const released: string[] = [];
-  const sent: string[] = [];
-  const view = await mount({
-    releaseRecoveryAttachments: async (ids) => { released.push(...ids); },
-    onSend: async (_text, _metadata, staging) => {
-      for (const item of staging?.submittableAttachments ?? []) {
-        assert.equal(item.source.type, 'approval');
-        if (item.source.type !== 'approval') continue;
-        assert.ok(!released.includes(item.source.approvalId), 'restored sends must not use an expired approval');
-        sent.push(item.source.approvalId);
-      }
-      return false;
-    },
-  });
-  await act(() => {
-    view.restoreRecovery('local-recovery:retained-main-B');
-    view.composer.current!.setText('B draft');
-    view.commands.addQuote({ text: 'B quote' });
-    view.stage({ directoryReferences: [{ hostId: 'host-a', path: '/B' }] });
-  });
-  const input = { composer: view.composer.current, staging: view.commands, sessionIds: ['draft-a'] };
-  const snapshot = await captureSessionWorkspace(input);
-  await act(() => restoreSessionWorkspace({ ...input, snapshot }));
-  assert.equal(released.length, 0, 'rollback to the current snapshot retains the current approval');
-  await act(() => {
-    view.restoreRecovery('local-recovery:replaced');
-    view.commands.addQuote({ text: 'discarded quote' });
-    view.stage({ directoryReferences: [{ hostId: 'host-a', path: '/discarded' }] });
-  });
-  await act(() => restoreSessionWorkspace({ ...input, snapshot }));
-  assert.deepEqual(released, ['local-recovery:replaced']);
-  const restored = view.commands.captureSubmission();
-  assert.deepEqual(restored.quotesForSend(), [{ text: 'B quote' }]);
-  assert.deepEqual(restored.directoryOptions, { directoryReferences: [{ hostId: 'host-a', path: '/B' }] });
-  await act(async () => {
-    view.container.querySelector('form')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-    await view.composer.current!.waitForDraftReady();
-  });
-  assert.deepEqual(sent, ['local-recovery:retained-main-B']);
-});
-
-test('workspace replacement moves recovery approvals between member drafts without releasing unrelated owners', async () => {
-  const released: string[] = [];
-  const view = await mount({ releaseRecoveryAttachments: async (ids) => { released.push(...ids); } });
-  await act(() => view.restoreRecovery('local-recovery:moving'));
-  await view.render('draft-child');
-  await act(() => view.restoreRecovery('local-recovery:obsolete-child'));
-  await view.render('unrelated');
-  await act(() => view.restoreRecovery('local-recovery:unrelated'));
-  const input = { composer: view.composer.current, staging: view.commands, sessionIds: ['draft-a', 'draft-child'] };
-  const captured = await captureSessionWorkspace(input);
-  const moving = captured.drafts[0]!.attachments;
-  const snapshot = { ...captured, drafts: captured.drafts.map((draft) => ({ ...draft,
-    attachments: draft.sessionId === 'draft-child' ? moving : [],
-  })) };
-  await act(() => restoreSessionWorkspace({ ...input, snapshot }));
-  assert.deepEqual(released, ['local-recovery:obsolete-child']);
-  const drafts = view.commands.captureDrafts(['draft-a', 'draft-child', 'unrelated']);
-  assert.deepEqual(drafts.map((draft) => draft.attachments.map((item) => item.source.type === 'approval' ? item.source.approvalId : 'unexpected')),
-    [[], ['local-recovery:moving'], ['local-recovery:unrelated']]);
-  await act(() => clearSessionWorkspace(input));
-  assert.deepEqual(released, ['local-recovery:obsolete-child', 'local-recovery:moving']);
-  assert.equal(view.commands.captureSubmission().submittableAttachments?.length, 1, 'unrelated draft retains its approval');
-});
-
-async function mountSideWorkspace(options: {
-  send?: WorkbarServices['sideChat']['send'];
-  initialSessionId?: string;
-  companion?: boolean;
-} = {}) {
-  const view = await mount();
-  const source = { ...recoverySession('B'), llmConnectionId: 'connection' };
-  const fork = { ...source, id: 'B-side' };
-  const registry = new SessionLocalAttachmentRecovery();
-  const owner = { senderId: 11, partition: 'local', scope: { hostId: 'host-a', targetEpoch: 'epoch-1' }, sessionId: options.companion ? fork.id : source.id };
-  const approved = registry.issue(owner, [{ name: 'side-draft.txt', mimeType: 'text/plain', content: new Uint8Array([1, 2, 3]) }])[0]!;
-  const released: string[] = [];
-  const dismissed: string[] = [];
-  const base = createFakeWorkbarServices();
-  const services = createFakeWorkbarServices({
-    attachments: { ...base.attachments, releaseRecoveryAttachments: async (ids) => { released.push(...ids); registry.release(owner.senderId, ids); } },
-    sideChat: { ...base.sideChat,
-      listSessions: async () => [source, fork], listTurns: async () => [{ turnId: 'source-turn', status: 'completed' }],
-      branchFromTurn: async () => ({ ok: true, session: fork }),
-      cleanupSessionCopy: async (id) => { dismissed.push(id); },
-      abandonSessionCopy: async (id) => { dismissed.push(id); },
-      ...(options.send ? { send: options.send } : {}),
-    },
-  });
-  const emptyPanels = createSessionWorkbarPanelsState();
-  const panels = openSessionWorkbarPanelTab(emptyPanels, 'right', { id: 'side-chat:panel-B', kind: 'side-chat' });
-  const record: SideConversationWorkspaceState = {
-    panel: { id: 'panel-B', sourceSessionId: source.id, quotes: [] }, hasContent: false, active: false,
-    ...(options.companion ? { companion: { sessionId: fork.id, ownTurnIds: [], queueOwnedMessageIds: [] } } : {}),
-    draft: { sessionId: owner.sessionId, text: 'B side draft', references: [], quotes: [], directoryReferences: [],
-      attachments: [{ type: 'approval', ...approved }] },
-  };
-  function Frame({ sessionId }: { sessionId?: string }) {
-    const workspace = useSideConversationWorkspace();
-    return createElement(WorkbarSurface, {
-      sessionId, sourceSession: sessionId ? { ...source, id: sessionId } : undefined,
-      modelChoices: [{ connectionId: 'connection', connectionSlug: 'test', providerType: 'openai', providerLabel: 'Test', model: 'test', label: 'Test', isDefault: true, thinkingLevels: [] }],
-      panelsState: sessionId === source.id ? panels : emptyPanels,
-      quotes: workspace.panels, hidden: false, rightCollapsed: false, bottomOpen: false,
-      onDismissPanel() {}, onToggleRightPanel() {}, onActivateTab() {}, onCloseTab() {}, onOpenLauncher() {}, onRequestOpenTab() {},
-      onContentStateChange: workspace.setContent, onActivityStateChange: workspace.setActive, confirmBypass: async () => true,
+for (const kind of ['attachments', 'directories', 'quotes'] as const) {
+  test(`window handoff detects ${kind} on a non-displayed family member`, async () => {
+    const view = await mount();
+    await act(() => {
+      if (kind === 'quotes') view.commands.addQuote({ text: 'unsent quote' });
+      else view.stage(kind === 'attachments' ? { attachments: [attachment] }
+        : { directoryReferences: [{ hostId: 'host-a', path: '/work/source' }] });
     });
-  }
-  const render = async (sessionId?: string) => {
-    await act(async () => root!.render(createElement(LocaleProvider, { locale: 'en', children:
-      createElement(ToastProvider, { children: createElement(WorkbarServicesProvider, { services, children: createElement(Frame, { sessionId }) }) }),
-    })));
-  };
-  await render(options.initialSessionId ?? source.id);
-  await act(() => restoreSideConversationWorkspace([record]));
-  const capture = async () => {
-    let captured!: SideConversationWorkspaceState[];
-    await act(async () => { captured = await captureSideConversationWorkspace(['B']); });
-    return captured;
-  };
-  return { ...view, render, capture, registry, owner, approvalId: approved.approvalId, released, dismissed, record };
-}
-
-test('Workbar layout changes and rollback keep another task side draft mounted; group clear releases it', async () => {
-  const view = await mountSideWorkspace({ companion: true });
-  const form = view.container.querySelector('form');
-  assert.ok(form);
-  for (const next of ['A', undefined, 'B']) {
-    await view.render(next);
-    // Failed transfer rollback restores the retained snapshot while B is still owned here.
-    await act(() => restoreSideConversationWorkspace([view.record]));
-    assert.equal(view.container.querySelector('form'), form, 'the existing side composer stays mounted');
-    const captured = await view.capture();
-    assert.equal(captured[0]!.draft.text, 'B side draft');
-    assert.equal(captured[0]!.draft.sessionId, 'B-side');
-    assert.ok(view.registry.ownerForPreview(view.owner.senderId, view.approvalId));
-    assert.equal(view.released.length, 0);
-    assert.equal(view.dismissed.length, 0);
-  }
-  await act(() => clearSideConversationWorkspace(['B']));
-  assert.equal(view.container.querySelector('form'), null, 'a transferred group no longer leaves a source panel behind');
-  assert.deepEqual(view.released, [view.approvalId]);
-  assert.equal(view.registry.ownerForPreview(view.owner.senderId, view.approvalId), undefined);
-  assert.equal(view.dismissed.length, 0, 'handoff preserves the backend fork');
-});
-
-for (const companion of [false, true]) {
-  test(`restored inactive member side draft captures its owner before the member is visited (fork=${companion})`, async () => {
-    const view = await mountSideWorkspace({ initialSessionId: 'A', companion });
-    const captured = await view.capture();
-    assert.equal(captured[0]!.draft.sessionId, companion ? 'B-side' : 'B');
-    assert.equal(captured[0]!.draft.text, 'B side draft');
-    assert.deepEqual(captured[0]!.draft.attachments, view.record.draft.attachments);
-    await act(() => clearSideConversationWorkspace(['B']));
-    assert.deepEqual(view.released, [view.approvalId]);
-  });
-}
-
-test('side composer holds recovery attachments during pending admission and releases them after unmount settles', async () => {
-  let complete!: (value: Awaited<ReturnType<WorkbarServices['sideChat']['send']>>) => void;
-  const pending = new Promise<Awaited<ReturnType<WorkbarServices['sideChat']['send']>>>((resolve) => { complete = resolve; });
-  let sending = false;
-  const view = await mountSideWorkspace({ send: async () => { sending = true; return pending; } });
-  await act(() => view.container.querySelector('form')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })));
-  for (let attempt = 0; !sending && attempt < 20; attempt++) await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
-  assert.equal(sending, true);
-  await act(() => clearSideConversationWorkspace(['B']));
-  assert.equal(view.released.length, 0, 'unmount cannot revoke an in-flight attachment before admission returns');
-  assert.ok(view.registry.ownerForPreview(view.owner.senderId, view.approvalId));
-  await act(async () => { complete({ ok: false, reason: 'rejected' }); await pending; });
-  assert.deepEqual(view.released, [view.approvalId]);
-  assert.equal(view.registry.ownerForPreview(view.owner.senderId, view.approvalId), undefined);
-});
-
-for (const action of ['remove', 'send'] as const) {
-  test(`side composer releases its recovered attachment after explicit ${action}`, async () => {
-    const view = await mountSideWorkspace({ send: async () => ({ ok: true, turnId: 'accepted-turn' }) });
-    await act(async () => {
-      if (action === 'remove') {
-        const remove = view.container.querySelector('.maka-composer-attachment-token button');
-        assert.ok(remove);
-        remove.dispatchEvent(new window.Event('click', { bubbles: true }));
-      } else {
-        view.container.querySelector('form')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-      }
+    await view.render('draft-b');
+    assert.equal(view.commands.hasPendingContext(['draft-b']), false);
+    assert.equal(view.commands.hasPendingContext(['draft-a', 'draft-b']), true);
+    await view.render('draft-a');
+    await act(() => {
+      const submitted = view.commands.captureSubmission();
+      submitted.clearSubmittedContext(submitted.submittableAttachments);
+      submitted.clearQuotes();
     });
-    for (let attempt = 0; !view.released.length && attempt < 20; attempt++) await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
-    assert.deepEqual(view.released, [view.approvalId]);
-    assert.equal(view.registry.ownerForPreview(view.owner.senderId, view.approvalId), undefined);
-    const captured = await view.capture();
-    assert.equal(captured[0]!.draft.attachments.length, 0);
-    await act(() => clearSideConversationWorkspace(['B']));
+    assert.equal(view.commands.hasPendingContext(['draft-a', 'draft-b']), false);
   });
 }
+
+test('pending session-reference chips block moving or silently closing an otherwise empty composer', async () => {
+  const h = await mountNavigatingRecovery();
+  await act(async () => h.mentions.onPickSessionReference!({ id: 'draft-b', name: 'B' }));
+  assert.equal(h.composer.current!.getText(), '');
+  assert.equal(h.commands.hasPendingContext(['draft-a']), false);
+  assert.equal(h.composer.current!.hasPendingAction(), true);
+  await act(() => h.mentions.onRemovePendingSessionReference('draft-b'));
+  assert.equal(h.composer.current!.hasPendingAction(), false);
+});
+
+test('local Edit recovery blocks handoff until its existing claim settles, including background A', async () => {
+  const h = await mountNavigatingRecovery();
+  await h.edit();
+  assert.equal(h.composer.current!.getText(), '');
+  assert.equal(h.commands.hasPendingContext(['draft-a']), false);
+  assert.equal(h.composer.current!.hasPendingAction(), true);
+  await h.render('draft-b');
+  assert.equal(h.composer.current!.hasPendingAction(), true);
+  await h.fail();
+  assert.equal(h.composer.current!.hasPendingAction(), false);
+  await h.render('draft-a'); await h.edit(); await h.complete();
+  assert.equal(h.composer.current!.hasPendingAction(), false);
+  assert.equal(h.composer.current!.captureDrafts(['draft-a'])[0]?.replacesMessageId, 'original');
+  assert.equal(h.commands.hasPendingContext(['draft-a']), true);
+});

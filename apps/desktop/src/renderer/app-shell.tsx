@@ -24,7 +24,6 @@ import { RuntimeHostHandoffOverlay } from './features/runtime-host-management/in
 import { ArchiveRetentionNotices } from './features/storage-usage/index.js';
 import {
   useCallback,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -39,12 +38,11 @@ import { hasSettledInitialOnboarding } from '@maka/core/onboarding-milestone';
 import {
   ChatSurfaceLayout,
   type ComposerHandle,
+  type NavSelection,
   MakaUriContext,
   AstryxLocaleProvider,
   LocaleProvider,
   type ToastDiagnosticTarget,
-  type NavSelection,
-  type ProjectRowActions,
   SessionListPanel,
   TitlebarSessionIdentity,
   type TurnFooterActionMeta,
@@ -65,7 +63,7 @@ import * as ModuleHub from './features/module-hub';
 import {
   SessionNavigationProvider,
   SessionNavigationCommands,
-  createSessionOpenCommand,
+  createSessionNavigationCommands,
   sessionRailLayoutStore,
   useSessionNavigationReads,
   type SessionNavigationPorts,
@@ -263,22 +261,16 @@ function AppShellContent({
   const sessionCount = authoritativeSessionIds?.size ?? 0;
 
   const {
-    openHelp: openLocalHelp,
     closePalette,
     openSearch,
     setSearchScrollTarget,
-    openSettings: openLocalSettings,
-    openSettingsSection: openLocalSettingsSection,
     openProjectSettings,
     openProviderCatalog,
     openConnectionDetail,
-    openExternalAgentSettings,
     openProviderCreate,
     setSettingsProfileId,
   } = overlays.commands;
-  const openHelp = sessionWindow.standalone ? () => sessionWindow.commandMain('openHelp') : openLocalHelp;
-  const openSettings = sessionWindow.standalone ? () => sessionWindow.commandMain('openSettings') : openLocalSettings;
-  const openSettingsSection = sessionWindow.standalone ? openSettings : openLocalSettingsSection;
+  const { openHelp, openSettings, openSettingsSection, openExternalAgentSettings } = sessionWindow.mainActions(overlays.commands);
   const { searchScrollTarget } = overlays.selectors;
   const settingsOpen = overlays.selectors.settings.open;
 
@@ -515,16 +507,6 @@ function AppShellContent({
     commands: sessionSettingIntent.commands,
   });
 
-  const openSessionInChatRef = useRef<
-    (sessionId: string, turnId?: string, sequence?: number) => void
-  >(() => undefined);
-  const openSessionInChat = useCallback(
-    (sessionId: string, turnId?: string, sequence?: number): void => {
-      openSessionInChatRef.current(sessionId, turnId, sequence);
-    },
-    [],
-  );
-
   /** 技能页 使用: jump to the chat view and seed the composer with a skill
    *  invocation. Same human-in-the-loop rule as maka://compose — we never
    *  auto-send; the user finishes the sentence and presses Enter.
@@ -543,12 +525,6 @@ function AppShellContent({
     },
     [shellCopy],
   );
-  const openWorkHub = useCallback(() => {
-    overlays.commands.closeSettings();
-    setNavSelection({ section: 'sessions' });
-    setWorkHubActive(true);
-  }, [overlays.commands, setNavSelection]);
-
   // Transient placeholder while the real SessionSummary loads, so the composer
   // does not flash a value the session never had.
   const activeSessionForView = activeSession ?? (activeId
@@ -675,40 +651,6 @@ function AppShellContent({
   };
   const taskSubmissionHardBlocked =
     !activeId && !taskEntry.selectors.target;
-  const openNewTaskSurface = useCallback(() => {
-    composerStaging.resetImageNotice(NEW_TASK_PENDING_KEY);
-    const ownerToken = startNewSession();
-    // Only Plan resets: a new task starts out of Plan, in whatever
-    // orchestration the last one was set to.
-    sessionSettingIntent.commands.setNewTaskPlanMode(false);
-    setNavSelection({ section: 'sessions' });
-    setSearchScrollTarget(null);
-    // New-task affordances reset to the empty-state composer; move focus
-    // there so the user can start typing immediately.
-    window.requestAnimationFrame(() => composerEditing.focus());
-    return ownerToken;
-  }, [composerEditing, composerStaging, sessionSettingIntent.commands, setNavSelection, setSearchScrollTarget, startNewSession]);
-
-  const createSession = useCallback(async () => {
-    if (sessionWindow.standalone) sessionWindow.commandMain('newTask');
-    else openNewTaskSurface();
-  }, [openNewTaskSurface, sessionWindow.standalone, sessionWindow.commandMain]);
-
-  // Stable, because the rail's Project rows carry it: a fresh identity here
-  // rebuilt the whole list on every AppShell commit (#4109).
-  const projectRowActions = useMemo<ProjectRowActions | undefined>(
-    () => taskEntry.selectors.projectScopes.length === 0 ? undefined : {
-      onNew: (key) => {
-        if (taskEntry.commands.selectProject(key)) openNewTaskSurface();
-      },
-      onRename: taskEntry.commands.renameProject,
-      onArchive: taskEntry.commands.archiveProject,
-      onRestore: taskEntry.commands.restoreProject,
-      onRelink: taskEntry.commands.relinkProject,
-    },
-    [openNewTaskSurface, taskEntry.commands, taskEntry.selectors.projectScopes.length],
-  );
-
   // Composer mention popups: `/` uses Runtime's session/project-aware,
   // host-compatible projection; `@` uses workspace file search. Keep the
   // resolved project path as a refresh key for new-chat project changes. Only
@@ -731,23 +673,21 @@ function AppShellContent({
 
   const hasModalOpen = overlays.selectors.anyModalOpen || sharedSessionDialog.isOpen;
   const shellObscured = hasModalOpen || settingsOpen;
-  const exitWorkHub = useCallback(() => setWorkHubActive(false), []);
-  const openLocalSession = useMemo(
-    () =>
-      createSessionOpenCommand({
-        activateSession: setActiveId,
-        exitWorkHub,
-        selectSessionSurface: () => setNavSelection({ section: 'sessions' }),
-        setSearchTarget: setSearchScrollTarget,
-      }),
-    [exitWorkHub, setNavSelection, setActiveId, setSearchScrollTarget],
+  const { openSession, openLocal, clearLocal, openNewTaskSurface, createSession, projectRowActions, bootstrapSessions, exitWorkHub, enableWorkHub, openWorkHub } = useMemo(
+    () => createSessionNavigationCommands({
+      window: sessionWindow,
+      activateSession: setActiveId, setWorkHubActive, closeSettings: overlays.commands.closeSettings,
+      selectSessionSurface: () => setNavSelection({ section: 'sessions' }), setSearchTarget: setSearchScrollTarget,
+      newTask: { prepare: () => composerStaging.resetImageNotice(NEW_TASK_PENDING_KEY), start: startNewSession,
+        resetPlanMode: () => sessionSettingIntent.commands.setNewTaskPlanMode(false), focus: composerEditing.focus },
+      projects: taskEntry.commands, hasProjects: taskEntry.selectors.projectScopes.length > 0,
+      refreshSessions, readSelectionRevision,
+    }),
+    [sessionWindow.openSession, sessionWindow.requestNewTask, sessionWindow.bootstrap, setActiveId, overlays.commands.closeSettings, setNavSelection,
+      setSearchScrollTarget, composerStaging, startNewSession, sessionSettingIntent.commands, composerEditing.focus,
+      taskEntry.commands, taskEntry.selectors.projectScopes.length, refreshSessions, readSelectionRevision],
   );
-  const openSession = useCallback((sessionId: string, turnId?: string, sequence?: number) =>
-    sessionWindow.openSession({ sessionId, turnId, sequence }, () => openLocalSession(sessionId, turnId, sequence)),
-  [sessionWindow.openSession, openLocalSession]);
-  useLayoutEffect(() => {
-    openSessionInChatRef.current = openSession;
-  }, [openSession]);
+  const openSessionInChat = openSession;
   const sessionNavigationCommandsRef = useRef<SessionNavigationRowActions | null>(null);
   // Built inline: the rail reads these through a ref published on commit, so
   // their identity carries no information and this object never has to be
@@ -839,8 +779,6 @@ function AppShellContent({
   } = Conversation.createComposerSurfaceOwner({
     activeIdRef, navSelectionRef, newTaskDraftKey: currentNewTaskDraftKey, isSessionSelected,
   });
-
-  function bootstrapSessions() { return sessionWindow.bootstrap(refreshSessions, readSelectionRevision, openSession); }
 
   const dispatchMakaUri = createInternalUriDispatcher(ownerActiveId, openSettingsSection, composerEditing);
 
@@ -1077,8 +1015,7 @@ function AppShellContent({
     <div
       className="appFrame agents-layout-root"
       data-agents-page
-      data-window-kind={sessionWindow.context.kind}
-      inert={sessionWindow.frozen || undefined}
+      {...sessionWindow.frameProps}
       data-maka-content-ready={!isOnboardingLoading || undefined}
       /* The single writer for sidebar state in the DOM. It sits on the frame,
          above both the chrome strip and the shell, so every rule that keys on
@@ -1096,16 +1033,15 @@ function AppShellContent({
       })}
     >
       <Conversation.ConversationWindowState>{(conversation) => <SessionWindowBinding conversation={conversation} window={sessionWindow} staging={composerStaging} submission={composerSubmission} workbar={commands}
-        activeSessionId={activeId} refreshSessions={refreshSessions} refreshMessages={refreshMessages}
-        openLocal={(navigation) => openLocalSession(navigation.sessionId, navigation.turnId, navigation.sequence)}
-        clearLocal={() => { setNavSelection({ section: 'sessions' }); setSearchScrollTarget(null); }} />
+        openLocal={openLocal}
+        clearLocal={clearLocal} />
       }</Conversation.ConversationWindowState>
       {sessionWindow.standalone && <SessionNavigationCommands ports={sessionNavigationPorts} commandsRef={sessionNavigationCommandsRef} />}
       {!sessionWindow.standalone && <ArchiveRetentionNotices navigation={overlays.commands} />}
       <Diagnostics.PreviousMainProcessInterruptionNotice ready={appearanceHydrated} />
       <ShellLifecycleSubscriptions {...shellLifecycle} />
       <OnboardingConnectionSeed seed={defaultHostConnections.seedSnapshot} refresh={() => void defaultHostConnections.refreshConnections()} />
-      {!sessionWindow.standalone && <WorkHubEnablementWatch onEnabled={() => { setWorkHubActive(true); setNavSelection({ section: 'sessions' }); }} onDisabled={exitWorkHub} />}
+      {!sessionWindow.standalone && <WorkHubEnablementWatch onEnabled={enableWorkHub} onDisabled={exitWorkHub} />}
       <Conversation.ConversationLifecycle
         refreshSessions={refreshSessions}
         onExecutionBoundaryChanged={reloadActiveExecutionBoundary}
@@ -1122,9 +1058,7 @@ function AppShellContent({
         modalOpen={hasModalOpen}
         settingsOpen={settingsOpen}
         sidebarCollapsed={sessionListCollapsed}
-        standalone={sessionWindow.standalone}
-        returningToMain={sessionWindow.returning}
-        onOpenInMainWindow={sessionWindow.openInMainWindow}
+        {...sessionWindow.titlebarProps}
         onToggleSidebar={() => sessionSideNavHandleRef.current?.getCollapseState()?.toggle()}
         onOpenSearchModal={openSearch}
         workbar={{ togglePosition: workbarTogglePosition }}
@@ -1273,14 +1207,12 @@ function AppShellContent({
                           >
                             {(guest) => (
                               <Conversation.ConversationComposerRegion surface={ChatComposerRegion}
-                  workspacePicker={workspacePicker}
-                  guest={guest}
+                  {...{ workspacePicker, guest }}
                   active={sessionsSelected}
                   onboardingComposerHidden={
                     onboardingComposerHidden
                   }
-                  boundaryUnreadableNotice={boundaryUnreadableNotice}
-                  activeId={activeId}
+                  {...{ boundaryUnreadableNotice, activeId }}
                   newTaskDraftKey={currentNewTaskDraftKey}
                   respondToClientCapability={commands.respondToClientCapability}
                   directoryPickerEnabled={Boolean(canStageComposerContext && directoryHostId)}
@@ -1290,7 +1222,7 @@ function AppShellContent({
                   onDeleteQueuedEntry={activeId ? queueSurface.deleteQueuedEntry : undefined}
                   onReorderQueuedEntries={activeId ? queueSurface.reorderQueuedEntries : undefined}
                   contextPickEnabled={canStageComposerContext}
-                  executorComposer={{ selection: executor, taskSubmissionHardBlocked, connectionCount: connections.length, onSetup: sessionWindow.standalone ? openSettings : openExternalAgentSettings, onNewTask: createSession }}
+                  executorComposer={{ selection: executor, taskSubmissionHardBlocked, connectionCount: connections.length, onSetup: openExternalAgentSettings, onNewTask: createSession }}
                   activeSession={activeSessionForView}
                   {...{ executorTarget, onExecutorTargetChange }}
                   usageModel={activeModel}
@@ -1336,8 +1268,7 @@ function AppShellContent({
                   <Conversation.ConversationTranscriptRegion surface={ChatMessageSurface}
                 visible={!shellObscured}
                 activeSession={activeSessionForView}
-                userLabel={userLabel}
-                memoryActive={memoryActive}
+                {...{ userLabel, memoryActive }}
                 onOpenMemorySettings={sharedSessionActive ? undefined : () => openSettingsSection('memory')}
                 onTurnFooterAction={sharedSessionActive ? undefined : composerSubmission.handleTurnFooterAction}
                 onEditUserMessage={sharedSessionActive ? undefined : composerSubmission.beginEditUserMessage}
@@ -1375,8 +1306,7 @@ function AppShellContent({
                       }
                     : undefined
                 }
-                sessionHealthNotice={sessionHealthNotice}
-                taskDirectoryNotice={taskDirectoryNotice}
+                {...{ sessionHealthNotice, taskDirectoryNotice }}
                 localInteractionAvailable={activeBoundarySurface.localInteractionAvailable}
                 {...{ workspaceReadinessRecovery, showOnboardingHero, onboardingState }}
                 onOpenSettings={openSettingsSection}

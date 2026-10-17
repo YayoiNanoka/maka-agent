@@ -49,9 +49,6 @@ import {
   type WorkbarServices,
 } from '../../renderer/features/workbar/testing.js';
 import { renderTranscriptMarkup } from './transcript-test-dom.js';
-import { SessionLocalAttachmentRecovery } from '../session-local-attachment-recovery.js';
-import { createAttachmentApprovalRegistry } from '../attachment-approval.js';
-import { resolveAttachmentRefs, resolveIngestItems } from '../attachment-ingest.js';
 
 const originalGlobals = {
   document: globalThis.document,
@@ -148,7 +145,6 @@ function installDom() {
 async function renderProbe(
   sideChat: Partial<WorkbarServices['sideChat']>,
   options: {
-    restoredWorkspace?: Parameters<typeof useQuoteCompanion>[0]['restoredWorkspace'];
     ownership?: boolean;
     sourceSession?: SessionSummary;
     modelChoices?: readonly ChatModelChoice[];
@@ -187,7 +183,6 @@ async function renderProbe(
         ? createElement(QuoteCompanionOwnershipProbe, {
             onSend: options.onSend ?? (() => undefined),
             onProjection: options.onProjection,
-            restoredWorkspace: options.restoredWorkspace,
             onQueue: options.onQueue,
             onSteer: options.onSteer,
             onStop: options.onStop,
@@ -3575,7 +3570,6 @@ function QuoteCompanionProbe(props: {
 }
 
 function QuoteCompanionOwnershipProbe(props: {
-  restoredWorkspace?: Parameters<typeof useQuoteCompanion>[0]['restoredWorkspace'];
   onSend: (send: (text: string) => Promise<boolean>) => void;
   onProjection?: (companion: ReturnType<typeof useQuoteCompanion>) => void;
   onQueue?: (queue: (text: string) => Promise<boolean>) => void;
@@ -3593,8 +3587,6 @@ function QuoteCompanionOwnershipProbe(props: {
   const sourceSession = props.sourceSession ?? SOURCE_SESSION;
   const companion = useQuoteCompanion({
     panelId: 'ownership-panel',
-    restoredWorkspace: props.restoredWorkspace,
-    restoredHasContent: Boolean(props.restoredWorkspace),
     active: props.active ?? true,
     pendingQuotes: props.pendingQuotes ?? [],
     sourceSession,
@@ -3872,89 +3864,3 @@ test('an unknown steer outcome that later retracts keeps the staged attachments'
   });
   assert.deepEqual(consumed, []);
 });
-
-
-test('a transferred side conversation observes the existing fork and detaches without deleting it', async () => {
-  const subscriptions: string[] = [];
-  const cleanups: string[] = [];
-  let projection!: ReturnType<typeof useQuoteCompanion>;
-  let forks = 0;
-  const restoredWorkspace = { sessionId: 'existing-fork', ownTurnIds: ['side-turn'], queueOwnedMessageIds: ['queued'] };
-  const view = await renderProbe({
-    listSessions: async () => [session('existing-fork')],
-    branchFromTurn: async () => { forks += 1; return { ok: true as const, session: session('unexpected') }; },
-    subscribeEvents: (id, _handler, onSeeded) => { subscriptions.push(id); onSeeded?.(); return () => {}; },
-    cleanupSessionCopy: async (id) => { cleanups.push(id); },
-  }, { ownership: true, restoredWorkspace, onProjection: (value) => { projection = value; },
-    ready: (container) => container.firstElementChild?.getAttribute('data-companion-id') === 'existing-fork' });
-  assert.equal(forks, 0);
-  assert.deepEqual(subscriptions, ['existing-fork'], 'one observer is attached to the existing fork');
-  assert.deepEqual(await projection.captureWorkspace(), restoredWorkspace);
-  projection.detachWorkspace();
-  await act(async () => { view.root.unmount(); await Promise.resolve(); });
-  mountedRoot = undefined;
-  assert.deepEqual(cleanups, [], 'closing the source window cannot delete the transferred fork');
-});
-
-test('a cancelled window transfer restores normal side-panel dismissal', async () => {
-  const cleanups: string[] = [];
-  let projection!: ReturnType<typeof useQuoteCompanion>;
-  const view = await renderProbe({
-    listSessions: async () => [session('existing-fork')],
-    subscribeEvents: (_id, _handler, onSeeded) => { onSeeded?.(); return () => {}; },
-    cleanupSessionCopy: async (id) => { cleanups.push(id); },
-  }, { ownership: true, restoredWorkspace: { sessionId: 'existing-fork', ownTurnIds: [], queueOwnedMessageIds: [] },
-    onProjection: (value) => { projection = value; },
-    ready: (container) => container.firstElementChild?.getAttribute('data-companion-id') === 'existing-fork' });
-  projection.detachWorkspace();
-  projection.resumeWorkspace();
-  await act(async () => { view.root.unmount(); await Promise.resolve(); });
-  mountedRoot = undefined;
-  assert.deepEqual(cleanups, ['existing-fork']);
-});
-
-for (const existing of [false, true]) {
-  test(`a recovered side attachment sends through ${existing ? 'its existing' : 'a newly created'} fork with exact Session authority`, async () => {
-    const recovery = new SessionLocalAttachmentRecovery();
-    const owner = { senderId: 11, partition: 'authority', scope: { hostId: 'host', targetEpoch: 'epoch' },
-      sessionId: existing ? 'side-conversation' : SOURCE_SESSION.id };
-    const [approval] = recovery.issue(owner, [{ name: 'question.txt', mimeType: 'text/plain', content: Buffer.from('saved side bytes') }]);
-    const recovered = approvalAttachment(approval.approvalId, approval.name);
-    let send!: SendFn;
-    let branches = 0;
-    const ingested: string[] = [];
-    await renderProbe({
-      listSessions: async () => [session('side-conversation')],
-      branchFromTurn: async (sourceId, input) => {
-        branches++;
-        assert.equal(sourceId, SOURCE_SESSION.id);
-        assert.deepEqual(input.recoveryAttachmentIds, [approval.approvalId]);
-        recovery.transfer(owner, 'side-conversation', input.recoveryAttachmentIds);
-        return { ok: true, session: session('side-conversation') };
-      },
-      subscribeEvents: (_id, _handler, seeded) => { seeded?.(); return () => {}; },
-      send: async (sessionId, command) => {
-        assert.equal(sessionId, 'side-conversation');
-        assert.throws(() => recovery.prepare({ ...owner, sessionId: 'another-session' }, command.attachmentItems));
-        const prepared = recovery.prepare({ ...owner, sessionId }, command.attachmentItems);
-        try {
-          prepared.validate();
-          const files = await resolveIngestItems({ senderId: owner.senderId, items: prepared.items,
-            approvals: createAttachmentApprovalRegistry(), stat: async () => { throw new Error('Recovery cannot open a client path'); } });
-          await resolveAttachmentRefs({ files, snapshot: async ({ name, mimeType, content }) => {
-            ingested.push(Buffer.from(content).toString());
-            return { name, mimeType, content };
-          } });
-          prepared.validate();
-          return { ok: true, turnId: 'side-turn' };
-        } finally { prepared.dispose(); }
-      },
-    }, { ownership: true, onSend: (next) => { send = next; },
-      ...(existing ? { restoredWorkspace: { sessionId: 'side-conversation', ownTurnIds: [], queueOwnedMessageIds: [] },
-        ready: (container: Element) => container.firstElementChild?.getAttribute('data-companion-id') === 'side-conversation' } : {}),
-    });
-    await act(async () => { assert.equal(await send('follow up', [recovered]), true); });
-    assert.equal(branches, existing ? 0 : 1);
-    assert.deepEqual(ingested, ['saved side bytes']);
-  });
-}

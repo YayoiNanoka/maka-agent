@@ -76,6 +76,11 @@ export function registerBrowserIpc(deps: BrowserIpcDeps): BrowserIpcController {
   const isCoordination = (sessionId: string): boolean =>
     isWorkHubCoordinationSessionId(parseDesktopSessionResourceKey(sessionId).sessionId);
 
+  const canPresentSession = (contents: Electron.WebContents, sessionId: string): boolean =>
+    !deps.mainWindowController.isWorkspaceRenderer(contents) || (isCoordination(sessionId)
+      ? deps.mainWindowController.isMainRenderer(contents)
+      : deps.canUseSession(contents, desktopSessionKey(parseDesktopSessionResourceKey(sessionId))));
+
   // Coordination has one persistent conversation owner and may also be
   // presented by Main. Only its native page moves; automation keeps its owner.
   const ownerForSession = (sessionId: string): Electron.WebContents | undefined => {
@@ -268,8 +273,7 @@ export function registerBrowserIpc(deps: BrowserIpcDeps): BrowserIpcController {
     selection: RendererSelection,
     sessionId: string | null,
   ): void => {
-    if (sessionId && deps.mainWindowController.isWorkspaceRenderer(contents) &&
-      !deps.canUseSession(contents, desktopSessionKey(parseDesktopSessionResourceKey(sessionId)))) return;
+    if (sessionId && !canPresentSession(contents, sessionId)) return;
     const previousOwner = sessionId ? ownerForSession(sessionId) : undefined;
     if (previousOwner && previousOwner !== contents && (!isCoordination(sessionId!) ||
       deps.mainWindowController.isMainRenderer(previousOwner) === deps.mainWindowController.isMainRenderer(contents))) return;
@@ -298,8 +302,7 @@ export function registerBrowserIpc(deps: BrowserIpcDeps): BrowserIpcController {
     const contents = ownedRenderer(event);
     if (!contents) return undefined;
     const sessionId = requireBrowserTarget(scope, target);
-    return sessionId && (!deps.mainWindowController.isWorkspaceRenderer(contents) ||
-      deps.canUseSession(contents, desktopSessionKey(parseDesktopSessionResourceKey(sessionId)))) && browserParentForRenderer(contents) &&
+    return sessionId && canPresentSession(contents, sessionId) && browserParentForRenderer(contents) &&
       selections.get(contents)?.sessionId === sessionId
       ? sessionId
       : undefined;

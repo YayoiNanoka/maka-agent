@@ -36,7 +36,6 @@ export function createAppShellSessionUiStateController(initialState?: AppShellSe
 
 export {
   createTranscriptRestoreLifecycle,
-  replaceWorkspaceReadingAnchors,
   prepareTranscriptForSend,
   readCompleteTranscript,
   restoreSessionTranscriptRange,

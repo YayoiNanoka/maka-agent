@@ -17,67 +17,58 @@
  * under the License.
  */
 
-import type { SessionWorkspaceSnapshot } from './session-workspace-state.js';
+import type { InlineReference } from '@maka/core/events';
 
-/** All session IDs in this contract are desktopSessionKey values, including members. */
+/** IDs are desktopSessionKey values, including group members. */
 export interface SessionWindowGroup {
   readonly hostId: string;
   readonly groupId: string;
   readonly sessionIds: readonly string[];
 }
-
 export interface SessionWindowNavigation {
   readonly sessionId: string;
   readonly turnId?: string;
   readonly sequence?: number;
 }
-
 export type SessionWindowContext =
   | { readonly kind: 'main'; readonly windowId: string }
-  | {
-      readonly kind: 'session';
-      readonly windowId: string;
-      readonly group: SessionWindowGroup;
-      readonly initialSessionId: string;
-    };
+  | { readonly kind: 'session'; readonly windowId: string; readonly group: SessionWindowGroup; readonly initialSessionId: string };
 
-export type SessionWindowCommand =
-  | { readonly requestId: string; readonly kind: 'prepare-transfer'; readonly group: SessionWindowGroup }
-  | { readonly requestId: string; readonly kind: 'clear'; readonly group: SessionWindowGroup }
-  | {
-      readonly requestId: string;
-      readonly kind: 'restore';
-      readonly group: SessionWindowGroup;
-      readonly navigation: SessionWindowNavigation;
-      readonly snapshot: SessionWorkspaceSnapshot;
-    }
-  | { readonly requestId: string; readonly kind: 'navigate'; readonly navigation: SessionWindowNavigation; readonly group: SessionWindowGroup }
-  | { readonly requestId: string; readonly kind: 'prepare-navigation' }
-  | { readonly requestId: string; readonly kind: 'resume'; readonly group?: SessionWindowGroup; readonly navigation?: SessionWindowNavigation | null }
-  | { readonly requestId: string; readonly kind: 'detach' }
-  | { readonly requestId: string; readonly kind: 'flush' };
-
-export interface SessionWindowCommandResult {
-  readonly snapshot?: SessionWorkspaceSnapshot;
-  readonly activeSessionId?: string;
+/** A read-only projection for synchronous navigation; Main still authorizes IPC. */
+export interface SessionWindowOwnership {
+  readonly version: number;
+  readonly sessionIds: readonly string[];
 }
-
+export interface SessionWindowDraft {
+  readonly sessionId: string;
+  readonly text: string;
+  readonly references: readonly InlineReference[];
+}
+export type SessionWindowCommand =
+  | { readonly requestId: string; readonly kind: 'prepare'; readonly transferId: string; readonly group: SessionWindowGroup }
+  | { readonly requestId: string; readonly kind: 'receive'; readonly transferId: string; readonly group: SessionWindowGroup; readonly navigation: SessionWindowNavigation; readonly drafts: readonly SessionWindowDraft[] }
+  | { readonly requestId: string; readonly kind: 'abort'; readonly transferId: string }
+  | { readonly requestId: string; readonly kind: 'navigate'; readonly navigation: SessionWindowNavigation }
+  | { readonly requestId: string; readonly kind: 'check-close'; readonly group: SessionWindowGroup }
+  | { readonly requestId: string; readonly kind: 'cancel-close' };
+export interface SessionWindowCommandResult {
+  readonly drafts?: readonly SessionWindowDraft[];
+  readonly activeSessionId?: string;
+  readonly hasUnsent?: boolean;
+}
 export type SessionWindowCommandReply =
   | { readonly requestId: string; readonly ok: true; readonly result?: SessionWindowCommandResult }
   | { readonly requestId: string; readonly ok: false; readonly error: string };
-
 export interface SessionWindowBridge {
   context(): Promise<SessionWindowContext>;
-  routeSession(navigation: SessionWindowNavigation): Promise<'local' | 'routed'>;
+  ownership(): Promise<SessionWindowOwnership>;
+  subscribeSessionWindowOwnership(handler: (ownership: SessionWindowOwnership) => void): () => void;
+  routeSession(navigation: SessionWindowNavigation): Promise<void>;
   openSessionWindow(sessionId: string): Promise<void>;
   openInMainWindow(): Promise<void>;
-  /** Called once the command handler is installed; distinct from first-paint readiness. */
+  /** Installed command handlers are ready, independently of first paint. */
   sessionWindowReady(): Promise<void>;
   subscribeSessionWindowCommand(handler: (command: SessionWindowCommand) => void): () => void;
   ackSessionWindowCommand(reply: SessionWindowCommandReply): Promise<void>;
-  /** Release main-process custody after the renderer adopts a handoff snapshot. */
-  adoptWorkspaceSnapshot(snapshot: SessionWorkspaceSnapshot): Promise<void>;
-  loadWorkspaceSnapshot(sessionIds: readonly string[]): Promise<SessionWorkspaceSnapshot>;
-  /** Forward application-wide navigation without replacing a session window's task. */
   commandMain(command: 'newTask' | 'openSettings' | 'openHelp'): Promise<void>;
 }

@@ -18,28 +18,17 @@
  */
 
 import type { ReactNode } from 'react';
-import { replaceWorkspaceReadingAnchors } from '../controller/transcript-reading-position.js';
 import { useConversationOwner } from './conversation-context.js';
 import { useConversationQueueCommands } from './conversation-provider.js';
 
-/** Only the window handoff reads the private editor and reading-anchor stores. */
+/** Only the window handoff reads the private editor and session cleanup commands. */
 function useConversationWindowState() {
   const { workspace } = useConversationOwner();
   const { composer } = useConversationQueueCommands();
   return {
     composer,
     clearOwnedSessionState: workspace.commands.clearOwnedSessionState,
-    clearSelection: () => workspace.commands.setActiveId(undefined),
     readActiveSessionId: () => workspace.activeIdRef.current,
-    captureReadingAnchors(sessionIds: readonly string[]) {
-      return Object.fromEntries(sessionIds.flatMap((id) => {
-        const anchor = workspace.ui.transcriptReadingAnchorBySessionRef.current[id];
-        return anchor ? [[id, anchor]] : [];
-      }));
-    },
-    restoreReadingAnchors(anchors: Readonly<Record<string, { readonly turnId: string }>>, sessionIds: readonly string[]) {
-      replaceWorkspaceReadingAnchors(sessionIds, anchors, workspace.ui.setTranscriptReadingAnchor);
-    },
   };
 }
 

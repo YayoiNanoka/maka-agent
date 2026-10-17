@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { sideConversationHasContent } from '../tools/side-chat/side-conversation-readiness.js';
 import {
   useCallback,
   useEffect,
@@ -80,8 +81,7 @@ interface OpenToolOptions {
 }
 
 export interface WorkbarControllerCommands {
-  captureWorkspace(sessionIds: readonly string[]): Readonly<Record<string, import('../../../../shared/session-workbar-state.js').SessionWorkbarLayoutSnapshot>>;
-  restoreWorkspace(snapshots: Readonly<Record<string, import('../../../../shared/session-workbar-state.js').SessionWorkbarLayoutSnapshot>>): void;
+  hasSessionContent(sessionIds: readonly string[]): boolean;
   openTool(
     kind: SessionWorkbarTabKind,
     placement?: SessionWorkbarPlacement,
@@ -204,6 +204,8 @@ export function useWorkbarController(
   const compact = useMediaQuery(SHELL_WORKBAR_COMPACT_QUERY);
   const layout = useWorkbarLayoutState(input.layoutSessionId, input.authoritativeSessionIds, compact, input.persistLayout);
   const sideConversations = useSideConversationWorkspace();
+  const sidePanels = useRef(sideConversations.panels);
+  sidePanels.current = sideConversations.panels;
   const [pendingSideChatClose, setPendingSideChatClose] = useState<
     Array<{ placement: SessionWorkbarPlacement; tab: SessionWorkbarTab }>
   >([]);
@@ -993,8 +995,7 @@ export function useWorkbarController(
 
   const commands = useMemo<WorkbarControllerCommands>(
     () => ({
-      captureWorkspace: layout.captureWorkspace,
-      restoreWorkspace: layout.restoreWorkspace,
+      hasSessionContent: (ids) => sidePanels.current.some((panel) => ids.includes(panel.sourceSessionId) && sideConversationHasContent(panel.id)),
       openTool,
       toggleTool,
       openSideChatWithQuote,
@@ -1008,8 +1009,6 @@ export function useWorkbarController(
     [
       bindNewTaskSessionResolver,
       openSideChatWithQuote,
-      layout.captureWorkspace,
-      layout.restoreWorkspace,
       openTool,
       toggleTool,
       respondToClientCapability,

@@ -260,8 +260,8 @@ function attachmentExtensionLabel(name: string): string | null {
  * only one a user ever reads: one short, action-oriented line.
  */
 export interface ComposerHandle {
-  /** Settles editor-local reference waits and sends before a workspace transfer. */
-  waitForDraftReady(): Promise<void>;
+  /** In-flight imports and frontend sends must finish before moving the editor. */
+  hasPendingAction(): boolean;
   captureDrafts(keys: readonly string[]): ComposerDraftSnapshot[];
   restoreDrafts(drafts: readonly ComposerDraftSnapshot[]): void;
   /** Replace the input text, leaving focus on the input with the caret at the end. */
@@ -642,6 +642,8 @@ export const Composer = forwardRef<
   const composerMountedRef = useMountedRef();
   const sendPendingRef = useRef(false);
   const pendingComposerSendsRef = useRef(new Set<Promise<void>>());
+  const pendingSessionReferencesRef = useRef(props.pendingSessionReferences);
+  useLayoutEffect(() => { pendingSessionReferencesRef.current = props.pendingSessionReferences; }, [props.pendingSessionReferences]);
   const compositionActiveRef = useRef(false);
   const plainTextPasteInputActiveRef = useRef(false);
   const importActionOwnerRef = useRef<ChatInputActionOwner<ComposerImportActionId> | null>(null);
@@ -931,6 +933,7 @@ export const Composer = forwardRef<
   // draft hook's swap effect can reset history navigation even though the
   // history hook is created one line below it.
   const {
+    hasPendingRecovery,
     captureDrafts,
     restoreDrafts,
     saveCurrentDraft,
@@ -1391,9 +1394,8 @@ export const Composer = forwardRef<
   useImperativeHandle(
     ref,
     () => ({
-      async waitForDraftReady() {
-        while (pendingComposerSendsRef.current.size) await Promise.allSettled([...pendingComposerSendsRef.current]);
-      },
+      hasPendingAction: () => pendingComposerSendsRef.current.size > 0 || Boolean(importActionOwnerRef.current?.pending)
+        || Boolean(pendingSessionReferencesRef.current?.length) || hasPendingRecovery(),
       captureDrafts,
       restoreDrafts,
       setText(nextText: string, references?: readonly InlineReference[]) {

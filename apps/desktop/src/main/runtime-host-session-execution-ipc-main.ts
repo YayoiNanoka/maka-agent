@@ -171,8 +171,6 @@ export interface RuntimeHostSessionExecutionIpcDeps {
   client: RuntimeHostSessionExecutionClient;
   observer: RuntimeHostSessionObserver;
   attachmentApprovals: AttachmentApprovalRegistry;
-  recoverAttachmentItems?: (senderId: number, sessionId: string, items: unknown) => { items: unknown[]; validate(): void; dispose(): void };
-  transferRecoveryAttachments?: (senderId: number, sourceSessionId: string, targetSessionId: string, ids: unknown) => void;
   emitSessionsChanged: (
     reason: SessionChangedReason,
     sessionId?: string,
@@ -201,41 +199,33 @@ type MessageAttachmentResult =
   | { readonly ok: false; readonly reason: 'attachment_blocked'; readonly code: AttachmentIngestBlockedCode };
 
 async function prepareMessageAttachments(input: {
-  deps: Pick<RuntimeHostSessionExecutionIpcDeps, 'attachmentApprovals' | 'client' | 'resizeImage' | 'stat' | 'recoverAttachmentItems'>;
+  deps: Pick<RuntimeHostSessionExecutionIpcDeps, 'attachmentApprovals' | 'client' | 'resizeImage' | 'stat'>;
   getSenderId: () => number;
   sessionId: string;
   retainedAttachments: readonly AttachmentRef[];
   attachmentItems: unknown;
 }): Promise<MessageAttachmentResult> {
   const attachments = retainedAttachmentsForSession(input.sessionId, input.retainedAttachments);
-  let recovery: ReturnType<NonNullable<RuntimeHostSessionExecutionIpcDeps['recoverAttachmentItems']>> | undefined;
   try {
     if (input.attachmentItems !== undefined) {
-      recovery = input.deps.recoverAttachmentItems?.(input.getSenderId(), input.sessionId, input.attachmentItems);
       const files = await resolveIngestItems({
         senderId: input.getSenderId(),
-        items: recovery?.items ?? input.attachmentItems,
+        items: input.attachmentItems,
         approvals: input.deps.attachmentApprovals,
         stat: input.deps.stat,
       });
-      recovery?.validate();
       attachments.push(...await resolveAttachmentRefs({
         files,
         resizeImage: input.deps.resizeImage,
         snapshot: ({ name, mimeType, content }) =>
           input.deps.client.ingestAttachment({ sessionId: input.sessionId, name, mimeType, content }),
       }));
-      recovery?.validate();
     }
   } catch (error) {
     if (error instanceof AttachmentIngestBlockedError) {
       return { ok: false, reason: 'attachment_blocked', code: error.code };
     }
     throw error;
-  } finally {
-    // The renderer retains a failed send's draft and releases its approvals on
-    // success. Only hold the byte snapshot while it is being ingested here.
-    recovery?.dispose();
   }
   return attachments.length > MAX_ATTACHMENT_COUNT
     ? { ok: false, reason: 'attachment_blocked', code: 'count_limit' }
@@ -333,30 +323,6 @@ async function observationIpcResult<T>(
   }
 }
 
-const observedCopyOwners = new WeakMap<SessionCopyCleanupAuthority, Set<number>>();
-
-/** A restored panel adopts the same cleanup lease as a newly created panel. */
-export function bindSessionCopyOwner(authority: SessionCopyCleanupAuthority, sender: IpcMainInvokeEvent['sender'], onError: (error: unknown) => void): string {
-  const owners = observedCopyOwners.get(authority) ?? new Set<number>();
-  observedCopyOwners.set(authority, owners);
-  const ownerId = `web-contents:${sender.id}`;
-  if (!owners.has(sender.id)) {
-    owners.add(sender.id);
-    const abandon = () => {
-      if (!owners.delete(sender.id)) return;
-      sender.removeListener('render-process-gone', abandon);
-      sender.removeListener('destroyed', abandon);
-      sender.removeListener('did-start-navigation', onNavigation);
-      void authority.abandonOwner(ownerId).catch(onError);
-    };
-    const onNavigation = (_event: unknown, _url: string, inPlace: boolean, mainFrame: boolean) => { if (mainFrame && !inPlace) abandon(); };
-    sender.on('did-start-navigation', onNavigation);
-    sender.once('render-process-gone', abandon);
-    sender.once('destroyed', abandon);
-  }
-  return ownerId;
-}
-
 /**
  * Project Host-owned Session execution onto the Desktop renderer IPC contract.
  * The adapter owns client validation and presentation events, never Runtime
@@ -366,6 +332,22 @@ export function registerRuntimeHostSessionExecutionIpc(
   deps: RuntimeHostSessionExecutionIpcDeps,
   ipcMain: ReconnectableReadIpcMain,
 ): (sessionId: string) => Promise<void> {
+  const observedCopyOwners = new Set<string>();
+  const bindCopyOwner = (event: IpcMainInvokeEvent): string => {
+    const ownerId = `web-contents:${event.sender.id}`;
+    if (!observedCopyOwners.has(ownerId)) {
+      observedCopyOwners.add(ownerId);
+      const abandon = () => {
+        if (!observedCopyOwners.delete(ownerId)) return;
+        event.sender.removeListener('render-process-gone', abandon);
+        event.sender.removeListener('destroyed', abandon);
+        void deps.sessionCopyCleanup.abandonOwner(ownerId).catch(deps.onBackgroundError);
+      };
+      event.sender.once('render-process-gone', abandon);
+      event.sender.once('destroyed', abandon);
+    }
+    return ownerId;
+  };
   const newId = deps.newId ?? randomUUID;
   const stopSession = createRuntimeHostSessionStop(deps, newId);
 
@@ -822,11 +804,6 @@ export function registerRuntimeHostSessionExecutionIpc(
     "sessions:branchFromTurn",
     async (event, sessionId: string, input: unknown) => {
       const normalized = normalizeRuntimeHostBranchFromTurnInput(input);
-      const recoveryIds = input && typeof input === 'object' && 'recoveryAttachmentIds' in input
-        ? input.recoveryAttachmentIds : undefined;
-      if (recoveryIds !== undefined && (!normalized.sideConversation || !Array.isArray(recoveryIds) ||
-          recoveryIds.length > MAX_ATTACHMENT_COUNT || recoveryIds.some((id) => typeof id !== 'string' || !id.startsWith('local-recovery:'))))
-        throw new Error('Invalid side conversation recovery attachments');
       const createBranch = () =>
         deps.client.copySession("branch", {
           sourceSessionId: sessionId,
@@ -848,7 +825,7 @@ export function registerRuntimeHostSessionExecutionIpc(
                   ? {}
                   : { sourceTurnId: normalized.sourceTurnId }),
                 intent: 'side_conversation',
-                ownerId: bindSessionCopyOwner(deps.sessionCopyCleanup, event.sender, deps.onBackgroundError),
+                ownerId: bindCopyOwner(event),
               },
               createBranch,
             )
@@ -866,10 +843,6 @@ export function registerRuntimeHostSessionExecutionIpc(
           } satisfies SideConversationBranchResult;
         }
         throw error;
-      }
-      if (Array.isArray(recoveryIds) && recoveryIds.length > 0) {
-        if (!deps.transferRecoveryAttachments) throw new Error('Attachment recovery is unavailable');
-        deps.transferRecoveryAttachments(event.sender.id, sessionId, branch.id, recoveryIds);
       }
       if (normalized.name) {
         branch = await deps.client.updateSessionMetadata(branch.id, {

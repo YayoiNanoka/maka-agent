@@ -246,12 +246,3 @@ export function restoreSessionTranscriptRange<Message>(options: {
     options.onRestoreUnavailable?.(sessionId, turnId);
   }
 }
-
-/** A handoff snapshot replaces its members' positions, including “follow latest”. */
-export function replaceWorkspaceReadingAnchors(
-  sessionIds: readonly string[],
-  anchors: Readonly<Record<string, TranscriptReadingAnchor>>,
-  setAnchor: (sessionId: string, anchor: TranscriptReadingAnchor | undefined) => void,
-): void {
-  for (const sessionId of sessionIds) setAnchor(sessionId, anchors[sessionId]);
-}

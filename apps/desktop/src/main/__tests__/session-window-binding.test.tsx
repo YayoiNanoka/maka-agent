@@ -17,226 +17,175 @@
  * under the License.
  */
 
-import { strict as assert } from 'node:assert';
+import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { act, useState, type ComponentProps } from 'react';
 import { deferred } from '@maka/core/test-only/async-primitives';
-import type { ComposerHandle } from '@maka/ui';
-import type { SessionWorkspaceSnapshot } from '../../shared/session-workspace-state.js';
-import { SessionWindowBinding, SessionWindowServicesProvider, type SessionWindowServices } from '../../renderer/features/session-windows/index.js';
+import { LocaleProvider, ToastProvider, type ComposerHandle } from '@maka/ui';
+import type { SessionWindowCommand, SessionWindowCommandReply, SessionWindowOwnership } from '../../shared/session-window-contract.js';
+import { SessionWindowBinding, SessionWindowRoot, SessionWindowServicesProvider, type SessionWindowServices, type SessionWindowProjection } from '../../renderer/features/session-windows/index.js';
 import { cleanupFakeDom, installReactRenderer } from './fake-dom.js';
 
 type BindingProps = ComponentProps<typeof SessionWindowBinding>;
-
-const saved: SessionWorkspaceSnapshot = {
-  capturedAt: 1,
-  drafts: [{
-    sessionId: 'a', text: 'important unsent draft', references: [],
-    attachments: [{ type: 'approval', approvalId: 'local-recovery:handoff', name: 'draft.txt', size: 5 }],
-    directoryReferences: [], quotes: [],
-  }],
-  sideConversations: [],
-};
-
-async function mountBinding(options: {
-  load?(): Promise<void>;
-  refresh?(): Promise<void>;
-  adopt?(): Promise<void>;
-  snapshot?: SessionWorkspaceSnapshot;
-  initialSessionId?: string;
-} = {}) {
+const group = { hostId: 'host', groupId: 'a', sessionIds: ['a', 'child'] };
+async function mountBinding() {
   const { root } = installReactRenderer();
-  globalThis.requestAnimationFrame = (callback) => { queueMicrotask(() => callback(0)); return 1; };
-  const lifecycle: BindingProps['window']['lifecycle'] = {};
-  const state = {
-    active: (options.initialSessionId ?? 'b') as string | undefined,
-    restoring: false,
-    loads: 0,
-    clearSelections: 0,
-    restored: [] as Parameters<ComposerHandle['restoreDrafts']>[0][number][],
-    staged: [] as Parameters<BindingProps['staging']['replaceDrafts']>[0][number][],
-    released: [] as SessionWorkspaceSnapshot[],
-    adopted: [] as SessionWorkspaceSnapshot[],
-  };
-  let select: (id: string | undefined) => void = () => { throw new Error('Binding is not mounted'); };
+  let command!: (command: SessionWindowCommand) => void;
+  let ownership!: (snapshot: SessionWindowOwnership) => void;
+  let deleted!: (id: string) => void;
+  const replies: SessionWindowCommandReply[] = [];
+  const drafts = new Map([['a', 'keep A'], ['child', 'keep child'], ['b', 'keep B']]);
+  const state = { active: 'a' as string | undefined, frozen: false, inputPending: false, staged: new Set<string>(), edits: new Set<string>(), sideContent: new Set<string>(), unavailable: false };
+  let select!: (id: string | undefined) => void;
   const services: SessionWindowServices = {
-    context: async () => ({ kind: 'main', windowId: 'main' }),
-    routeSession: async () => 'local',
-    openSessionWindow: async () => {},
-    openInMainWindow: async () => {},
-    sessionWindowReady: async () => {},
-    subscribeSessionWindowCommand: () => () => {},
-    ackSessionWindowCommand: async () => {},
-    loadWorkspaceSnapshot: async (ids) => {
-      assert.deepEqual(ids, ['a']);
-      state.loads += 1;
-      await options.load?.();
-      return options.snapshot ?? saved;
-    },
-    adoptWorkspaceSnapshot: async (snapshot) => {
-      await options.adopt?.();
-      state.adopted.push(snapshot);
-    },
-    releaseSnapshot: async (snapshot) => { state.released.push(snapshot); },
-    commandMain: async () => {},
-    subscribeDeleted: () => () => {},
+    context: async () => ({ kind: 'main', windowId: 'main' }), ownership: async () => ({ version: 0, sessionIds: ['a', 'child', 'b'] }),
+    subscribeSessionWindowOwnership: (handler) => { ownership = handler; return () => {}; },
+    routeSession: async () => {}, openSessionWindow: async () => {}, openInMainWindow: async () => {}, sessionWindowReady: async () => {},
+    subscribeSessionWindowCommand: (handler) => { command = handler; return () => {}; },
+    ackSessionWindowCommand: async (reply) => { replies.push(reply); },
+    commandMain: async () => {}, subscribeDeleted: (handler) => { deleted = handler; return () => {}; },
   };
   const composer: ComposerHandle = {
-    waitForDraftReady: async () => {},
-    captureDrafts: () => [],
-    restoreDrafts: (drafts) => {
-      assert.equal(state.active, 'a', 'restore happens after selecting the destination');
-      state.restored.push(...drafts);
-    },
-    setText() {}, appendText() {}, getText: () => '', clearDraft() {}, setDraft() {},
-    getDraft: () => '', captureEmptyDraft: () => undefined, appendDraft() {}, focus() {}, openModelPicker() {},
-  };
-  const staging: BindingProps['staging'] = {
-    flushImports: async () => {}, captureDrafts: () => [], clearDrafts() {},
-    replaceDrafts: (drafts) => { state.staged.push(...drafts); },
-  };
-  const submission: BindingProps['submission'] = {
-    waitForPendingSends: async () => {}, captureWorkspace: () => ({ retractedReferences: {} }),
-    restoreWorkspace() {}, clearWorkspace() {},
-  };
-  const conversation: BindingProps['conversation'] = {
-    composer: { current: composer },
-    readActiveSessionId: () => state.active,
-    clearSelection: () => { state.clearSelections += 1; select(undefined); },
-    clearOwnedSessionState() {}, captureReadingAnchors: () => ({}), restoreReadingAnchors() {},
+    hasPendingAction: () => state.inputPending,
+    captureDrafts: (ids) => ids.map((id) => ({ draftKey: id, text: drafts.get(id) ?? '', references: [] })),
+    restoreDrafts: (items) => { if (state.unavailable) throw new Error('composer unavailable'); for (const draft of items) drafts.set(draft.draftKey, draft.text); },
+    clearDraft: (id) => { drafts.delete(id); },
+    setText() {}, appendText() {}, getText: () => '', setDraft() {}, getDraft: () => '', captureEmptyDraft: () => undefined, appendDraft() {}, focus() {}, openModelPicker() {},
   };
   function Harness() {
-    const [active, setActive] = useState<string | undefined>(options.initialSessionId ?? 'b');
-    const [restoring, setRestoring] = useState(false);
-    select = setActive;
-    state.active = active;
-    state.restoring = restoring;
+    const [active, setActive] = useState<string | undefined>('a'); const [frozen, setFrozen] = useState(false);
+    select = setActive; state.active = active; state.frozen = frozen;
     const window: BindingProps['window'] = {
-      context: { kind: 'main', windowId: 'main' }, lifecycle,
-      frozen: restoring, returning: false, standalone: false,
-      setFrozen() {}, setRestoring,
-      bootstrap: async () => {}, openSession: async () => true, openInNewWindow: async () => {},
-      openInMainWindow() {}, commandMain() {},
+      frameProps: { 'data-window-kind': 'main', inert: frozen || undefined },
+      titlebarProps: { standalone: false, returningToMain: false, onOpenInMainWindow() {} }, standalone: false, setFrozen,
+      bootstrap: async () => {}, openSession: () => true, openInNewWindow: async () => {}, mainActions: (local) => local, requestNewTask: (local) => local(),
     };
     return <SessionWindowServicesProvider value={services}>
-      <SessionWindowBinding window={window} staging={staging} submission={submission}
-        workbar={{ captureWorkspace: () => ({}), restoreWorkspace() {} }}
-        conversation={conversation} activeSessionId={active}
-        openLocal={({ sessionId }) => select(sessionId)} clearLocal={() => select(undefined)}
-        refreshSessions={async () => {}}
-        refreshMessages={async () => { await options.refresh?.(); return true; }} />
+      <SessionWindowBinding window={window}
+        staging={{ hasPendingContext: (ids) => ids.some((id) => state.staged.has(id)) }}
+        submission={{ hasPendingEdit: (ids) => ids.some((id) => state.edits.has(id)) }}
+        workbar={{ hasSessionContent: (ids) => ids.some((id) => state.sideContent.has(id)) }}
+        conversation={{ composer: { current: composer }, readActiveSessionId: () => state.active,
+          clearOwnedSessionState: (id) => { if (state.active === id) select(undefined); } }}
+        openLocal={({ sessionId }) => select(sessionId)} clearLocal={() => {}} />
     </SessionWindowServicesProvider>;
   }
-  await act(async () => root.render(<Harness />));
-  assert.ok(lifecycle.current);
-  return {
-    state, select: (id: string) => select(id),
-    open: (isCurrent = () => true, activate = () => select('a')) => lifecycle.current!.openWorkspace('a', isCurrent, activate),
+  await act(async () => root.render(<LocaleProvider locale="en"><Harness /></LocaleProvider>));
+  return { state, drafts, replies,
+    command: async (value: SessionWindowCommand) => { await act(async () => command(value)); return replies.at(-1)!; },
+    ownership: async (version: number, sessionIds: string[]) => { await act(async () => ownership({ version, sessionIds })); },
+    select: async (id: string) => { await act(async () => select(id)); },
+    deleted: async (id: string) => { await act(async () => deleted(id)); },
   };
 }
-
 afterEach(cleanupFakeDom);
 
-test('cancelled activation stays unvisited so reopening reloads and adopts the saved draft', async () => {
-  const refreshStarted = deferred();
-  const refresh = deferred();
-  let waitForRefresh = true;
-  const binding = await mountBinding({ refresh: async () => {
-    refreshStarted.resolve();
-    if (waitForRefresh) await refresh.promise;
-  } });
-  let current = true;
-  let opening!: Promise<void>;
-  await act(async () => {
-    opening = binding.open(() => current);
-    await refreshStarted.promise;
+for (const blocked of ['inputPending', 'staged', 'edits', 'sideContent'] as const) {
+  test(`handoff refuses ${blocked}, including content on a non-displayed family member`, async () => {
+    const h = await mountBinding();
+    if (blocked === 'inputPending') h.state.inputPending = true; else h.state[blocked].add('child');
+    const reply = await h.command({ kind: 'prepare', requestId: '1', transferId: 'move', group });
+    assert.equal(reply.ok, false); assert.equal(h.state.active, 'a'); assert.equal(h.state.frozen, false);
+    assert.equal(h.drafts.get('a'), 'keep A'); assert.equal(h.drafts.get('child'), 'keep child');
+    const closing = await h.command({ kind: 'check-close', requestId: '2', group });
+    assert.equal(closing.ok && closing.result?.hasUnsent, true);
+    await h.command({ kind: 'cancel-close', requestId: '3' });
+    assert.equal(h.state.frozen, false);
   });
-  assert.equal(binding.state.active, 'a');
-  assert.equal(binding.state.restoring, true);
-  await act(async () => {
-    current = false;
-    binding.select('b');
-    refresh.resolve();
-    await opening;
+}
+
+test('prepare parks the display while retaining drafts, abort restores it, and committed ownership releases only this family', async () => {
+  const h = await mountBinding();
+  assert.equal((await h.command({ kind: 'prepare', requestId: '1', transferId: 'first', group })).ok, true);
+  assert.equal(h.state.active, undefined); assert.equal(h.state.frozen, true); assert.equal(h.drafts.get('a'), 'keep A');
+  await h.command({ kind: 'abort', requestId: '2', transferId: 'first' });
+  assert.equal(h.state.active, 'a'); assert.equal(h.state.frozen, false);
+  await h.command({ kind: 'prepare', requestId: '3', transferId: 'second', group });
+  await h.ownership(2, ['b']);
+  assert.equal(h.drafts.has('a'), false); assert.equal(h.drafts.get('b'), 'keep B'); assert.equal(h.state.frozen, false);
+});
+
+test('target stages text without replacing B, rejects stale ownership, and activates only after commitment', async () => {
+  const h = await mountBinding(); await h.select('b');
+  await h.ownership(5, ['b']);
+  await h.command({ kind: 'receive', requestId: '1', transferId: 'move', group,
+    navigation: { sessionId: 'child' }, drafts: [{ sessionId: 'child', text: 'arriving', references: [] }] });
+  assert.equal(h.state.active, 'b'); assert.equal(h.drafts.get('b'), 'keep B'); assert.equal(h.state.frozen, true);
+  await h.ownership(4, ['a', 'child', 'b']); assert.equal(h.state.active, 'b');
+  await h.ownership(6, ['a', 'child', 'b']);
+  assert.equal(h.state.active, 'child'); assert.equal(h.drafts.get('child'), 'arriving'); assert.equal(h.state.frozen, false);
+});
+
+test('failed target adoption does not navigate, clear B or leave the main window frozen', async () => {
+  const h = await mountBinding(); await h.select('b'); h.state.unavailable = true;
+  const reply = await h.command({ kind: 'receive', requestId: '1', transferId: 'move', group,
+    navigation: { sessionId: 'a' }, drafts: [{ sessionId: 'a', text: 'arriving', references: [] }] });
+  assert.equal(reply.ok, false); assert.equal(h.state.active, 'b'); assert.equal(h.state.frozen, false); assert.equal(h.drafts.get('b'), 'keep B');
+});
+
+test('close detects hidden unsent content and cancellation leaves the original selection and drafts', async () => {
+  const h = await mountBinding(); h.drafts.delete('a');
+  const reply = await h.command({ kind: 'check-close', requestId: '1', group });
+  assert.equal(reply.ok && reply.result?.hasUnsent, true); assert.equal(h.state.frozen, true);
+  await h.command({ kind: 'cancel-close', requestId: '2' });
+  assert.equal(h.state.active, 'a'); assert.equal(h.state.frozen, false); assert.equal(h.drafts.get('child'), 'keep child');
+});
+
+test('the initial ownership read cannot overwrite a newer pushed membership', async () => {
+  const { root } = installReactRenderer(); const initial = deferred<SessionWindowOwnership>();
+  let update!: (snapshot: SessionWindowOwnership) => void;
+  let projection: SessionWindowProjection | undefined;
+  const routes: string[] = []; const activated: string[] = [];
+  const services: SessionWindowServices = {
+    context: async () => ({ kind: 'main', windowId: 'main' }), ownership: () => initial.promise,
+    subscribeSessionWindowOwnership: (handler) => { update = handler; return () => {}; },
+    routeSession: async ({ sessionId }) => { routes.push(sessionId); },
+    openSessionWindow: async () => {}, openInMainWindow: async () => {}, sessionWindowReady: async () => {},
+    subscribeSessionWindowCommand: () => () => {}, ackSessionWindowCommand: async () => {}, commandMain: async () => {}, subscribeDeleted: () => () => {},
+  };
+  await act(async () => root.render(<LocaleProvider locale="en"><ToastProvider><SessionWindowServicesProvider value={services}>
+    <SessionWindowRoot>{(value) => { projection = value; return null; }}</SessionWindowRoot>
+  </SessionWindowServicesProvider></ToastProvider></LocaleProvider>));
+  await act(async () => { update({ version: 2, sessionIds: ['b'] }); initial.resolve({ version: 1, sessionIds: ['a', 'b'] }); });
+  assert.ok(projection);
+  projection.openSession({ sessionId: 'a' }, () => activated.push('a'));
+  assert.deepEqual(routes, ['a']); assert.equal(activated.length, 0);
+  assert.equal(projection.openSession({ sessionId: 'b' }, () => activated.push('b')), true);
+  assert.deepEqual(activated, ['b']);
+});
+
+for (const kind of ['main', 'session'] as const) {
+  test(`${kind} window routes global actions and exposes its own frame controls`, async () => {
+    const { root } = installReactRenderer();
+    let projection!: SessionWindowProjection;
+    const calls: string[] = [];
+    const returning = deferred<void>();
+    const services: SessionWindowServices = {
+      context: async () => kind === 'main' ? { kind, windowId: 'main' } : { kind, windowId: 'child', group, initialSessionId: 'a' },
+      ownership: async () => ({ version: 1, sessionIds: ['a', 'child'] }),
+      subscribeSessionWindowOwnership: () => () => {},
+      routeSession: async () => {}, openSessionWindow: async () => {}, openInMainWindow: () => returning.promise,
+      sessionWindowReady: async () => {}, subscribeSessionWindowCommand: () => () => {},
+      ackSessionWindowCommand: async () => {}, commandMain: async (command) => { calls.push(`main:${command}`); }, subscribeDeleted: () => () => {},
+    };
+    await act(async () => root.render(<LocaleProvider locale="en"><ToastProvider><SessionWindowServicesProvider value={services}>
+      <SessionWindowRoot>{(value) => { projection = value; return null; }}</SessionWindowRoot>
+    </SessionWindowServicesProvider></ToastProvider></LocaleProvider>));
+    const actions = projection.mainActions({
+      openHelp: () => calls.push('help'), openSettings: () => calls.push('settings'),
+      openSettingsSection: (section) => calls.push(`section:${section}`), openExternalAgentSettings: () => calls.push('external-agent'),
+    });
+    await act(async () => {
+      actions.openHelp(); actions.openSettings(); actions.openSettingsSection(); actions.openExternalAgentSettings();
+      projection.requestNewTask(() => calls.push('new-task'));
+    });
+    assert.deepEqual(calls, kind === 'main' ? ['help', 'settings', 'section:undefined', 'external-agent', 'new-task']
+      : ['main:openHelp', 'main:openSettings', 'main:openSettings', 'main:openSettings', 'main:newTask']);
+    assert.equal(projection.frameProps['data-window-kind'], kind);
+    assert.equal(projection.titlebarProps.standalone, kind === 'session');
+    await act(() => projection.setFrozen(true)); assert.equal(projection.frameProps.inert, true);
+    await act(() => projection.setFrozen(false)); assert.equal(projection.frameProps.inert, undefined);
+    await act(() => projection.titlebarProps.onOpenInMainWindow()); assert.equal(projection.titlebarProps.returningToMain, true);
+    await act(async () => returning.resolve()); assert.equal(projection.titlebarProps.returningToMain, false);
   });
-  assert.equal(binding.state.restoring, false);
-  assert.deepEqual(binding.state.released, [saved]);
-  assert.equal(binding.state.restored.length, 0);
-  assert.equal(binding.state.adopted.length, 0);
-  waitForRefresh = false;
-  await act(async () => { await binding.open(); });
-  assert.equal(binding.state.loads, 2, 'cancelled selection must not mark the Session as visited');
-  assert.equal(binding.state.restored[0]!.text, saved.drafts[0]!.text);
-  assert.deepEqual(binding.state.staged[0]!.context.stagedAttachments, [{
-    approvalId: 'local-recovery:handoff', name: 'draft.txt', mimeType: undefined, size: 5,
-  }]);
-  assert.deepEqual(binding.state.adopted, [saved]);
-  assert.equal(binding.state.clearSelections, 2, 'a saved handoff resets the previous selection before each attempt');
-  await act(async () => { binding.select('b'); });
-  await act(async () => { await binding.open(); });
-  assert.equal(binding.state.loads, 2, 'successfully adopted drafts use ordinary local navigation');
-});
-
-test('restoration freezes the surface while loading, activating, and adopting the draft', async () => {
-  const load = deferred();
-  const refreshStarted = deferred();
-  const refresh = deferred();
-  const adoptStarted = deferred();
-  const adopt = deferred();
-  const binding = await mountBinding({
-    load: () => load.promise,
-    refresh: () => { refreshStarted.resolve(); return refresh.promise; },
-    adopt: () => { adoptStarted.resolve(); return adopt.promise; },
-  });
-  let opening!: Promise<void>;
-  await act(async () => { opening = binding.open(); });
-  assert.equal(binding.state.restoring, true);
-  assert.equal(binding.state.active, 'b');
-  await act(async () => { load.resolve(); await refreshStarted.promise; });
-  assert.equal(binding.state.restoring, true);
-  assert.equal(binding.state.active, 'a');
-  assert.equal(binding.state.restored.length, 0);
-  await act(async () => { refresh.resolve(); await adoptStarted.promise; });
-  assert.equal(binding.state.restoring, true);
-  assert.equal(binding.state.restored[0]!.text, saved.drafts[0]!.text);
-  await act(async () => { adopt.resolve(); await opening; });
-  assert.equal(binding.state.restoring, false);
-  assert.deepEqual(binding.state.adopted, [saved]);
-});
-
-test('activation failure releases temporary attachment handles and allows retry', async () => {
-  const binding = await mountBinding();
-  await act(async () => {
-    await assert.rejects(binding.open(() => true, () => { throw new Error('activation failed'); }), /activation failed/);
-  });
-  assert.equal(binding.state.restoring, false);
-  assert.deepEqual(binding.state.released, [saved]);
-  assert.equal(binding.state.restored.length, 0);
-  assert.equal(binding.state.adopted.length, 0);
-  await act(async () => { await binding.open(); });
-  assert.equal(binding.state.loads, 2);
-  assert.equal(binding.state.restored[0]!.text, saved.drafts[0]!.text);
-  assert.deepEqual(binding.state.adopted, [saved]);
-});
-
-
-test('opening a Session without a handoff snapshot keeps ordinary selection behavior', async () => {
-  const empty: SessionWorkspaceSnapshot = { capturedAt: 0, drafts: [], sideConversations: [] };
-  const binding = await mountBinding({ snapshot: empty });
-  await act(async () => { await binding.open(); });
-  assert.equal(binding.state.active, 'a');
-  assert.equal(binding.state.clearSelections, 0);
-  assert.equal(binding.state.restored.length, 0);
-  assert.deepEqual(binding.state.adopted, [empty]);
-});
-
-test('an already active Session keeps its local draft without loading a handoff', async () => {
-  const binding = await mountBinding({ initialSessionId: 'a' });
-  await act(async () => { await binding.open(); });
-  assert.equal(binding.state.active, 'a');
-  assert.equal(binding.state.loads, 0);
-  assert.equal(binding.state.clearSelections, 0);
-  assert.equal(binding.state.restoring, false);
-  assert.equal(binding.state.restored.length, 0);
-  assert.equal(binding.state.adopted.length, 0);
-});
+}

@@ -71,7 +71,6 @@ function createBridgeRecorder(answerOverrides: Record<string, unknown> = {}): {
     bridge: {
       gitReview: domain('gitReview'),
       sessions: domain('sessions'),
-      sessionLocal: domain('sessionLocal'),
       shellRuns: domain('shellRuns'),
       browser: domain('browser'),
       artifacts: domain('artifacts'),
@@ -242,7 +241,6 @@ describe('createDesktopWorkbarServices', () => {
 
     await services.attachments.pickFiles();
     await services.attachments.previewApproval('approval');
-    await services.attachments.releaseRecoveryAttachments(['local-recovery:side']);
 
     await services.sideChat.listSessions();
     await services.sideChat.listTurns('s');
@@ -323,7 +321,6 @@ describe('createDesktopWorkbarServices', () => {
         'inspector.subscribeUsageChanges',
         'attachments.pickFiles',
         'attachments.previewApproval',
-        'sessionLocal.releaseRecoveryAttachments',
         'sessions.list',
         'sessions.listTurns',
         'sessions.branchFromTurn',

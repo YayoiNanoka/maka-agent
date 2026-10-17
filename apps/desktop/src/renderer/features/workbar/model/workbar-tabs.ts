@@ -19,8 +19,41 @@
 
 import { isPersistedWorkbarTool } from './workbar-tool-definitions.js';
 
-import type { SessionWorkbarTabKind, SessionWorkbarTab, SessionWorkbarTabsState, SessionWorkbarPlacement, SessionWorkbarPanelsState } from '../../../../shared/session-workbar-state.js';
-export type { SessionWorkbarTabKind, SessionWorkbarTab, SessionWorkbarTabsState, SessionWorkbarPlacement, SessionWorkbarPanelsState } from '../../../../shared/session-workbar-state.js';
+export type SessionWorkbarTabKind =
+  | 'review'
+  | 'terminal'
+  | 'work-board'
+  | 'browser'
+  | 'files'
+  | 'inspector'
+  | 'side-chat';
+
+export interface SessionWorkbarTab {
+  id: string;
+  kind: SessionWorkbarTabKind;
+  /** Transient display title for dynamic tabs. Never persisted. */
+  title?: string;
+  /** Stable creation number for repeated tab kinds such as Terminal and Side chat. */
+  ordinal?: number;
+  resourceRef?: string;
+  ownerSessionId?: string;
+}
+
+export interface SessionWorkbarTabsState {
+  tabs: SessionWorkbarTab[];
+  activeTabId: string | null;
+  launcherOpen: boolean;
+  /** Most-recent activation last; used as close fallback before adjacency. */
+  activationHistory: string[];
+}
+
+export type SessionWorkbarPlacement = 'right' | 'bottom';
+
+export interface SessionWorkbarPanelsState {
+  right: SessionWorkbarTabsState;
+  bottom: SessionWorkbarTabsState;
+  focusedPanel: SessionWorkbarPlacement;
+}
 
 /** Visibility is a projection of the open tools, never a command to close them. */
 export function projectWorkbarPanelsForSession(

@@ -20,7 +20,6 @@
 import { Buffer } from 'node:buffer';
 import { MAX_ATTACHMENT_BYTES, sniffAttachmentMimeType } from '@maka/core/attachments';
 import type { AttachmentApprovalRegistry } from './attachment-approval.js';
-import type { SessionLocalAttachmentRecovery, RecoveryOwner } from './session-local-attachment-recovery.js';
 
 export type AttachmentPreviewResult =
   | { ok: true; base64: string; mimeType: string }
@@ -92,33 +91,6 @@ export async function loadApprovalPreview(input: {
   }
 }
 
-/** Recovery data is only exposed as a freshly encoded thumbnail, never original bytes. */
-export async function loadRecoveryApprovalPreview(input: {
-  senderId: number;
-  approvalId: string;
-  recovery: SessionLocalAttachmentRecovery;
-  authorizeRecovery(owner: RecoveryOwner): boolean;
-  renderPreview: AttachmentPreviewDeps['renderPreview'];
-}): Promise<AttachmentPreviewResult> {
-  const owner = input.recovery.ownerForPreview(input.senderId, input.approvalId);
-  if (!owner || !input.authorizeRecovery(owner)) return { ok: false, reason: 'not_found' };
-  try {
-    const { content } = input.recovery.snapshot(owner, input.approvalId);
-    if (content.byteLength > MAX_ATTACHMENT_BYTES) return { ok: false, reason: 'unreadable' };
-    if (!sniffAttachmentMimeType(content)?.startsWith('image/')) return { ok: false, reason: 'not_image' };
-    const preview = await input.renderPreview(content);
-    // A window can close or its Host authorization can be revoked while the
-    // decoder runs. Never return an already revoked snapshot to that renderer.
-    if (!input.recovery.ownerForPreview(input.senderId, input.approvalId) || !input.authorizeRecovery(owner))
-      return { ok: false, reason: 'not_found' };
-    if (!preview || preview.mimeType !== 'image/png' || preview.bytes.byteLength > INLINE_PREVIEW_FALLBACK_MAX_BYTES)
-      return { ok: false, reason: 'unreadable' };
-    return { ok: true, base64: Buffer.from(preview.bytes).toString('base64'), mimeType: preview.mimeType };
-  } catch {
-    return { ok: false, reason: 'unreadable' };
-  }
-}
-
 /**
  * Register the client-owned attachment preview boundary used by Runtime Host
  * Desktop. Preview admission and byte validation remain local because the
@@ -132,13 +104,9 @@ export function registerAttachmentPreviewIpc(input: {
     ): void;
   };
   approvals: AttachmentApprovalRegistry;
-  recovery: SessionLocalAttachmentRecovery;
-  authorizeRecovery(owner: RecoveryOwner): boolean;
 } & AttachmentPreviewDeps): void {
   input.ipcMain.handle('attachments:previewApproval', (event, approvalId) =>
-    typeof approvalId === 'string' && approvalId.startsWith('local-recovery:')
-      ? loadRecoveryApprovalPreview({ senderId: event.sender.id, approvalId, recovery: input.recovery, authorizeRecovery: input.authorizeRecovery, renderPreview: input.renderPreview })
-      : loadApprovalPreview({
+    loadApprovalPreview({
       senderId: event.sender.id,
       approvalId,
       approvals: input.approvals,

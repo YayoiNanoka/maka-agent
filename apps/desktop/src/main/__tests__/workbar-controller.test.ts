@@ -431,39 +431,12 @@ describe('useWorkbarController', () => {
     await act(async () => controller().commands.openTool('inspector', 'bottom'));
     await act(async () => controller().host.rightResizable._onResizeStart());
     await act(async () => controller().host.rightResizable._onResizeMove(50));
-    const layout = controller().commands.captureWorkspace(['a', 'b']);
     const panels = controller().host.panelsState;
     const width = controller().host.rightWidth;
     await act(async () => show('a'));
     assert.deepEqual(controller().host.panelsState, panels);
     assert.equal(controller().host.rightWidth, width);
     assert.equal(controller().host.bottomOpen, true);
-    assert.deepEqual(layout.a!.panels, layout.b!.panels);
-    assert.equal(layout.a!.rightWidth, layout.b!.rightWidth);
-  });
-
-  it('captures without changing B and restores the transferred layout only once', async () => {
-    const { root } = installReactRenderer();
-    const services = createFakeWorkbarServices();
-    const show = (id: string) => renderController(root, services, input(session(id)));
-    await act(async () => show('a'));
-    await act(async () => controller().commands.openTool('files'));
-    const transferred = controller().commands.captureWorkspace(['a']);
-    await act(async () => show('b'));
-    await act(async () => controller().commands.openTool('inspector', 'bottom'));
-    const bPanels = controller().host.panelsState;
-    controller().commands.captureWorkspace(['a']);
-    assert.deepEqual(controller().host.panelsState, bPanels);
-    assert.equal(controller().host.activeId, 'b');
-    assert.equal(controller().host.bottomOpen, true);
-    await act(async () => show('a'));
-    await act(async () => controller().commands.restoreWorkspace(transferred));
-    assert.deepEqual(controller().host.panelsState, transferred.a!.panels);
-    assert.equal(controller().host.bottomOpen, false);
-    await act(async () => show('b'));
-    await act(async () => controller().commands.openTool('browser'));
-    await act(async () => show('a'));
-    assert.equal(controller().host.panelsState.right.activeTabId, 'workbar:browser');
   });
 
   function fakeRail(width = 260) {
