@@ -218,10 +218,7 @@ test('routes the first-paint IPC only to the active Renderer recovery listener',
   const reloadStart = mainWindowSource.indexOf('    async reloadMainRenderer() {');
   const reloadEnd = mainWindowSource.indexOf('    isRenderer:', reloadStart);
   assert.ok(reloadStart >= 0 && reloadEnd > reloadStart);
-  const reloadHandler = mainWindowSource.slice(
-    reloadStart,
-    reloadEnd,
-  );
+  const reloadHandler = mainWindowSource.slice(reloadStart, reloadEnd);
 
   assert.match(
     ipcHandler,
