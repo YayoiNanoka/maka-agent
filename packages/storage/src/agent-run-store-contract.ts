@@ -503,7 +503,7 @@ export function assertNoReservedToolLedgerFact(event: RuntimeEvent): void {
   const validation = validateGenericToolLedgerAppend(event);
   if (validation.ok) return;
   if (validation.code === 'reserved_recovery_fact') {
-    throw new Error('Tool recovery facts require the atomic recovery bundle writer');
+    throw new Error('Historical tool recovery facts are read-only');
   }
   if (validation.code === 'reserved_tool_boundary_fact') {
     throw new Error('Durable tool facts require the atomic tool boundary writer');
@@ -1128,7 +1128,10 @@ export function normalizeRootExecutionDescriptor(value: unknown): RootExecutionD
   }
   if (value.kind === 'external_message') {
     const decodedOrigin = decodeTurnOrigin(value.origin);
-    const origin = decodedOrigin?.kind === 'cloud_activation' ? decodedOrigin : undefined;
+    const origin =
+      decodedOrigin?.kind === 'cloud_activation' || decodedOrigin?.kind === 'external_connector'
+        ? decodedOrigin
+        : undefined;
     const allowedKeys = ['kind', 'inputDigest', 'maxSteps', 'origin'];
     if (!Object.keys(value).every((key) => allowedKeys.includes(key))) {
       throw new Error('Invalid root execution descriptor');

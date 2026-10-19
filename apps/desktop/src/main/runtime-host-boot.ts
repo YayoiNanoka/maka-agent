@@ -221,6 +221,8 @@ import {
   createDesktopRuntimeHostSshTerminal,
 } from "./runtime-host-ssh-terminal.js";
 import {
+  createDesktopRuntimeHostWslOperatorResolver,
+  type DesktopRuntimeHostWslManagementInput,
   runDesktopRuntimeHostWslManagement,
   runDesktopRuntimeHostWslSetup,
 } from './runtime-host-wsl-controller.js';
@@ -396,6 +398,15 @@ const runtimeHostSetupPackage = createRuntimeHostSetupPackageResolver({
   appPath: app.getAppPath(),
   environment: process.env,
 });
+const resolveWslOperator = createDesktopRuntimeHostWslOperatorResolver({
+  catalog: runtimeHostProfileCatalog,
+  principalId: runtimeHostClientInstanceId,
+  resolvePackage: (signal) => runtimeHostSetupPackage.resolve('none', signal),
+});
+const runWslManagement = async (input: DesktopRuntimeHostWslManagementInput) =>
+  runDesktopRuntimeHostWslManagement({ ...input,
+    operator: await resolveWslOperator({ ...input, rootId: input.expectedTarget.rootId }),
+  });
 const localRuntimeHostOperator = createDesktopRuntimeHostLocalOperator();
 const localRuntimeHostRemoteAccess = createDesktopLocalRuntimeHostRemoteAccess({
   ipcMain,
@@ -638,7 +649,7 @@ const runtimeHostManagement = createDesktopRuntimeHostManagement({
   ipcMain,
   profiles: runtimeHostProfileService,
   runServiceManagement: runtimeHostSshTerminal.runServiceManagement,
-  runWslManagement: runDesktopRuntimeHostWslManagement,
+  runWslManagement,
   runPeerManagement: runtimeHostSshTerminal.runPeerManagement,
   directPeerClientAvailable: runtimeHostDirectPeerAvailable,
   runUpdate: runtimeHostSshTerminal.runUpdate,
@@ -1048,6 +1059,7 @@ const createLocalRuntimeHostManager = () => createRuntimeHostDesktopManager(
     ipcMain,
     workspaceRoot,
     attachmentApprovals,
+    resolveWslOperator,
     stat: (path) => import("node:fs/promises").then(({ stat }) => stat(path)),
     resizeImage: resizeImageForAttachment,
     mainWindowController,
@@ -1309,6 +1321,7 @@ const createLocalRuntimeHostManager = () => createRuntimeHostDesktopManager(
     recoverLocalHost: (signal) => localRuntimeHostRemoteAccess.recoverBeforeLocalHostStart(signal),
     resolveStartupRepair: (error, signal) => localRuntimeHostRemoteAccess.resolveStartupRepair(error, signal),
     resolveWslHostHandoff: async (profile, error, signal) => resolveDesktopWslHostHandoff(profile, error, signal, {
+      status: runWslManagement,
       locale: await desktopLocale.resolve(),
       resolveBinding: (profileId) => runtimeHostProfileService.resolveManagedService(profileId),
       resolvePackage: (packageSignal) => runtimeHostSetupPackage.resolve('none', packageSignal),
