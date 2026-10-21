@@ -23,6 +23,7 @@
  * construction and cross-turn routing remain in AiSdkBackend.
  */
 
+import { EVENT_WAIT_TOOL_NAME, isEventWaitYieldReceipt } from './event-wait-tool.js';
 import type {
   AbortEvent,
   CompleteEvent,
@@ -143,6 +144,7 @@ import {
   type RuntimeEventModelReplayPlan,
   type RuntimeEventReplayFallbackGate,
 } from './model-history.js';
+import { changedRuntimeContexts } from './runtime-context.js';
 import type { ContextBudgetPolicy } from './context-budget.js';
 import {
   toolSchemaCharsForDiagnostics,
@@ -1440,6 +1442,28 @@ export class AiSdkTurn {
             ? currentTurnMessages
             : [...priorReplay.messages, ...currentTurnMessages];
         };
+        const appendRuntimeContexts = async (
+          history: ModelMessage[],
+          contexts: NonNullable<ResolvedSystemPrompt['contexts']>,
+        ): Promise<ModelMessage[]> => {
+          const additions = changedRuntimeContexts(contexts, history).map((context) => ({
+            context,
+            id: this.deps.newId(),
+          }));
+          for (const { context, id } of additions) {
+            queue.push({ type: 'runtime_context', id, turnId, ts: this.deps.now(), ...context });
+          }
+          if (additions.length === 0) return history;
+          // Persist before dispatch; retries reuse the same snapshot. Context
+          // removed by compaction is refreshed after that fold, not lost in it.
+          await queue.waitUntilConsumedThroughCurrent();
+          return [
+            ...history,
+            ...additions.map(({ context, id }) =>
+              this.deps.messageProjection.materializeRuntimeContext(context, id),
+            ),
+          ];
+        };
         // Tool Availability describes the provider-visible (active) subset. A
         // group loaded this turn expands that subset on later requests, so the
         // terminal trace is refined against the final active set below.
@@ -1568,9 +1592,6 @@ export class AiSdkTurn {
               activeTools,
             };
           };
-          const dynamicContextMessages: ModelMessage[] = (resolvedSystemPrompt.contexts ?? []).map(
-            ({ text }) => ({ role: 'user', content: text }),
-          );
           const shaped = requestProjection
             ? await requestProjection({
                 completedSteps: completedProviderSteps,
@@ -1603,7 +1624,10 @@ export class AiSdkTurn {
                 })
               : undefined;
           providerRequestTracker?.setStep(runtimeSteps, requestCompositionId);
-          let attemptMessages = projectedMessages;
+          let attemptMessages = await appendRuntimeContexts(
+            projectedMessages,
+            resolvedSystemPrompt.contexts ?? [],
+          );
           let overflowRecoveryMaxOutputTokens: number | undefined;
           let providerAttempt = 0;
           const returnedToolCalls: ToolCallPart[] = [];
@@ -1627,8 +1651,7 @@ export class AiSdkTurn {
             const attemptHasNoObservableOutput = () =>
               !attemptSawVisibleContent && !attemptSawToolActivity && !attemptSawReplayBarrier;
             const attemptCanReplay = () => !attemptSawToolActivity && !attemptSawReplayBarrier;
-            // Request-only facts must survive history replacement and overflow recovery.
-            const dispatchMessages = [...attemptMessages, ...dynamicContextMessages];
+            const dispatchMessages = attemptMessages;
             this.memorySourceMessages = dispatchMessages;
             this.memorySourceEventMessagePositions =
               this.deps.messageProjection.memoryEventMessagePositions(dispatchMessages);
@@ -2042,7 +2065,10 @@ export class AiSdkTurn {
                     })
                   : undefined;
               if (recovered) {
-                attemptMessages = recovered.messages;
+                attemptMessages = await appendRuntimeContexts(
+                  recovered.messages,
+                  resolvedSystemPrompt.contexts ?? [],
+                );
                 overflowRecoveryMaxOutputTokens = Math.min(
                   this.deps.modelAdapter.maxOutputTokens() ?? CONTEXT_RECOVERY_MAX_OUTPUT_TOKENS,
                   CONTEXT_RECOVERY_MAX_OUTPUT_TOKENS,
@@ -2169,6 +2195,7 @@ export class AiSdkTurn {
           finishReason = providerOutcome.finishReason;
           await queue.waitUntilConsumedThroughCurrent();
 
+          let toolRequestedFinish = false;
           if (returnedToolCalls.length > 0) {
             const continuationBudgetRemains = maxSteps === undefined || runtimeSteps < maxSteps;
             if (continuationBudgetRemains && !this.deps.backend.loadTurnRuntimeEvents) {
@@ -2181,6 +2208,13 @@ export class AiSdkTurn {
               await loadDurableTurnEvents();
             }
             const toolsByName = new Map(providerTools.map((tool) => [tool.name, tool]));
+            // A wait controls the lifetime of the whole Turn. Refuse the entire
+            // mixed step before dispatch, rather than letting the first call win
+            // the ordinary exclusive-step gate and leaving a registered orphan.
+            const mixedEventWait =
+              returnedToolCalls.length > 1 &&
+              toolsByName.has(EVENT_WAIT_TOOL_NAME) &&
+              returnedToolCalls.some((call) => call.toolName === EVENT_WAIT_TOOL_NAME);
             const settlementOutcomes = await Promise.allSettled(
               returnedToolCalls.map(async (toolCall) => {
                 if (toolCall.providerExecuted) {
@@ -2195,17 +2229,20 @@ export class AiSdkTurn {
                 if (deniedBoundaryRequest) {
                   toolRuntime.forceSandboxBoundaryFinalization();
                 }
-                const blockedToolCall = sandboxBoundaryFinalizationStep || deniedBoundaryRequest;
+                const blockedToolCall =
+                  mixedEventWait || sandboxBoundaryFinalizationStep || deniedBoundaryRequest;
                 const requestedTool = blockedToolCall
                   ? undefined
                   : toolsByName.get(toolCall.toolName);
                 const tool = requestedTool ?? toolsByName.get(INVALID_TOOL_NAME);
                 if (!tool) throw new Error('Runtime invalid-tool fallback is unavailable');
-                const unavailableError = sandboxBoundaryFinalizationStep
-                  ? 'Sandbox boundary finalization does not permit tool execution.'
-                  : deniedBoundaryRequest
-                    ? SANDBOX_BOUNDARY_DENIED_FOR_TURN
-                    : 'returned tool is unavailable';
+                const unavailableError = mixedEventWait
+                  ? 'WaitForEvent requires a step containing exactly one tool call. No tools in this mixed step ran.'
+                  : sandboxBoundaryFinalizationStep
+                    ? 'Sandbox boundary finalization does not permit tool execution.'
+                    : deniedBoundaryRequest
+                      ? SANDBOX_BOUNDARY_DENIED_FOR_TURN
+                      : 'returned tool is unavailable';
                 return await toolRuntime.settleToolCall({
                   tool,
                   turnId,
@@ -2245,6 +2282,22 @@ export class AiSdkTurn {
               if (outcome.status === 'rejected') throw outcome.reason;
               const settlement = outcome.value;
               const toolCall = returnedToolCalls[index];
+              const definition = toolCall && toolsByName.get(toolCall.toolName);
+              if (
+                returnedToolCalls.length === 1 &&
+                definition?.executionSemantics === 'exclusive_step' &&
+                definition.finishTurnOnSuccess &&
+                !settlement.providerError
+              )
+                toolRequestedFinish = true;
+              if (
+                returnedToolCalls.length === 1 &&
+                !settlement.providerError &&
+                isEventWaitYieldReceipt(settlement.result)
+              ) {
+                this.loopStopReason = 'event_wait';
+                this.loopStopRequested = true;
+              }
               if (isPlanToolResult(settlement.result)) {
                 this.handlePlanToolResult(settlement.result, queue);
               }
@@ -2285,6 +2338,21 @@ export class AiSdkTurn {
             ...(providerStepUsage ? { usage: providerStepUsage } : {}),
           });
           lastCompletedStepHadToolResult = returnedToolCalls.length > 0;
+          // Finish only after the tool result is durably consumed. The Host can
+          // veto completion (for example, new Inbox input raced with Sleep).
+          if (toolRequestedFinish && !this.aborted && !this.loopStopRequested) {
+            const decision = await this.deps.backend.beforeTurnFinish?.({
+              sessionId: this.deps.backend.sessionId,
+              turnId,
+              signal: turnAbortController.signal,
+            });
+            if (!decision || decision.allow) {
+              finishReason = 'stop';
+              this.deps.modelAdapter.clearContinuation(this.turnId);
+              break agentLoop;
+            }
+            finishFeedback = decision.feedback;
+          }
           const stepLimitReached = maxSteps !== undefined && runtimeSteps >= maxSteps;
           if (
             sandboxBoundaryFinalizationStep ||

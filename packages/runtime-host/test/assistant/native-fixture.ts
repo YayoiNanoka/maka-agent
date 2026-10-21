@@ -25,6 +25,7 @@ export async function nativeFixture(
   root: string,
   configs: any = {},
   paths: any = {},
+  dependencies: any = {},
 ) {
   const data = new Main.HostPluginDataRuntime(join(root, 'control'));
   const platform = new Main.HostPluginPlatform(join(root, 'control'), {
@@ -55,6 +56,8 @@ export async function nativeFixture(
   let service: any;
   const initialize = async () => {
     service = new Main.PersonalAssistantService(directory, {
+      prepareBotWake: async () => 'ready',
+      ...dependencies,
       stopSessions: async () => {},
       markBackgroundSessions: async () => {},
       agents: ctx.agents,
@@ -75,6 +78,8 @@ export async function nativeFixture(
     },
     prompts: { assemble: (context: any, base?: string) => service.prompt(context, base) },
     turns: { evaluate: (context: any) => service.beforeFinish(context) },
+    send: (sessionId: string, id: string, content: any) =>
+      service.receiveUser(sessionId, id, content),
     remote: (method: string, input: any = {}) => service.call(method, input),
     restart: async (patch?: any) => {
       await service.close();

@@ -22,6 +22,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import {
   EVENT_WAIT_LIMITS,
   eventWaitDeliveryKey,
@@ -55,9 +56,12 @@ async function settle() {
   for (let n = 0; n < 40; n++) await new Promise<void>((resolve) => setImmediate(resolve));
 }
 async function eventually(check: () => Promise<boolean> | boolean) {
-  for (let n = 0; n < 100; n++) {
+  // Host I/O needs wall-clock time; immediate turns can exhaust before it completes.
+  // Keep the injected observation clock fixed so timeout/Retry-After assertions remain exact.
+  const deadline = performance.now() + 5_000;
+  while (performance.now() < deadline) {
     if (await check()) return;
-    await settle();
+    await delay(5);
   }
   assert.fail('Condition did not settle without advancing the observation clock');
 }
@@ -94,6 +98,26 @@ class Clock implements EventWaitClock {
     await settle();
   }
 }
+test('eventually waits for delayed host work without advancing the observation clock', async () => {
+  const clock = new Clock();
+  let observationTimerRan = false;
+  clock.schedule(() => {
+    observationTimerRan = true;
+  }, 1);
+  let completed = false;
+  const work = delay(200).then(() => {
+    completed = true;
+  });
+  try {
+    await eventually(() => completed);
+    assert.equal(clock.now(), 1_000);
+    assert.equal(observationTimerRan, false);
+    assert.equal(clock.timers.size, 1);
+  } finally {
+    await work;
+  }
+});
+
 const satisfied = (key = 'event-1'): EventWaitObservationResult => ({
   kind: 'satisfied',
   receiptKey: key,
@@ -4847,4 +4871,87 @@ for (const stage of ['claim', 'budget', 'unsupported'] as const) {
       );
     });
   }
+}
+
+for (const backend of ['Local', 'Memory'] as const) {
+  test(`${backend}: bridge authorization shares durable source cooldowns and recovers progress`, async (t) => {
+    const f = await fixture(t, backend);
+    const r = await f.wait();
+    const manager = f.manager(new Source());
+    const signal = new AbortController().signal;
+    let calls = 0;
+    const authorize = async (): Promise<EventWaitObservationAccess> => {
+      calls++;
+      return calls === 1
+        ? { kind: 'unknown', reason: 'throttled', retryAfterMs: 600 }
+        : { kind: 'allowed', context: null };
+    };
+    assert.equal((await manager.checkSourceAccess(r, signal, authorize)).kind, 'unknown');
+    assert.equal(
+      await f.stores.eventWaitStore.readSourceCooldown({
+        providerId: r.resource.providerId,
+        connectionId: r.resource.connectionId,
+      }),
+      1600,
+    );
+    for (let n = 0; n < 4; n++)
+      assert.equal((await manager.checkSourceAccess(r, signal, authorize)).kind, 'unknown');
+    assert.equal(calls, 1);
+    const other = { ...r, resource: { ...r.resource, connectionId: 'other' } };
+    assert.equal((await manager.checkSourceAccess(other, signal, authorize)).kind, 'allowed');
+    assert.equal(calls, 2);
+    await f.reopen();
+    const recovered = f.manager(new Source());
+    assert.equal((await recovered.checkSourceAccess(r, signal, authorize)).kind, 'unknown');
+    assert.equal(calls, 2);
+    await f.clock.advance(600);
+    // Delivery of an expired wait must remain possible after the source cooldown.
+    const expired = {
+      ...r,
+      status: 'expired' as const,
+      updatedAt: 1500,
+      expiredAt: 1500,
+      deadlineAt: 1500,
+    };
+    assert.equal((await recovered.checkSourceAccess(expired, signal, authorize)).kind, 'allowed');
+    assert.equal(calls, 3);
+    assert.equal((await f.read(r))?.observation, undefined);
+    assert.deepEqual(f.errors, []);
+  });
+
+  test(`${backend}: interrupted bridge authorization retains capacity and late Retry-After`, async (t) => {
+    const f = await fixture(t, backend);
+    const r = await f.wait();
+    const source = new Source();
+    const manager = f.manager(source);
+    const response = deferred<EventWaitObservationAccess>();
+    let calls = 0;
+    const authorize = async () => {
+      calls++;
+      return response.promise;
+    };
+    const pending = manager.checkSourceAccess(r, new AbortController().signal, authorize);
+    await eventually(() => calls === 1);
+    await f.clock.advance(policy.readTimeoutMs);
+    assert.equal((await pending).kind, 'unknown');
+    assert.equal(
+      (await manager.checkSourceAccess(r, new AbortController().signal, authorize)).kind,
+      'unknown',
+    );
+    assert.equal(calls, 1);
+    response.resolve({ kind: 'unknown', reason: 'late throttling', retryAfterMs: 600 });
+    await eventually(
+      async () =>
+        (await f.stores.eventWaitStore.readSourceCooldown({
+          providerId: r.resource.providerId,
+          connectionId: r.resource.connectionId,
+        })) === 1680,
+    );
+    await manager.start();
+    await f.clock.advance(599);
+    assert.equal(source.calls.length, 0);
+    await f.clock.advance(21);
+    await eventually(() => source.calls.length === 1);
+    assert.deepEqual(f.errors, []);
+  });
 }

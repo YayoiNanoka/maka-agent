@@ -26,6 +26,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createMatterStore } from '../../../../src/assistant/proactive-matters/store.js';
 import {
   reviewMatter,
+  reviewPrompt,
   MatterReviewInvalidated,
 } from '../../../../src/assistant/proactive-matters/review.js';
 import { fixture } from './platform-helper.js';
@@ -363,8 +364,9 @@ test('review input is bounded but omitted user requirements still control invali
         assert.ok(Buffer.byteLength(input.prompt) <= 96000);
         assert.equal(input.maxOutputTokens, 8192);
         const evidence = JSON.parse(input.prompt).execution.transcript;
-        assert.equal(evidence.truncated, true);
-        assert.ok(evidence.recentTranscript.includes('recent evidence'));
+        assert.ok(Array.isArray(evidence));
+        assert.ok(JSON.stringify(evidence).includes('recent evidence'));
+        assert.ok(JSON.stringify(evidence).includes('[omitted]'));
         // Change omitted history, not the visible tail.
         transcript = [
           { ...original[0], content: 'NEW' + original[0].content.slice(3) },
@@ -516,3 +518,63 @@ for (const newRequirement of [false, true]) {
     }
   });
 }
+
+test('continue bypasses the reviewer but preserves revision checks and continuation', async (t) => {
+  const f = await fixture({ review: async () => assert.fail('continue must not call reviewer') });
+  t.after(async () => {
+    f.driver.end();
+    await f.close();
+    rmSync(f.root, { recursive: true, force: true });
+  });
+  const view = await f.invoke('MatterStart', { title: 'Deliver', request: 'Deliver report' });
+  await f.invoke('MatterWriteFile', { path: view.files.draft, content: 'More work remains' });
+  const input = {
+    expectedRevision: view.revision,
+    stateFile: view.files.draft,
+    disposition: 'continue',
+    summary: 'Prepared report',
+    reason: 'Continue writing',
+  };
+  await assert.rejects(
+    f.invoke('MatterSettle', { ...input, expectedRevision: view.revision + 100 }),
+  );
+  assert.equal((await f.remote('matters.list')).matters[0].status, 'active');
+  await f.invoke('MatterSettle', {
+    ...input,
+    expectedRevision: (await f.invoke('MatterRead')).revision,
+  });
+  const db = new DatabaseSync(join(f.root, 'data', 'matters.sqlite'));
+  try {
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM matter_reviews').get()!.n, 0);
+    const matter = JSON.parse(String(db.prepare('SELECT payload FROM matters').get()!.payload));
+    assert.equal(matter.activation.settled, true);
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS n FROM matter_events WHERE source='continuation'").get()!.n,
+      1,
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('review preserves structured execution results without reasoning, diffs or raw tail slicing', (t) => {
+  const f = setup(t);
+  const transcript = [
+    { type: 'assistant', thinking: { text: 'private reasoning'.repeat(50000) } },
+    {
+      type: 'tool_result',
+      id: 'result',
+      toolUseId: 'call',
+      isError: true,
+      outcome: 'error',
+      content: { error: 'Delivery failed', diff: 'large diff'.repeat(50000) },
+    },
+    { type: 'tool_call', toolName: 'MatterSettle', args: { stateText: 'duplicate'.repeat(50000) } },
+  ];
+  const payload = JSON.parse(reviewPrompt(f.begin(), transcript, []));
+  assert.equal(payload.execution.transcript.length, 1);
+  assert.equal(payload.execution.transcript[0].isError, true);
+  assert.match(payload.execution.transcript[0].content, /Delivery failed/);
+  assert.doesNotMatch(JSON.stringify(payload), /private reasoning|large diff|duplicate/);
+  assert.match(payload.executionNotice, /not a reason to reject/);
+});

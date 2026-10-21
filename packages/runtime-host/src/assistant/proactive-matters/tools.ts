@@ -108,7 +108,7 @@ export function buildMatterTools(deps: MatterToolsDeps): MakaTool[] {
     {
       name: 'MatterSettle',
       description:
-        'Commit state and finish this activation: continue immediately, wait for a specific external condition, or complete the original objective. No business tools may execute after success.',
+        'Commit state and finish this activation: continue immediately, wait for a specific external condition, or complete the original objective. Continue commits without model review; wait and complete are reviewed for premature exit or missed requirements, not for reprinting historical evidence. No business tools may execute after success.',
       parameters: z.object({
         expectedRevision: z.number().int().positive(),
         stateFile: z
@@ -161,6 +161,12 @@ export function buildMatterTools(deps: MatterToolsDeps): MakaTool[] {
           stateText: deps.store.readDraft(o.id, o.activationId, stateFile),
         };
         try {
+          if (submission.disposition === 'continue') {
+            ctx.abortSignal.throwIfAborted();
+            const result = deps.store.settle(o.id, o.activationId, submission, operation(ctx));
+            deps.changed();
+            return deps.store.workspace(result.id, o.activationId);
+          }
           const review = deps.store.beginReview(
             o.id,
             o.activationId,
