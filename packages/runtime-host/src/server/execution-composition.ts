@@ -189,6 +189,7 @@ import { HostExecutionInspectCoordinator } from './execution-inspect-coordinator
 import { HostExternalSessionCoordinator } from './external-session-coordinator.js';
 import { boundedFailureDiagnostic } from './failure-diagnostic.js';
 import { HostSessionBundleCoordinator } from './session-bundle-coordinator.js';
+import type { HostGoalEventWaitSources } from './goal-event-waits.js';
 import { HostGoalCoordinator } from './goal-coordinator.js';
 import { readGoalFormEvidence, unreadGoalFormToolResponses } from './goal-form-evidence.js';
 import { recentGoalToolReferences } from './goal-evaluation-context.js';
@@ -250,6 +251,7 @@ import { startHostModelMetadataRefresh } from './model-metadata-refresh.js';
 import { HostRuntimeResourceCoordinator } from './runtime-resource-coordinator.js';
 import { SessionAdmissionGate, type SessionAdmissionLease } from './session-admission-gate.js';
 import { workHubResultOrigin } from './workhub-result-coordinator.js';
+import { HostPersonalAssistantWorkspace } from './personal-assistant-workspace.js';
 import { HostSessionCatalogCoordinator } from './session-catalog-coordinator.js';
 import { SessionBackgroundActivityProjection } from './session-background-activity.js';
 import { SessionInteractionActivityProjection } from './session-interaction-activity.js';
@@ -323,6 +325,7 @@ export interface CreateExecutionRuntimeHostCompositionOptions {
   readonly initialization?: import('../client/connect-or-spawn.js').HostedRuntimeInitialization;
   readonly bootstrapRuntimePolicy?: boolean;
   readonly skillHomeDirectory?: string;
+  readonly assistantHomeDirectory?: string;
   readonly projectDirectoryRoots?: readonly PublishedProjectDirectoryRoot[];
   readonly imageArchiveLimits?: import('@maka/core/image-delivery').ImageArchiveLimits;
 }
@@ -330,6 +333,7 @@ export interface CreateExecutionRuntimeHostCompositionOptions {
 export interface ExecutionRuntimeHostCompositionDependencies {
   readonly executionPersistenceProvider?: ExecutionPersistenceProvider;
   readonly primaryBackendFactory?: BackendFactory;
+  readonly eventWaitSources?: HostGoalEventWaitSources;
   readonly generateSessionTitle?: HostSessionEffectModel['generateTitle'];
   readonly oauthAuthorization?: Pick<
     HostOAuthCoordinatorInput,
@@ -452,6 +456,11 @@ export async function createExecutionRuntimeHostComposition(
     const personalAssistant = (assistant = new PersonalAssistantService(
       join(context.owner.controlDirectory, 'personal-assistant'),
       {
+        prepareBotWake: async (ownerId, workerId) => {
+          if (await interactions.hasPendingSession(workerId)) return 'deferred';
+          return sessionCatalog.synchronizeAssistantBotModel(ownerId, workerId);
+        },
+        allocateWorkspace: () => assistantWorkspace.allocate(),
         stopSessions: async () => {
           if (!rootCoordinator) return;
           const failures: unknown[] = [];
@@ -2463,6 +2472,9 @@ export async function createExecutionRuntimeHostComposition(
       onError: () => context.requestDrain(),
     });
     const goalExecutionCoordinator = new HostGoalExecutionCoordinator({
+      authorizeEventWait: async (sessionId, pending) =>
+        (await requireGoal(goal).eventWaitBridge?.authorizeAdmission(sessionId, pending)) ?? false,
+
       executions: coordinator,
       runtime: manager,
       matchesActive: (sessionId, checkpoint, controlLease) =>
@@ -2470,6 +2482,7 @@ export async function createExecutionRuntimeHostComposition(
     });
     goalExecutions = goalExecutionCoordinator;
     goal = new HostGoalCoordinator({
+      ...(dependencies.eventWaitSources ? { eventWaitSources: dependencies.eventWaitSources } : {}),
       store: openedGoalStore,
       stores,
       readSessionContext: async (sessionId) => {
@@ -2498,8 +2511,8 @@ export async function createExecutionRuntimeHostComposition(
         requestDrain: context.requestDrain,
         readSessionHeader: (sessionId) => stores.sessionStore.readHeaderSnapshot(sessionId),
       }),
-      admitTurn: (sessionId, text, checkpoint, controlLease) =>
-        goalExecutionCoordinator.admitTurn(sessionId, text, checkpoint, controlLease),
+      admitTurn: (sessionId, text, checkpoint, controlLease, eventWait) =>
+        goalExecutionCoordinator.admitTurn(sessionId, text, checkpoint, controlLease, eventWait),
       acquireResidency: (kind) => context.acquireResidency('goal', kind),
       onProjectionChanged: (sessionId) => continuityCoordinator.enqueueCanonicalRefresh(sessionId),
       requestDrain: context.requestDrain,
@@ -2598,6 +2611,16 @@ export async function createExecutionRuntimeHostComposition(
       ...(context.sessionAccessAuthority
         ? { sessionAccessAuthority: context.sessionAccessAuthority }
         : {}),
+    });
+    const assistantWorkspace = new HostPersonalAssistantWorkspace({
+      stateRoot: context.owner.capability.canonicalPath,
+      ...(options.assistantHomeDirectory ? { homeDirectory: options.assistantHomeDirectory } : {}),
+      projects: openedProjectCatalog,
+      membership: projectMembership,
+      projectChanged: () => hostChanges.publishProjectCatalog(),
+      preflightSessionCreation: async () => {
+        await sessionCatalog.resolveDefaultCreateTarget();
+      },
     });
     const workHubTargetExecution = new HostWorkHubTargetExecutionAuthority({
       readSession: (sessionId) => stores.sessionStore.readHeaderRecordSnapshot(sessionId),

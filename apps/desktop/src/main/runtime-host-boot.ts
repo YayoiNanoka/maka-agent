@@ -17,6 +17,8 @@
  * under the License.
  */
 
+import { createAssistantWebBackend } from './assistant-web-backend.js';
+import { startAssistantWebServer } from './assistant-web-server.js';
 import { resolveDesktopWslHostHandoff } from './runtime-host-wsl-handoff.js';
 import {
   app,
@@ -860,6 +862,7 @@ const mcpCapabilityPublisher = createCapabilityRevisionPublisher(() =>
 );
 let settingsBotsIpc: SettingsBotsIpcHandle | undefined;
 const botRegistry = new BotRegistry({
+  wechatContextDirectory: join(userDataDir, 'wechat-reply-context'),
   onIncomingMessage: (message: BotIncomingMessage) => {
     void runtimeHostManager
       ?.handleBotIncomingMessage(message)
@@ -1175,12 +1178,14 @@ const createLocalRuntimeHostManager = () => createRuntimeHostDesktopManager(
       releaseDesktopInteractionSession,
     },
     botRegistry,
+    readBotChatSettings: async () => (await settingsStore.get()).botChat,
+    botAssistantStateDirectory: join(userDataDir, 'assistant-wechat'),
     readBotMessageHandling: async () => (await settingsStore.get()).botChat.messageHandling ?? 'task',
     botWorkHubStateDirectory: join(userDataDir, 'workhub-remote'),
     resolveBotCreateTarget: async (target) => ({
       workspace: await currentDesktopWorkspaceTarget(target),
     }),
-    resolveSessionCreateProject: async (input, target) => {
+    resolveSessionCreateProject: async (input, target, allocateHostProject) => {
       const currentTarget = requireRuntimePolicyTarget(target);
       return resolveDesktopSessionWorkspace(
         input,
@@ -1197,6 +1202,7 @@ const createLocalRuntimeHostManager = () => createRuntimeHostDesktopManager(
         {
           allowHostPath: !runtimeHostProfileUsesHostWorkspace(target.kind),
           allocateDedicatedDirectory: () => managedTaskDirectories.allocate(),
+          ...(allocateHostProject ? { allocateHostProject } : {}),
         },
       );
     },
@@ -1458,6 +1464,27 @@ export const runtimeHostBootReady = (async () => {
     throw new Error('Work Board IPC registration failed');
   }
 })();
+
+let assistantWebServer: Awaited<ReturnType<typeof startAssistantWebServer>> | undefined;
+const assistantWebStart = (async () => {
+  const configuredPort = process.env.MAKA_ASSISTANT_WEB_PORT;
+  if (!configuredPort) return;
+  const port = Number(configuredPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    console.error('[assistant-web] MAKA_ASSISTANT_WEB_PORT must be between 1 and 65535');
+    return;
+  }
+  await runtimeHostBootReady;
+  assistantWebServer = await startAssistantWebServer({
+    port,
+    host: process.env.MAKA_ASSISTANT_WEB_HOST ?? '127.0.0.1',
+    publicOrigin: process.env.MAKA_ASSISTANT_WEB_ORIGIN,
+    assets: join(import.meta.dirname, '../../dist-assistant-web'),
+    backend: createAssistantWebBackend(() => runtimeHostManager?.current()?.candidate?.client),
+    onError: (error) => console.error('[assistant-web]', error),
+  });
+  console.info(`[assistant-web] http://${process.env.MAKA_ASSISTANT_WEB_HOST ?? '127.0.0.1'}:${port}`);
+})().catch((error: unknown) => console.error('[assistant-web] startup failed:', error));
 
 void runtimeHostBootReady.then(async () => {
   await runtimeHostStart.catch((error: unknown) => {
@@ -2185,6 +2212,8 @@ function closeRuntimeHostDesktop(): Promise<void> {
 }
 
 async function disposeRuntimeHostDesktop(): Promise<void> {
+  await assistantWebStart;
+  await assistantWebServer?.close().catch((error: unknown) => console.error('[assistant-web] shutdown failed:', error));
   sessionLocal.close();
   powerMonitor.off("resume", wakePeerRecoveryAfterResume);
   clientSettingsWatcher.stop();

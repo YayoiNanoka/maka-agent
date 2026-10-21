@@ -53,6 +53,7 @@ type Dispose = () => void | Promise<void>;
 
 /** Shared Host capabilities retain invocation identity and source permissions. No plugin Fiber owns this service. */
 export interface AssistantDependencies {
+  allocateWorkspace?(): Promise<{ projectId: string }>;
   agents: PluginAgentService;
   llm: PluginLlmService;
   sessionQuery: PluginSessionQueryService;
@@ -63,6 +64,8 @@ export interface AssistantDependencies {
     signal: AbortSignal,
   ): Promise<{ bytes: Uint8Array; mimeType: string }>;
   appendConversation?(sessionId: string, message: StoredMessage): Promise<void>;
+  /** Reconcile the selected model before admitting a new Bot wake. */
+  prepareBotWake(ownerId: string, workerId: string): Promise<'ready' | 'deferred'>;
   stopSessions(): Promise<void>;
   markBackgroundSessions(sessionIds: readonly string[]): Promise<void>;
   resolveTools(sessionId: string, core: readonly MakaTool[]): { tools: readonly MakaTool[] };
@@ -329,7 +332,7 @@ class AssistantRuntime {
   }
 }
 
-/** Host-owned opt-in. Disabled Hosts do not load modules, open their databases or start timers. */
+/** Host-owned enablement, on by default. Disabled Hosts do not load modules, open their databases or start timers. */
 export class PersonalAssistantService {
   private runtime?: AssistantRuntime;
   private legacy?: HostPluginDataRuntime;
@@ -340,6 +343,7 @@ export class PersonalAssistantService {
   private transition: Promise<unknown> = Promise.resolve();
   private shutdown?: Promise<void>;
   private stoppingError?: unknown;
+  private initializationError?: string;
   constructor(
     readonly directory: string,
     readonly dependencies: AssistantDependencies,
@@ -356,15 +360,22 @@ export class PersonalAssistantService {
     if (this.recovered) throw Error('Personal assistant already initialized');
     this.legacy = legacy;
     this.entries = entries;
-    let enabled = false;
     try {
-      const saved = JSON.parse(await readFile(join(this.directory, 'enablement.json'), 'utf8'));
-      if (typeof saved.enabled !== 'boolean') throw Error('Invalid personal assistant enablement');
-      enabled = saved.enabled;
+      let enabled = true;
+      try {
+        const saved = JSON.parse(await readFile(join(this.directory, 'enablement.json'), 'utf8'));
+        if (typeof saved.enabled !== 'boolean')
+          throw Error('Invalid personal assistant enablement');
+        enabled = saved.enabled;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      if (enabled) this.runtime = await this.initialize();
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      // Optional assistant recovery must not prevent ordinary Host sessions from starting.
+      // Keep persisted preferences/data intact so Settings can retry after repair.
+      this.initializationError = error instanceof Error ? error.message : String(error);
     }
-    if (enabled) this.runtime = await this.initialize();
     this.recovered = true;
   }
   private async initialize() {
@@ -392,7 +403,11 @@ export class PersonalAssistantService {
   }
   async call(method: string, input: unknown): Promise<unknown> {
     if (!this.started || this.draining) throw Error('Personal assistant is not ready');
-    if (method === 'assistant.enablement') return { enabled: this.enabled };
+    if (method === 'assistant.enablement')
+      return {
+        enabled: this.enabled,
+        ...(this.initializationError ? { error: this.initializationError } : {}),
+      };
     if (method === 'assistant.set-enabled') {
       if (
         !input ||
@@ -417,6 +432,7 @@ export class PersonalAssistantService {
             if (this.draining) throw Error('Personal assistant is shutting down');
             this.runtime = runtime;
             runtime.start();
+            this.initializationError = undefined;
           } catch (error) {
             this.runtime = undefined;
             await this.persist(false);

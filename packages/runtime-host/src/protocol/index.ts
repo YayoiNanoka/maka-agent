@@ -107,9 +107,13 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 225 as const;
-// 225: Usage queries add independent revision-bound annual heatmap requests,
+// Re-check against main before merging; sibling PRs may use the same next epoch.
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 227 as const;
+// 227: Usage queries add independent revision-bound annual heatmap requests,
 // results, and heatmap-specific failure sections.
+// 226: assistant.allocate-workspace allocates a Host-owned fallback for projectless assistants.
+// 225: Goal successor transcript origins carry typed event-wait provenance.
+// Older peers reject the additional field in the strict stored-message decoder.
 // 224: Assistant conversation admission supports Inbox receipts without a model Turn,
 // inbox execution-query resolutions, external connector provenance and message summaries.
 // Existing bot turn.start producers also carry strict external_connector provenance.

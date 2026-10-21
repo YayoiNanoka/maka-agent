@@ -293,8 +293,10 @@ for (const terminal of ['gateway', 'eof', 'other'] as const) {
 }
 
 describe('AiSdkBackend HTTP 2xx transport recovery', () => {
-  for (const outcome of ['recover', 'exhaust', 'stop', 'step-limit'] as const) {
-    test(`${outcome} after a durable tool result without repeating its effect`, async () => {
+  for (const [code, outcome] of ['UND_ERR_SOCKET', 'ERR_HTTP2_STREAM_ERROR'].flatMap((code) =>
+    ['recover', 'exhaust', 'stop', 'step-limit'].map((outcome) => [code, outcome] as const),
+  )) {
+    test(`${code}: ${outcome} after a durable tool result without repeating its effect`, async () => {
       const durable = durableTurnHarness(`turn-5656-${outcome}`, 'write once and continue');
       const attempts: ModelCallAttempt[] = [];
       let calls = 0;
@@ -303,7 +305,7 @@ describe('AiSdkBackend HTTP 2xx transport recovery', () => {
         doStream: async () => {
           calls += 1;
           if (calls > 1 && (outcome !== 'recover' || calls === 2))
-            throw successfulResponseTransportFailure();
+            throw successfulResponseTransportFailure(code);
           const chunks: LanguageModelV4StreamPart[] =
             calls === 1
               ? [
@@ -423,7 +425,6 @@ describe('AiSdkBackend HTTP 2xx transport recovery', () => {
       }
     });
   }
-
   test('does not replay provider tool activity after a 2xx transport failure', async () => {
     let calls = 0;
     const model = new MockLanguageModelV4({
@@ -5171,78 +5172,82 @@ describe('AiSdkBackend model history', () => {
     assert.equal(result.contextBudget?.compactionDecisions?.[0]?.decision, 'replaced');
   });
 
-  test('manual compactHistory rolls forward from the previous V2 checkpoint', async () => {
-    const oldEvents = [
-      runtimeTextEvent({
-        id: 'manual-v2-roll-old-1',
-        turnId: 'manual-v2-roll-turn-1',
-        role: 'user',
-        author: 'user',
-        text: 'manual v2 roll old alpha '.repeat(12),
-      }),
-      runtimeTextEvent({
-        id: 'manual-v2-roll-old-2',
-        turnId: 'manual-v2-roll-turn-2',
-        role: 'model',
-        author: 'agent',
-        text: 'manual v2 roll old beta '.repeat(12),
-      }),
-    ];
-    const previous = buildHistoryCompactCheckpoint({
-      sessionId: 'session-1',
-      coveredRuntimeEvents: oldEvents.slice(0, 1),
-      summary: sectionedSummary('MANUAL_V2_PREVIOUS_SUMMARY'),
-      charsPerToken: 1,
-    });
-    const summaryInputs: Array<{ previous?: string; newlyFoldedIds: string[] }> = [];
-    const recorded: HistoryCompactCheckpoint[] = [];
-    const backend = createBackend({
-      connection: connection(),
-      modelId: 'mock-model-id',
-      modelFactory: () => completionModel(),
-      tools: [],
-      contextBudget: {
-        name: 'manual-v2-roll-test',
-        charsPerToken: 1,
-      },
-      loadHistoryCompactCheckpoint: () => previous,
-      summarizeHistoryCompact: async (input) => {
-        summaryInputs.push({
-          previous:
-            input.previousCheckpoint?.version === 2 ? input.previousCheckpoint.summary : undefined,
-          newlyFoldedIds: (input.newlyFoldedRuntimeEvents ?? []).map((event) => event.id),
-        });
-        return structuredSummary('MANUAL_V2_ROLLED_SUMMARY');
-      },
-      recordHistoryCompactCheckpoint: (checkpoint) => {
-        recorded.push(checkpoint);
-      },
-    });
-
-    await backend.compactHistory({
-      turnId: 'turn-compact',
-      runId: 'run-1',
-      runtimeContext: [
-        ...oldEvents,
+  for (const providerType of ['openai', 'openai-codex'] as const) {
+    test(`manual compactHistory rolls forward from the previous V2 checkpoint on ${providerType}`, async () => {
+      const oldEvents = [
         runtimeTextEvent({
-          id: 'manual-v2-roll-recent',
-          turnId: 'manual-v2-roll-recent-turn',
+          id: 'manual-v2-roll-old-1',
+          turnId: 'manual-v2-roll-turn-1',
           role: 'user',
           author: 'user',
-          text: 'manual v2 roll retained context',
+          text: 'manual v2 roll old alpha '.repeat(12),
         }),
-      ],
-    });
+        runtimeTextEvent({
+          id: 'manual-v2-roll-old-2',
+          turnId: 'manual-v2-roll-turn-2',
+          role: 'model',
+          author: 'agent',
+          text: 'manual v2 roll old beta '.repeat(12),
+        }),
+      ];
+      const previous = buildHistoryCompactCheckpoint({
+        sessionId: 'session-1',
+        coveredRuntimeEvents: oldEvents.slice(0, 1),
+        summary: sectionedSummary('MANUAL_V2_PREVIOUS_SUMMARY'),
+        charsPerToken: 1,
+      });
+      const summaryInputs: Array<{ previous?: string; newlyFoldedIds: string[] }> = [];
+      const recorded: HistoryCompactCheckpoint[] = [];
+      const backend = createBackend({
+        connection: { ...connection(), providerType },
+        modelId: 'mock-model-id',
+        modelFactory: () => completionModel(),
+        tools: [],
+        contextBudget: {
+          name: 'manual-v2-roll-test',
+          charsPerToken: 1,
+        },
+        loadHistoryCompactCheckpoint: () => previous,
+        summarizeHistoryCompact: async (input) => {
+          summaryInputs.push({
+            previous:
+              input.previousCheckpoint?.version === 2
+                ? input.previousCheckpoint.summary
+                : undefined,
+            newlyFoldedIds: (input.newlyFoldedRuntimeEvents ?? []).map((event) => event.id),
+          });
+          return structuredSummary('MANUAL_V2_ROLLED_SUMMARY');
+        },
+        recordHistoryCompactCheckpoint: (checkpoint) => {
+          recorded.push(checkpoint);
+        },
+      });
 
-    assert.deepEqual(summaryInputs, [
-      {
-        previous: previous.summary,
-        newlyFoldedIds: ['manual-v2-roll-old-2', 'manual-v2-roll-recent'],
-      },
-    ]);
-    assert.equal(recorded[0]?.previousCheckpointId, previous.checkpointId);
-    assert.equal(recorded[0]?.coverage.eventCount, 3);
-  });
+      await backend.compactHistory({
+        turnId: 'turn-compact',
+        runId: 'run-1',
+        runtimeContext: [
+          ...oldEvents,
+          runtimeTextEvent({
+            id: 'manual-v2-roll-recent',
+            turnId: 'manual-v2-roll-recent-turn',
+            role: 'user',
+            author: 'user',
+            text: 'manual v2 roll retained context',
+          }),
+        ],
+      });
+
+      assert.deepEqual(summaryInputs, [
+        {
+          previous: previous.summary,
+          newlyFoldedIds: ['manual-v2-roll-old-2', 'manual-v2-roll-recent'],
+        },
+      ]);
+      assert.equal(recorded[0]?.previousCheckpointId, previous.checkpointId);
+      assert.equal(recorded[0]?.coverage.eventCount, 3);
+    });
+  }
 
   test('manual compactHistory reuses a checkpoint that already covers the full fold', async () => {
     const oldEvents = [
@@ -10521,30 +10526,20 @@ describe('AiSdkBackend Anthropic prompt caching', () => {
     return { role, block: rest };
   };
 
-  test('keeps the cache breakpoint on durable history before request-only context', async () => {
+  test('keeps appended context in the cached history without repeating it after tools', async () => {
     const bodies = await runToolTurn(connection());
-
-    const breakpoints = bodies.map((body) => {
-      const flat = blocks(body);
-      const marked = flat.flatMap(({ block }, index) =>
-        block.cache_control !== undefined ? [index] : [],
-      );
-      assert.equal(marked.length, 1, JSON.stringify(body.messages));
-      const breakpoint = marked[0]!;
-      assert.deepEqual(flat[breakpoint]!.block.cache_control, body.cache_control);
-      assert.deepEqual(
-        flat.slice(breakpoint + 1).map(({ block }) => block.text),
-        ['REQUEST_ONLY_CONTEXT'],
-      );
-      return breakpoint;
-    });
-    const cachedPrefix = blocks(bodies[0]!)
-      .slice(0, breakpoints[0]! + 1)
-      .map(withoutCacheControl);
-    assert.deepEqual(
-      blocks(bodies[1]!).slice(0, cachedPrefix.length).map(withoutCacheControl),
-      cachedPrefix,
+    assert.ok(bodies[0]!.cache_control);
+    const first = blocks(bodies[0]!).map(withoutCacheControl);
+    const second = blocks(bodies[1]!).map(withoutCacheControl);
+    assert.deepEqual(second.slice(0, first.length), first);
+    assert.equal(
+      second.filter(
+        ({ block }) =>
+          typeof block.text === 'string' && block.text.includes('REQUEST_ONLY_CONTEXT'),
+      ).length,
+      1,
     );
+    assert.equal(second.at(-1)!.block.type, 'tool_result');
   });
 
   test('adds no cache breakpoint on Anthropic-protocol connections without automatic caching', async () => {
@@ -18474,13 +18469,13 @@ function connectionResetFailure(): Error {
   });
 }
 
-function successfulResponseTransportFailure(): APICallError {
+function successfulResponseTransportFailure(code = 'UND_ERR_SOCKET'): APICallError {
   return new APICallError({
     message: 'Failed to process successful response',
     url: 'https://provider.invalid',
     requestBodyValues: {},
     statusCode: 200,
-    cause: Object.assign(new Error('connection closed'), { code: 'UND_ERR_SOCKET' }),
+    cause: Object.assign(new Error('connection closed'), { code }),
   });
 }
 

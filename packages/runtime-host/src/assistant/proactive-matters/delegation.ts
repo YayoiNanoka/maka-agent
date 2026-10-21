@@ -58,6 +58,8 @@ export function registerDelegation(
     id: m.id,
     sessionId: m.sessionId,
     title: m.title,
+    createdAt: m.createdAt,
+    updatedAt: m.updatedAt,
     request: m.request,
     status: m.status,
     state: m.stateText,

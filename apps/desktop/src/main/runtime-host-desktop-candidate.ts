@@ -19,8 +19,10 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { join } from 'node:path';
+import { createAssistantWebBackend } from './assistant-web-backend.js';
+import { createAssistantImBridge } from './assistant-im-bridge.js';
 import { createWorkHubRemoteBridge } from './workhub-remote-bridge.js';
-import type { BotMessageHandling } from '@maka/core/bot-chat-settings';
+import { BOT_PROVIDERS, resolveBotMessageHandling, type BotChatSettings, type BotMessageHandling } from '@maka/core/bot-chat-settings';
 import { acquireOperationalStateDatabase } from '@maka/storage/operational-state-store';
 import type { IpcMain } from "electron";
 import type { ActiveInteractionRequestEvent } from '@maka/core/events';
@@ -155,6 +157,8 @@ export interface DesktopRuntimeHostCandidateDeps {
   };
   readonly nativeCapabilities: DesktopNativeCapabilityProviderInput;
   readonly botRegistry: BotRegistry;
+  readonly readBotChatSettings?: () => Promise<BotChatSettings>;
+  readonly botAssistantStateDirectory?: string;
   readonly readBotMessageHandling?: () => Promise<BotMessageHandling>;
   readonly botWorkHubStateDirectory?: string;
   readonly resolveBotCreateTarget: (
@@ -163,6 +167,7 @@ export interface DesktopRuntimeHostCandidateDeps {
   readonly resolveSessionCreateProject: (
     input: Pick<CreateSessionRequestInput, "cwd" | "projectId">,
     target: DesktopRuntimeHostTargetPolicy,
+    allocateHostProject?: () => Promise<WorkspaceTarget>,
   ) => Promise<WorkspaceTarget>;
   /** Resolves the selected import destination on the target Host. */
   readonly resolveExternalSessionImportWorkspace: (
@@ -957,7 +962,21 @@ export async function createDesktopRuntimeHostCandidate(
           client,
           queryExecutors: (input) => client.request('plugin.executor.query', input),
           runningTurnIds: (sessionId) => sessionObserver.observedRunningTurnIds(sessionId),
-          resolveCreateProject: (input) => deps.resolveSessionCreateProject(input, target),
+          resolveCreateProject: (input, allocateHostProject) =>
+            deps.resolveSessionCreateProject(input, target, allocateHostProject),
+          ...(runtimeHostProfileUsesHostWorkspace(target.kind)
+            ? {
+                allocateAssistantWorkspace: async (): Promise<WorkspaceTarget> => {
+                  const result = await client.request('personal-assistant.call', {
+                    method: 'assistant.allocate-workspace', input: {},
+                  });
+                  const value = result.value as { projectId?: unknown } | null;
+                  if (!value || typeof value.projectId !== 'string' || !value.projectId)
+                    throw new Error('Runtime Host returned an invalid assistant Project');
+                  return { kind: 'project', projectId: value.projectId };
+                },
+              }
+            : {}),
           ...(deps.taskDirectories && !runtimeHostProfileUsesHostWorkspace(target.kind)
             ? { dedicatedTaskDirectory: deps.taskDirectories }
             : {}),
@@ -1026,9 +1045,26 @@ export async function createDesktopRuntimeHostCandidate(
     const botIncoming = target.access === 'owner'
       ? createBotIncomingMainService({
           botRegistry: deps.botRegistry,
+          readMode: async (platform) => deps.readBotChatSettings
+            ? resolveBotMessageHandling(await deps.readBotChatSettings(), platform)
+            : await deps.readBotMessageHandling?.() ?? 'task',
+          ...(deps.readBotChatSettings && deps.botAssistantStateDirectory ? {
+            assistants: Object.fromEntries(BOT_PROVIDERS.map((platform) => [platform, createAssistantImBridge({
+              platform, backend: createAssistantWebBackend(() => client), registry: deps.botRegistry,
+              readChannel: async () => {
+                const settings = await deps.readBotChatSettings!();
+                return { ...settings.channels[platform], messageHandling: resolveBotMessageHandling(settings, platform) };
+              },
+              // Keep existing WeChat/Feishu receipts across the generalized routing change.
+              statePath: join(deps.botAssistantStateDirectory!, `${platform === 'wechat' ? '' : platform + '-'}${createHash('sha256').update(client.rootId).digest('hex')}.json`),
+              isActive: () => deps.isTargetActive?.() !== false, onError: reportError,
+            })])),
+          } : {}),
           ...(deps.readBotMessageHandling && deps.botWorkHubStateDirectory ? {
             workHub: createWorkHubRemoteBridge({
-              client, botRegistry: deps.botRegistry, readMode: deps.readBotMessageHandling,
+              client, botRegistry: deps.botRegistry, readMode: async (platform) => platform && deps.readBotChatSettings
+                ? resolveBotMessageHandling(await deps.readBotChatSettings(), platform)
+                : await deps.readBotMessageHandling!(),
               statePath: join(deps.botWorkHubStateDirectory, `${createHash('sha256').update(client.hostId).digest('hex')}.json`),
               onError: reportError,
               isActive: deps.isTargetActive,
